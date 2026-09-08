@@ -157,3 +157,23 @@ a {
   background: #e6f4ff;
   font-weight: 700;
 }
+
+.field-mapping-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: help;
+}
+
+.field-mapping-help {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #91caff;
+  border-radius: 50%;
+  color: #1677ff;
+  font-size: 12px;
+  font-weight: 700;
+}

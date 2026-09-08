@@ -298,8 +298,10 @@ export async function parseAiWorkbook(file: File, batch: ReviewBatch, stories: R
 
     const verdictText = cellText(row['AI判断'])
     const verdict = verdictText ? verdictByLabel[verdictText] : null
+    const confidenceText = cellText(row['置信度'])
     const confidence = confidenceNumber(row['置信度'])
     if (verdictText && !verdict) issues.push({ level: 'error', row: rowNumber, message: `非法AI判断：${verdictText}` })
+    if (verdict && confidence === null) issues.push({ level: 'error', row: rowNumber, message: `置信度必须填写 0～100 的数值或百分比，例如 80 或 80%；当前值：${confidenceText || '空'}` })
     if (confidence !== null && (confidence < 0 || confidence > 100)) issues.push({ level: 'error', row: rowNumber, message: `置信度超出范围：${confidence}` })
 
     results.push({

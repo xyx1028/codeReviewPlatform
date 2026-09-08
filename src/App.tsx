@@ -7,7 +7,6 @@ import {
   Button,
   Card,
   Col,
-  Descriptions,
   Divider,
   Empty,
   Form,
@@ -16,6 +15,7 @@ import {
   List,
   Menu,
   Modal,
+  Progress,
   Radio,
   Row,
   Select,
@@ -26,6 +26,7 @@ import {
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
   Upload,
 } from 'antd'
@@ -418,6 +419,7 @@ function SourceImportPage({ batchId, batch }: { batchId: string; batch: ReviewBa
   const [mapping, setMapping] = useState<FieldMapping>({})
   const { message } = AntApp.useApp()
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const readOnly = batch.status === 'COMPLETED'
   const storiesQuery = useQuery({ queryKey: ['stories', batchId], queryFn: () => listStories(batchId) })
   const sourceFilesQuery = useQuery({ queryKey: ['import-files', batchId, 'SOURCE'], queryFn: () => listImportFiles(batchId, 'SOURCE') })
@@ -442,6 +444,7 @@ function SourceImportPage({ batchId, batch }: { batchId: string; batch: ReviewBa
       queryClient.invalidateQueries({ queryKey: ['batch', batchId] })
       queryClient.invalidateQueries({ queryKey: ['batch-workspace', batchId] })
       queryClient.invalidateQueries({ queryKey: ['batches'] })
+      navigate(`/batches/${batchId}/ai-result`)
     },
     onError: (error) => message.error(error.message),
   })
@@ -508,8 +511,16 @@ function SourceImportPage({ batchId, batch }: { batchId: string; batch: ReviewBa
 
 function MappingForm({ headers, mapping, onChange, readOnly }: { headers: string[]; mapping: FieldMapping; onChange: (mapping: FieldMapping) => void; readOnly?: boolean }) {
   const fields = Object.keys(sourceFieldLabels) as SourceFieldKey[]
+  const title = readOnly ? '本次导入使用的字段映射' : '字段映射'
+
   return (
-    <Card title={readOnly ? '本次导入使用的字段映射' : '字段映射'}>
+    <Card
+      title={
+        <Tooltip title="用于将导入 Excel 中的列对应到系统模板的实体字段，确认后平台会按此映射解析需求数据。">
+          <span className="field-mapping-title">{title}<span className="field-mapping-help">?</span></span>
+        </Tooltip>
+      }
+    >
       <Row gutter={[16, 12]}>
         {fields.map((field) => (
           <Col xs={24} md={12} lg={8} key={field}>
@@ -564,7 +575,7 @@ function SourcePreview({ parsed }: { parsed: { stories: SourceStoryInput[]; issu
 function AiResultPage({ batchId }: { batchId: string }) {
   const [file, setFile] = useState<File | null>(null)
   const [parsed, setParsed] = useState<Awaited<ReturnType<typeof parseAiWorkbook>> | null>(null)
-  const { message } = AntApp.useApp()
+  const { message, modal } = AntApp.useApp()
   const queryClient = useQueryClient()
   const workspaceQuery = useBatchWorkspace(batchId)
   const aiImportsQuery = useQuery({ queryKey: ['ai-imports', batchId], queryFn: () => listAiImports(batchId) })
@@ -678,6 +689,16 @@ function AiResultPage({ batchId }: { batchId: string }) {
             disabled={readOnly}
             beforeUpload={async (selectedFile) => {
               const result = await parseAiWorkbook(selectedFile, workspaceQuery.data.batch, workspaceQuery.data.stories)
+              if (result.batchInfo.batch_id !== workspaceQuery.data.batch.id) {
+                setFile(null)
+                setParsed(null)
+                modal.warning({
+                  title: '导入文件与当前批次不一致',
+                  content: `当前选择的 AI 分析文件不是由批次“${workspaceQuery.data.batch.name}”导出的模板生成。请先下载当前批次的 AI 填写模板，使用该模板完成 AI 分析后再重新导入。`,
+                  okText: '重新选择文件',
+                })
+                return Upload.LIST_IGNORE
+              }
               setFile(selectedFile)
               setParsed(result)
               return false
@@ -754,10 +775,17 @@ function AiResultPage({ batchId }: { batchId: string }) {
 }
 
 function ReviewListPage({ batchId }: { batchId: string }) {
-  const [owner, setOwner] = useState('')
+  const [owner, setOwner] = useState<string | undefined>()
   const [verdict, setVerdict] = useState<string | undefined>()
   const [reviewStatus, setReviewStatus] = useState<string | undefined>()
   const workspaceQuery = useBatchWorkspace(batchId)
+  const ownerOptions = useMemo(() => {
+    const names = new Set<string>()
+    workspaceQuery.data?.stories.forEach((story) => {
+      splitOwners(story.owners_text).forEach((name) => names.add(name))
+    })
+    return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN')).map((name) => ({ value: name, label: name }))
+  }, [workspaceQuery.data])
 
   const rows = useMemo(() => {
     if (!workspaceQuery.data) return []
@@ -771,28 +799,64 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       const review = reviewsByStory.get(story.id) ?? null
       return { story, result, review, evidenceCount: result ? evidenceCountByResult.get(result.id) ?? 0 : 0 }
     }).filter((row) => {
-      const ownerMatched = owner ? row.story.owners_text.includes(owner) : true
+      const ownerMatched = owner ? splitOwners(row.story.owners_text).includes(owner) : true
       const verdictMatched = verdict ? row.result?.verdict === verdict : true
       const reviewMatched = reviewStatus === 'reviewed' ? Boolean(row.review) : reviewStatus === 'pending' ? !row.review : true
       return ownerMatched && verdictMatched && reviewMatched
     })
   }, [owner, reviewStatus, verdict, workspaceQuery.data])
 
+  const aiTagColors = { IMPLEMENTED: 'green', PARTIAL: 'orange', NOT_IMPLEMENTED: 'red', UNCERTAIN: 'default' }
+  const humanTagColors = { CORRECT: 'green', PARTIALLY_CORRECT: 'orange', INCORRECT: 'red', NEED_DISCUSSION: 'purple' }
+  const activeFilterCount = [owner, verdict, reviewStatus].filter(Boolean).length
   const columns: ColumnsType<(typeof rows)[number]> = [
-    { title: '编码', dataIndex: ['story', 'story_code'], width: 160, render: (_value, row) => <Link to={`/batches/${batchId}/reviews/${row.story.id}`}>{row.story.story_code}</Link> },
-    { title: '需求名称', dataIndex: ['story', 'story_name'] },
-    { title: '负责人', dataIndex: ['story', 'owners_text'], width: 160 },
-    { title: '应用', dataIndex: ['story', 'application_name'], width: 160, render: (value) => value || '-' },
-    { title: 'AI判断', width: 130, render: (_value, row) => row.result?.verdict ? <Tag color="blue">{aiVerdictLabels[row.result.verdict]}</Tag> : <Tag>未分析</Tag> },
-    { title: '证据', width: 90, dataIndex: 'evidenceCount' },
-    { title: '人工状态', width: 160, render: (_value, row) => row.review ? <Tag color="green">{humanReviewLabels[row.review.result]}</Tag> : <Tag color="gold">待确认</Tag> },
+    { title: '编码', dataIndex: ['story', 'story_code'], width: 150, render: (_value, row) => <Link className="review-story-code" to={`/batches/${batchId}/reviews/${row.story.id}`}>{row.story.story_code}</Link> },
+    { title: '需求名称', dataIndex: ['story', 'story_name'], width: 340 },
+    {
+      title: '负责人',
+      dataIndex: ['story', 'owners_text'],
+      width: 190,
+      render: (value) => <Space size={[4, 4]} wrap>{splitOwners(value).map((name) => <Tag key={name}>{name}</Tag>)}</Space>,
+    },
+    { title: '应用', dataIndex: ['story', 'application_name'], width: 120, render: (value) => value || '-' },
+    {
+      title: 'AI判断',
+      width: 120,
+      render: (_value, row) => row.result?.verdict
+        ? <Tag color={aiTagColors[row.result.verdict]}>{aiVerdictLabels[row.result.verdict]}</Tag>
+        : <Tag>未分析</Tag>,
+    },
+    { title: '证据', width: 90, render: (_value, row) => <Tag color={row.evidenceCount ? 'geekblue' : 'default'}>{row.evidenceCount} 条</Tag> },
+    {
+      title: '人工状态',
+      width: 150,
+      render: (_value, row) => row.review
+        ? <Tag color={humanTagColors[row.review.result]}>{humanReviewLabels[row.review.result]}</Tag>
+        : <Tag color="gold">待确认</Tag>,
+    },
   ]
 
   return (
-    <Space direction="vertical" size="large" className="page-stack">
-      <Card>
-        <Space wrap>
-          <Input.Search placeholder="按负责人筛选" allowClear onSearch={setOwner} onChange={(event) => setOwner(event.target.value)} />
+    <Space direction="vertical" size="large" className="page-stack review-list-page">
+      <Card className="review-filter-card">
+        <div className="review-filter-header">
+          <div>
+            <Text strong>筛选条件</Text>
+            <Text type="secondary" className="review-filter-summary">当前显示 {rows.length} / {workspaceQuery.data?.stories.length ?? 0} 条需求</Text>
+          </div>
+          {activeFilterCount ? <Button type="link" onClick={() => { setOwner(undefined); setVerdict(undefined); setReviewStatus(undefined) }}>清空筛选</Button> : null}
+        </div>
+        <Space wrap className="review-filter-controls">
+          <Select
+            allowClear
+            showSearch
+            placeholder="按负责人筛选"
+            className="filter-select"
+            options={ownerOptions}
+            value={owner}
+            onChange={setOwner}
+            filterOption={(input, option) => String(option?.label ?? '').includes(input)}
+          />
           <Select allowClear placeholder="AI判断" className="filter-select" options={aiVerdictOptions} value={verdict} onChange={setVerdict} />
           <Select
             allowClear
@@ -804,92 +868,171 @@ function ReviewListPage({ batchId }: { batchId: string }) {
           />
         </Space>
       </Card>
-      <Table rowKey={(row) => row.story.id} loading={workspaceQuery.isLoading} columns={columns} dataSource={rows} />
+      <Card className="review-table-card" bodyStyle={{ padding: 0 }}>
+        <Table
+          rowKey={(row) => row.story.id}
+          loading={workspaceQuery.isLoading}
+          columns={columns}
+          dataSource={rows}
+          size="middle"
+          scroll={{ x: 1120 }}
+          pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
+        />
+      </Card>
     </Space>
   )
 }
 
+type ReviewDetail = {
+  story: ReviewStory
+  aiResult: AiReviewResult | null
+  evidence: BatchWorkspace['evidence']
+  humanReview: BatchWorkspace['humanReviews'][number] | null
+  aiImport: BatchWorkspace['activeImport']
+  nextStoryId: string | null
+  reviewableIndex: number
+  reviewableTotal: number
+  readOnly: boolean
+}
+
+type HumanReviewFormValues = {
+  result: HumanReviewResult
+  comment: string
+}
+
 function ReviewDetailPage({ batchId }: { batchId: string }) {
   const { storyId } = useParams()
+  const navigate = useNavigate()
   const workspaceQuery = useBatchWorkspace(batchId)
 
-  const detail = useMemo(() => {
+  const detail = useMemo<ReviewDetail | null>(() => {
     if (!workspaceQuery.data || !storyId) return null
     const story = workspaceQuery.data.stories.find((item) => item.id === storyId)
     if (!story) return null
-    const aiResult = workspaceQuery.data.results.find((item) => item.story_id === story.id) ?? null
+
+    const resultByStory = new Map(workspaceQuery.data.results.filter((result) => result.verdict).map((result) => [result.story_id, result]))
+    const latestReviewByStory = new Map<string, BatchWorkspace['humanReviews'][number]>()
+    workspaceQuery.data.humanReviews.forEach((review) => {
+      const current = latestReviewByStory.get(review.story_id)
+      if (!current || new Date(review.reviewed_at).getTime() > new Date(current.reviewed_at).getTime()) {
+        latestReviewByStory.set(review.story_id, review)
+      }
+    })
+
+    const aiResult = resultByStory.get(story.id) ?? null
     const evidence = aiResult ? workspaceQuery.data.evidence.filter((item) => item.ai_review_result_id === aiResult.id) : []
-    const humanReview = workspaceQuery.data.humanReviews.find((item) => item.story_id === story.id && item.ai_review_result_id === aiResult?.id) ?? null
-    const nextStory = workspaceQuery.data.stories.find((item) => item.id !== story.id && !workspaceQuery.data?.humanReviews.some((review) => review.story_id === item.id)) ?? null
-    const readOnly = workspaceQuery.data.batch.status === 'COMPLETED'
-    return { story, aiResult, evidence, humanReview, nextStory, readOnly }
+    const humanReview = latestReviewByStory.get(story.id) ?? null
+    const reviewableStories = workspaceQuery.data.stories.filter((item) => resultByStory.has(item.id))
+    const reviewableIndex = reviewableStories.findIndex((item) => item.id === story.id)
+    const unreviewedStories = [...reviewableStories.slice(reviewableIndex + 1), ...reviewableStories.slice(0, reviewableIndex)]
+    const nextStoryId = unreviewedStories.find((item) => !latestReviewByStory.has(item.id))?.id ?? null
+
+    return {
+      story,
+      aiResult,
+      evidence,
+      humanReview,
+      aiImport: workspaceQuery.data.activeImport,
+      nextStoryId,
+      reviewableIndex,
+      reviewableTotal: reviewableStories.length,
+      readOnly: workspaceQuery.data.batch.status === 'COMPLETED',
+    }
   }, [storyId, workspaceQuery.data])
 
   if (workspaceQuery.isLoading) return <Spin />
   if (!detail) return <Empty description="需求不存在" />
 
   return (
-    <Row gutter={[16, 16]}>
-      <Col span={24} lg={8} className="sticky-col"><StoryCard story={detail.story} /></Col>
-      <Col span={24} lg={9}><AiResultCard result={detail.aiResult} evidence={detail.evidence} /></Col>
-      <Col span={24} lg={7} className="sticky-col">
-        <HumanReviewPanel batchId={batchId} detail={detail} readOnly={detail.readOnly} />
-      </Col>
-    </Row>
+    <div className="review-detail-page">
+      <section className="review-detail-context">
+        <div>
+          <Button type="link" className="review-detail-back" onClick={() => navigate(`/batches/${batchId}/reviews`)}>← 返回评审列表</Button>
+          <div className="review-detail-title-row">
+            <Text className="review-detail-code">{detail.story.story_code}</Text>
+            {detail.aiResult?.verdict ? <Tag color={aiVerdictColor(detail.aiResult.verdict)}>{aiVerdictLabels[detail.aiResult.verdict]}</Tag> : <Tag>未分析</Tag>}
+            {detail.humanReview ? <Tag color={humanVerdictColor(detail.humanReview.result)}>{humanReviewLabels[detail.humanReview.result]}</Tag> : <Tag color="gold">待确认</Tag>}
+          </div>
+          <Title level={4}>{detail.story.story_name}</Title>
+        </div>
+        <Text type="secondary">第 {detail.reviewableIndex >= 0 ? detail.reviewableIndex + 1 : 0} / {detail.reviewableTotal} 条可评审需求</Text>
+      </section>
+
+      <div className="review-detail-grid">
+        <div className="review-detail-story"><StoryCard story={detail.story} /></div>
+        <div className="review-detail-ai"><AiResultCard result={detail.aiResult} evidence={detail.evidence} aiImport={detail.aiImport} /></div>
+        <div className="review-detail-decision">
+          <HumanReviewPanel key={`${detail.story.id}-${detail.aiResult?.id ?? 'no-ai'}`} batchId={batchId} detail={detail} />
+        </div>
+      </div>
+    </div>
   )
 }
 
-function HumanReviewPanel({
-  batchId,
-  detail,
-  readOnly,
-}: {
-  batchId: string
-  detail: {
-    story: ReviewStory
-    aiResult: AiReviewResult | null
-    evidence: BatchWorkspace['evidence']
-    humanReview: BatchWorkspace['humanReviews'][number] | null
-    nextStory: ReviewStory | null
-  }
-  readOnly: boolean
-}) {
+function HumanReviewPanel({ batchId, detail }: { batchId: string; detail: ReviewDetail }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { message } = AntApp.useApp()
-  const [result, setResult] = useState<HumanReviewResult>(detail.humanReview?.result ?? 'CORRECT')
-  const [comment, setComment] = useState(detail.humanReview?.comment ?? '')
+  const [form] = Form.useForm<HumanReviewFormValues>()
+  const reviewIdentity = `${detail.story.id}-${detail.aiResult?.id ?? 'no-ai'}`
   const saveMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async ({ values, goNext }: { values: HumanReviewFormValues; goNext: boolean }) => {
       if (!detail.aiResult) throw new Error('当前需求还没有AI结果，不能提交人工结论')
-      return saveHumanReview(detail.story.id, detail.aiResult.id, result, comment || null)
+      await saveHumanReview(detail.story.id, detail.aiResult.id, values.result, values.comment || null)
+      return goNext
     },
-    onSuccess: () => {
+    onSuccess: async (goNext) => {
       message.success('人工结论已保存')
-      queryClient.invalidateQueries({ queryKey: ['batch-workspace', batchId] })
+      await queryClient.refetchQueries({ queryKey: ['batch-workspace', batchId] })
+      if (goNext) {
+        navigate(detail.nextStoryId ? `/batches/${batchId}/reviews/${detail.nextStoryId}` : `/batches/${batchId}/reviews`)
+      }
     },
     onError: (error) => message.error(error.message),
   })
 
+  useEffect(() => {
+    form.setFieldsValue({
+      result: detail.humanReview?.result ?? 'CORRECT',
+      comment: detail.humanReview?.comment ?? '',
+    })
+  }, [detail.humanReview?.comment, detail.humanReview?.result, form, reviewIdentity])
+
+  const submit = async (goNext: boolean) => {
+    const values = await form.validateFields()
+    saveMutation.mutate({ values, goNext })
+  }
+
   return (
-    <Card title="人工结论">
+    <Card className="review-decision-card" title="人工结论">
       <Space direction="vertical" className="page-stack">
-        {readOnly ? <Alert type="warning" showIcon title="批次已完成" description="批次完成后默认只读，人工结论已锁定。" /> : null}
+        {detail.readOnly ? <Alert type="warning" showIcon title="批次已完成" description="批次完成后默认只读，人工结论已锁定。" /> : null}
         {detail.aiResult ? (
-          <Space direction="vertical" className="page-stack">
-            <Radio.Group disabled={readOnly} value={result} onChange={(event) => setResult(event.target.value)} options={humanReviewOptions} />
-            <Input.TextArea rows={6} placeholder="补充意见" value={comment} disabled={readOnly} onChange={(event) => setComment(event.target.value)} />
-            <Space>
-              <Button type="primary" disabled={readOnly} loading={saveMutation.isPending} onClick={() => saveMutation.mutate()}>保存</Button>
-              <Button
-                disabled={readOnly}
-                loading={saveMutation.isPending}
-                onClick={() => saveMutation.mutate(undefined, { onSuccess: () => detail.nextStory && navigate(`/batches/${batchId}/reviews/${detail.nextStory.id}`) })}
-              >
-                保存并下一条
+          <>
+            <div className="review-decision-context">
+              <Text type="secondary">AI 原判断</Text>
+              <Tag color={aiVerdictColor(detail.aiResult.verdict)}>{detail.aiResult.verdict ? aiVerdictLabels[detail.aiResult.verdict] : '未分析'}</Tag>
+              {detail.humanReview ? <Text type="secondary">上次保存：{new Date(detail.humanReview.reviewed_at).toLocaleString()}</Text> : null}
+            </div>
+            <Form form={form} layout="vertical" disabled={detail.readOnly}>
+              <Form.Item name="result" label="核验结论" rules={[{ required: true, message: '请选择人工结论' }]}>
+                <Radio.Group className="review-decision-options">
+                  {humanReviewOptions.map((option) => (
+                    <Radio key={option.value} value={option.value} className="review-decision-option">{option.label}</Radio>
+                  ))}
+                </Radio.Group>
+              </Form.Item>
+              <Form.Item name="comment" label="补充意见">
+                <Input.TextArea rows={6} placeholder="记录需要补充、修正或讨论的内容" />
+              </Form.Item>
+            </Form>
+            <div className="review-decision-actions">
+              <Button block disabled={detail.readOnly} loading={saveMutation.isPending} onClick={() => submit(false)}>保存</Button>
+              <Button type="primary" block disabled={detail.readOnly} loading={saveMutation.isPending} onClick={() => submit(true)}>
+                {detail.nextStoryId ? '保存并下一条' : '保存并返回列表'}
               </Button>
-            </Space>
-          </Space>
+            </div>
+          </>
         ) : <Alert type="info" showIcon title="当前需求缺少AI结果" description="请先在AI结果管理中上传本批次结果。" />}
       </Space>
     </Card>
@@ -933,90 +1076,186 @@ function DashboardPage({ batchId }: { batchId: string }) {
   if (workspaceQuery.isLoading) return <Spin />
   if (!workspaceQuery.data) return <Empty />
 
+  const { batch, activeImport } = workspaceQuery.data
   const stats = buildStats(workspaceQuery.data)
+  const aiItems: DistributionItem[] = [
+    { label: aiVerdictLabels.IMPLEMENTED, value: stats.aiDistribution.IMPLEMENTED, color: '#16a34a' },
+    { label: aiVerdictLabels.PARTIAL, value: stats.aiDistribution.PARTIAL, color: '#f59e0b' },
+    { label: aiVerdictLabels.NOT_IMPLEMENTED, value: stats.aiDistribution.NOT_IMPLEMENTED, color: '#ef4444' },
+    { label: aiVerdictLabels.UNCERTAIN, value: stats.aiDistribution.UNCERTAIN, color: '#64748b' },
+  ]
+  const humanItems: DistributionItem[] = [
+    { label: humanReviewLabels.CORRECT, value: stats.humanDistribution.CORRECT, color: '#16a34a' },
+    { label: humanReviewLabels.PARTIALLY_CORRECT, value: stats.humanDistribution.PARTIALLY_CORRECT, color: '#f59e0b' },
+    { label: humanReviewLabels.INCORRECT, value: stats.humanDistribution.INCORRECT, color: '#ef4444' },
+    { label: humanReviewLabels.NEED_DISCUSSION, value: stats.humanDistribution.NEED_DISCUSSION, color: '#7c3aed' },
+  ]
+
   return (
-    <Space direction="vertical" size="large" className="page-stack">
-      <Row gutter={[16, 16]}>
-        <Col xs={24} md={8}><Card><Statistic title="需求总数" value={stats.total} /></Card></Col>
-        <Col xs={24} md={8}><Card><Statistic title="AI已分析" value={stats.aiDone} suffix={`/ ${stats.total}`} /></Card></Col>
-        <Col xs={24} md={8}><Card><Statistic title="人工已确认" value={stats.reviewed} suffix={`/ ${stats.aiDone}`} /></Card></Col>
-      </Row>
-      <Row gutter={[16, 16]}>
-        <Col span={24} lg={12}><DistributionCard title="AI判断分布" data={stats.aiDistribution} labels={aiVerdictLabels} /></Col>
-        <Col span={24} lg={12}><DistributionCard title="人工结论分布" data={stats.humanDistribution} labels={humanReviewLabels} /></Col>
-      </Row>
-      <Row gutter={[16, 16]}>
-        <Col span={24} lg={12}><GroupedProgress title="按负责人统计" rows={stats.byOwner} /></Col>
-        <Col span={24} lg={12}><GroupedProgress title="按应用统计" rows={stats.byApplication} /></Col>
-      </Row>
-      <Card>
-        <Space>
-          {workspaceQuery.data.batch.status === 'COMPLETED' ? (
+    <div className="dashboard-page">
+      <section className="dashboard-hero">
+        <div>
+          <div className="dashboard-eyebrow">评审进度概览</div>
+          <Title level={3}>本批次完成度</Title>
+          <Space wrap className="dashboard-hero__meta">
+            <Tag color={statusColor(batch.status)}>{batchStatusLabels[batch.status]}</Tag>
+            {activeImport ? <Text type="secondary">AI 报告 V{activeImport.version}</Text> : <Text type="secondary">尚未导入 AI 报告</Text>}
+            {activeImport?.baseline_branch ? <Text type="secondary">分支：{activeImport.baseline_branch}</Text> : null}
+            {activeImport?.baseline_commit ? <Text type="secondary">Commit：{activeImport.baseline_commit}</Text> : null}
+            {activeImport?.ai_model ? <Text type="secondary">模型：{activeImport.ai_model}</Text> : null}
+          </Space>
+        </div>
+        <div className="dashboard-hero__actions">
+          {batch.status === 'COMPLETED' ? (
             <Button loading={reopenMutation.isPending} onClick={() => reopenMutation.mutate()}>重新打开批次</Button>
           ) : (
             <Button type="primary" loading={completeMutation.isPending} onClick={() => completeMutation.mutate(false)}>完成批次</Button>
           )}
-          <Text type="secondary">完成前会检查仍未确认的 AI 结果。</Text>
-        </Space>
-      </Card>
-      <Card title="操作日志">
+          <Text type="secondary">完成前会检查待确认项。</Text>
+        </div>
+      </section>
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} md={8}>
+          <Card className="dashboard-kpi-card dashboard-kpi-card--neutral">
+            <Statistic title="需求总数" value={stats.total} />
+            <div className="dashboard-kpi-footer"><Text type="secondary">待 AI 分析 {stats.pendingAi} 条</Text></div>
+          </Card>
+        </Col>
+        <Col xs={24} md={8}>
+          <Card className="dashboard-kpi-card dashboard-kpi-card--ai">
+            <Statistic title="AI 已分析" value={stats.aiDone} suffix={`/ ${stats.total}`} />
+            <div className="dashboard-kpi-footer">
+              <Progress percent={percentage(stats.aiDone, stats.total)} showInfo={false} strokeColor="#2563eb" size="small" />
+              <Text type="secondary">覆盖率 {percentage(stats.aiDone, stats.total)}%</Text>
+            </div>
+          </Card>
+        </Col>
+        <Col xs={24} md={8}>
+          <Card className="dashboard-kpi-card dashboard-kpi-card--review">
+            <Statistic title="人工已确认" value={stats.reviewed} suffix={`/ ${stats.aiDone}`} />
+            <div className="dashboard-kpi-footer">
+              <Progress percent={percentage(stats.reviewed, stats.aiDone)} showInfo={false} strokeColor="#16a34a" size="small" />
+              <Text type="secondary">待确认 {stats.pendingReview} 条</Text>
+            </div>
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={12}><DistributionCard title="AI 判断分布" items={aiItems} total={stats.aiDone} /></Col>
+        <Col xs={24} lg={12}><DistributionCard title="人工结论分布" items={humanItems} total={stats.reviewed} /></Col>
+      </Row>
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} xl={12}><GroupedProgress title="按负责人统计" rows={stats.byOwner} note="协作需求按负责人分别计入" /></Col>
+        <Col xs={24} xl={12}><GroupedProgress title="按应用统计" rows={stats.byApplication} /></Col>
+      </Row>
+
+      <Card className="dashboard-card dashboard-log-card" title="操作日志">
         <List
           dataSource={operationLogQuery.data ?? []}
           locale={{ emptyText: '暂无完成或重新打开记录' }}
           renderItem={(item) => (
             <List.Item>
-              <Tag color={item.action === 'COMPLETE' ? 'green' : 'gold'}>{item.action === 'COMPLETE' ? '完成批次' : '重新打开'}</Tag>
-              <Text>{new Date(item.created_at).toLocaleString()}</Text>
-              {item.action === 'COMPLETE' ? <Text type="secondary">{item.forced ? `强制完成，当时仍有 ${item.pending_count ?? 0} 条未确认` : '正常完成'}</Text> : null}
+              <Space wrap>
+                <Tag color={item.action === 'COMPLETE' ? 'green' : 'gold'}>{item.action === 'COMPLETE' ? '完成批次' : '重新打开'}</Tag>
+                <Text>{new Date(item.created_at).toLocaleString()}</Text>
+                {item.action === 'COMPLETE' ? <Text type="secondary">{item.forced ? `强制完成，当时仍有 ${item.pending_count ?? 0} 条未确认` : '正常完成'}</Text> : null}
+              </Space>
             </List.Item>
           )}
         />
       </Card>
-    </Space>
+    </div>
   )
 }
 
 function StoryCard({ story }: { story: ReviewStory }) {
+  const metadata = [
+    { label: '负责人', value: story.owners_text },
+    { label: '项目', value: story.project_name },
+    { label: '应用', value: story.application_name },
+    { label: '所属云', value: story.cloud_name },
+    { label: '迭代', value: story.iteration_name },
+    { label: '发布窗口', value: story.release_window },
+    { label: '来源状态', value: story.source_status },
+  ].filter((item) => item.value)
+
   return (
-    <Card title="需求信息">
-      <Descriptions column={1} size="small">
-        <Descriptions.Item label="编码">{story.story_code}</Descriptions.Item>
-        <Descriptions.Item label="名称">{story.story_name}</Descriptions.Item>
-        <Descriptions.Item label="负责人">{story.owners_text}</Descriptions.Item>
-        <Descriptions.Item label="项目">{story.project_name || '-'}</Descriptions.Item>
-        <Descriptions.Item label="应用">{story.application_name || '-'}</Descriptions.Item>
-      </Descriptions>
+    <Card className="review-story-card" title="需求信息">
+      <div className="review-story-code-block">{story.story_code}</div>
+      <Title level={5} className="review-story-name">{story.story_name}</Title>
+      <div className="review-story-metadata">
+        {metadata.map((item) => <Tag key={item.label}>{item.label}：{item.value}</Tag>)}
+      </div>
+      {story.description ? <div className="review-story-detail"><Text strong>需求描述</Text><Text>{story.description}</Text></div> : null}
+      {story.acceptance_criteria ? <div className="review-story-detail"><Text strong>验收标准</Text><Text>{story.acceptance_criteria}</Text></div> : null}
     </Card>
   )
 }
 
-function AiResultCard({ result, evidence }: { result: AiReviewResult | null; evidence: BatchWorkspace['evidence'] }) {
-  if (!result) return <Card title="AI分析"><Empty description="未分析" /></Card>
+function AiResultCard({ result, evidence, aiImport }: { result: AiReviewResult | null; evidence: BatchWorkspace['evidence']; aiImport: BatchWorkspace['activeImport'] }) {
+  if (!result) return <Card className="review-ai-card" title="AI分析"><Empty description="未分析" /></Card>
+
+  const sections = [
+    { title: '已实现内容', value: result.implemented_content, tone: 'success' },
+    { title: '缺失内容', value: result.missing_content, tone: 'warning' },
+    { title: '风险', value: result.risks, tone: 'danger' },
+    { title: '建议测试点', value: result.test_points, tone: 'info' },
+    { title: 'AI 备注', value: result.ai_remark, tone: 'neutral' },
+  ].filter((section) => section.value)
+  const evidenceGroups = ['现有实现', '缺失依据', '风险依据'].map((type) => ({
+    type,
+    items: evidence.filter((item) => item.evidence_type === type),
+  })).filter((group) => group.items.length)
+
   return (
-    <Card title="AI分析">
-      <Descriptions column={1} size="small">
-        <Descriptions.Item label="AI判断">{result.verdict ? aiVerdictLabels[result.verdict] : '未分析'}</Descriptions.Item>
-        <Descriptions.Item label="置信度">{result.confidence ?? '-'}</Descriptions.Item>
-        <Descriptions.Item label="分析摘要">{result.summary || '-'}</Descriptions.Item>
-        <Descriptions.Item label="已实现内容">{result.implemented_content || '-'}</Descriptions.Item>
-        <Descriptions.Item label="缺失内容">{result.missing_content || '-'}</Descriptions.Item>
-        <Descriptions.Item label="风险">{result.risks || '-'}</Descriptions.Item>
-        <Descriptions.Item label="建议测试点">{result.test_points || '-'}</Descriptions.Item>
-      </Descriptions>
+    <Card className="review-ai-card" title="AI分析">
+      <div className="review-ai-summary">
+        <div>
+          <Text type="secondary">AI 判断</Text>
+          <div className="review-ai-verdict"><Tag color={aiVerdictColor(result.verdict)}>{result.verdict ? aiVerdictLabels[result.verdict] : '未分析'}</Tag></div>
+        </div>
+        <div className="review-ai-confidence">
+          <Text type="secondary">置信度</Text>
+          {result.confidence === null ? <Text type="secondary">未填写</Text> : <><Progress percent={result.confidence} size="small" strokeColor="#2563eb" /><Text>{result.confidence}%</Text></>}
+        </div>
+        {aiImport ? <div className="review-ai-baseline"><Text type="secondary">分析基线</Text><Text>{aiImport.baseline_branch || '-'} {aiImport.baseline_commit ? `· ${aiImport.baseline_commit.slice(0, 8)}` : ''}</Text>{aiImport.ai_model ? <Text type="secondary">{aiImport.ai_model}</Text> : null}</div> : null}
+      </div>
+
+      <div className="review-ai-highlight">
+        <Text strong>分析摘要</Text>
+        <Text>{result.summary || '暂无摘要'}</Text>
+      </div>
+
+      <div className="review-ai-sections">
+        {sections.map((section) => (
+          <section key={section.title} className={`review-ai-section review-ai-section--${section.tone}`}>
+            <Text strong>{section.title}</Text>
+            <Text>{section.value}</Text>
+          </section>
+        ))}
+      </div>
+
       <Divider />
-      <List
-        header="代码证据"
-        dataSource={evidence}
-        locale={{ emptyText: '暂无代码证据' }}
-        renderItem={(item) => (
-          <List.Item>
-            <List.Item.Meta
-              title={<Text className="evidence-title">{item.repository_name} / {item.file_path}</Text>}
-              description={<Text type="secondary" className="evidence-description">{`${item.evidence_type}：${item.description}${item.start_line ? `（${item.start_line}-${item.end_line ?? item.start_line}行）` : ''}`}</Text>}
-            />
-          </List.Item>
-        )}
-      />
+      <div className="review-evidence-heading"><Text strong>代码证据</Text><Text type="secondary">{evidence.length} 条</Text></div>
+      {evidenceGroups.length ? evidenceGroups.map((group) => (
+        <section key={group.type} className="review-evidence-group">
+          <Tag color={evidenceTypeColor(group.type)}>{group.type}</Tag>
+          {group.items.map((item) => (
+            <div key={item.id} className="review-evidence-item">
+              <div className="review-evidence-item__title"><Text strong>{item.repository_name}</Text><Text className="evidence-title">{item.file_path}</Text></div>
+              <div className="review-evidence-item__meta">
+                {item.commit_sha ? <Tag>{item.commit_sha.slice(0, 8)}</Tag> : null}
+                {item.symbol_name ? <Tag>{item.symbol_name}</Tag> : null}
+                {item.start_line ? <Text type="secondary">{item.start_line}{item.end_line ? ` - ${item.end_line}` : ''} 行</Text> : null}
+              </div>
+              <Text type="secondary" className="evidence-description">{item.description}</Text>
+            </div>
+          ))}
+        </section>
+      )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无代码证据" />}
     </Card>
   )
 }
@@ -1049,28 +1288,99 @@ function PageTitle({ title, extra }: { title: string; extra?: ReactNode }) {
   )
 }
 
-function DistributionCard<T extends string>({ title, data, labels }: { title: string; data: Record<T, number>; labels: Record<T, string> }) {
+type DashboardGroup = {
+  name: string
+  total: number
+  aiDone: number
+  reviewed: number
+  pendingAi: number
+  pendingReview: number
+}
+
+type DistributionItem = {
+  label: string
+  value: number
+  color: string
+}
+
+function splitOwners(ownersText: string) {
+  const owners = ownersText.split(/[，,、；;]/).map((name) => name.trim()).filter(Boolean)
+  return [...new Set(owners.length ? owners : ['未分配'])]
+}
+
+function percentage(value: number, total: number) {
+  return total ? Math.round((value / total) * 100) : 0
+}
+
+function aiVerdictColor(verdict: AiReviewResult['verdict']) {
+  if (verdict === 'IMPLEMENTED') return 'green'
+  if (verdict === 'PARTIAL') return 'orange'
+  if (verdict === 'NOT_IMPLEMENTED') return 'red'
+  return 'default'
+}
+
+function humanVerdictColor(verdict: HumanReviewResult) {
+  if (verdict === 'CORRECT') return 'green'
+  if (verdict === 'PARTIALLY_CORRECT') return 'orange'
+  if (verdict === 'INCORRECT') return 'red'
+  return 'purple'
+}
+
+function evidenceTypeColor(type: string) {
+  if (type === '现有实现') return 'green'
+  if (type === '缺失依据') return 'orange'
+  return 'red'
+}
+
+function DistributionCard({ title, items, total }: { title: string; items: DistributionItem[]; total: number }) {
   return (
-    <Card title={title}>
-      <Space wrap>
-        {(Object.entries(labels) as [T, string][]).map(([key, label]) => <Tag key={key}>{label}: {data[key] ?? 0}</Tag>)}
-      </Space>
+    <Card className="dashboard-card dashboard-distribution-card" title={title}>
+      <div className="dashboard-distribution-grid">
+        {items.map((item) => (
+          <div key={item.label} className="dashboard-distribution-item" style={{ borderInlineStartColor: item.color }}>
+            <Text type="secondary">{item.label}</Text>
+            <div className="dashboard-distribution-value">{item.value}</div>
+            <Text type="secondary">{percentage(item.value, total)}%</Text>
+          </div>
+        ))}
+      </div>
     </Card>
   )
 }
 
-function GroupedProgress({ title, rows }: { title: string; rows: { name: string; total: number; reviewed: number }[] }) {
+function GroupedProgress({ title, rows, note }: { title: string; rows: DashboardGroup[]; note?: string }) {
   return (
-    <Card title={title}>
+    <Card className="dashboard-card" title={<div className="dashboard-card-heading">{title}{note ? <Text type="secondary" className="dashboard-card-note">{note}</Text> : null}</div>}>
       <Table
         size="small"
         rowKey="name"
         pagination={false}
+        scroll={{ x: 680 }}
         dataSource={rows}
         columns={[
-          { title: '名称', dataIndex: 'name' },
-          { title: '总数', dataIndex: 'total', width: 90 },
-          { title: '已确认', dataIndex: 'reviewed', width: 90 },
+          { title: '名称', dataIndex: 'name', width: 180 },
+          { title: '总数', dataIndex: 'total', width: 72 },
+          {
+            title: 'AI 分析进度',
+            width: 170,
+            render: (_value, row: DashboardGroup) => (
+              <div className="dashboard-progress-cell">
+                <Progress percent={percentage(row.aiDone, row.total)} showInfo={false} strokeColor="#2563eb" size="small" />
+                <Text type="secondary">{row.aiDone} / {row.total}</Text>
+              </div>
+            ),
+          },
+          {
+            title: '人工确认进度',
+            width: 170,
+            render: (_value, row: DashboardGroup) => (
+              <div className="dashboard-progress-cell">
+                <Progress percent={percentage(row.reviewed, row.aiDone)} showInfo={false} strokeColor="#16a34a" size="small" />
+                <Text type="secondary">{row.reviewed} / {row.aiDone}</Text>
+              </div>
+            ),
+          },
+          { title: '待处理', width: 84, render: (_value, row: DashboardGroup) => row.pendingAi + row.pendingReview },
         ]}
       />
     </Card>
@@ -1078,38 +1388,60 @@ function GroupedProgress({ title, rows }: { title: string; rows: { name: string;
 }
 
 function buildStats(workspace: BatchWorkspace) {
-  const resultByStory = new Map(workspace.results.map((result) => [result.story_id, result]))
-  const reviewByStory = new Map(workspace.humanReviews.map((review) => [review.story_id, review]))
+  const resultByStory = new Map(workspace.results.filter((result) => result.verdict).map((result) => [result.story_id, result]))
+  const latestReviewByStory = new Map<string, BatchWorkspace['humanReviews'][number]>()
+  workspace.humanReviews.forEach((review) => {
+    const current = latestReviewByStory.get(review.story_id)
+    if (!current || new Date(review.reviewed_at).getTime() > new Date(current.reviewed_at).getTime()) {
+      latestReviewByStory.set(review.story_id, review)
+    }
+  })
+
   const aiDistribution = { IMPLEMENTED: 0, PARTIAL: 0, NOT_IMPLEMENTED: 0, UNCERTAIN: 0 }
   const humanDistribution = { CORRECT: 0, PARTIALLY_CORRECT: 0, INCORRECT: 0, NEED_DISCUSSION: 0 }
-  const grouped = new Map<string, { name: string; total: number; reviewed: number }>()
-  const groupedApp = new Map<string, { name: string; total: number; reviewed: number }>()
+  const owners = new Map<string, DashboardGroup>()
+  const applications = new Map<string, DashboardGroup>()
 
-  workspace.results.forEach((result) => {
+  resultByStory.forEach((result) => {
     if (result.verdict) aiDistribution[result.verdict] += 1
   })
-  workspace.humanReviews.forEach((review) => { humanDistribution[review.result] += 1 })
+  latestReviewByStory.forEach((review) => { humanDistribution[review.result] += 1 })
+
   workspace.stories.forEach((story) => {
-    const reviewed = reviewByStory.has(story.id) ? 1 : 0
-    addGrouped(grouped, story.owners_text || '未分配', reviewed)
-    addGrouped(groupedApp, story.application_name || '未填写应用', reviewed)
+    const aiDone = resultByStory.has(story.id)
+    const reviewed = latestReviewByStory.has(story.id)
+    splitOwners(story.owners_text).forEach((owner) => addGrouped(owners, owner, aiDone, reviewed))
+    addGrouped(applications, story.application_name || '未填写应用', aiDone, reviewed)
   })
 
+  const sortGroups = (groups: DashboardGroup[]) => groups.sort((a, b) => {
+    const pendingDiff = (b.pendingAi + b.pendingReview) - (a.pendingAi + a.pendingReview)
+    return pendingDiff || b.total - a.total || a.name.localeCompare(b.name, 'zh-CN')
+  })
+
+  const total = workspace.stories.length
+  const aiDone = resultByStory.size
+  const reviewed = latestReviewByStory.size
   return {
-    total: workspace.stories.length,
-    aiDone: workspace.stories.filter((story) => resultByStory.has(story.id)).length,
-    reviewed: workspace.humanReviews.length,
+    total,
+    aiDone,
+    reviewed,
+    pendingAi: total - aiDone,
+    pendingReview: aiDone - reviewed,
     aiDistribution,
     humanDistribution,
-    byOwner: [...grouped.values()],
-    byApplication: [...groupedApp.values()],
+    byOwner: sortGroups([...owners.values()]),
+    byApplication: sortGroups([...applications.values()]),
   }
 }
 
-function addGrouped(map: Map<string, { name: string; total: number; reviewed: number }>, name: string, reviewed: number) {
-  const current = map.get(name) ?? { name, total: 0, reviewed: 0 }
+function addGrouped(map: Map<string, DashboardGroup>, name: string, aiDone: boolean, reviewed: boolean) {
+  const current = map.get(name) ?? { name, total: 0, aiDone: 0, reviewed: 0, pendingAi: 0, pendingReview: 0 }
   current.total += 1
-  current.reviewed += reviewed
+  if (aiDone) current.aiDone += 1
+  else current.pendingAi += 1
+  if (reviewed) current.reviewed += 1
+  else if (aiDone) current.pendingReview += 1
   map.set(name, current)
 }
 
