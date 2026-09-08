@@ -56,7 +56,7 @@ import {
   onAuthChange,
   reopenBatch,
   saveHumanReview,
-  setActiveAiImport,
+  setBatchDefaultBranch,
   signIn,
   signOut,
   signUp,
@@ -65,16 +65,20 @@ import {
 import type { CreateBatchInput } from './lib/api'
 import { downloadAiTemplate, inferFieldMapping, parseAiWorkbook, parseSourceRows, readFirstSheet, sourceFieldLabels, templateVersion } from './lib/excel'
 import type { FieldMapping, SourceFieldKey } from './lib/excel'
+import { parseBaselineCommit } from './lib/baseline'
 import { hashFile } from './lib/hash'
 import { aiVerdictLabels, aiVerdictOptions, batchStatusLabels, humanReviewLabels, humanReviewOptions } from './lib/labels'
 import { aiFillPrompt } from './lib/prompt'
 import { supabaseConfigured } from './lib/supabase'
 import type {
   AdminUserListItem,
+  AiImportRecord,
   AiReviewResult,
   AiVerdict,
+  BaselineCommit,
   BatchStatus,
   BatchWorkspace,
+  DefaultBranch,
   HumanReviewResult,
   ReviewBatch,
   ReviewStory,
@@ -88,6 +92,16 @@ const { Header, Content, Sider } = Layout
 const { Title, Text, Paragraph } = Typography
 
 type AuthMode = 'sign-in' | 'sign-up'
+
+const defaultBranchOptions: { value: DefaultBranch; label: DefaultBranch }[] = [
+  { value: 'feature_dev', label: 'feature_dev' },
+  { value: 'feature_sit', label: 'feature_sit' },
+  { value: 'release', label: 'release' },
+]
+
+function isSupportedDefaultBranch(branch: string | null): branch is DefaultBranch {
+  return branch === 'feature_dev' || branch === 'feature_sit' || branch === 'release'
+}
 
 function issueColor(level: ValidationIssue['level']) {
   if (level === 'error') return 'red'
@@ -199,7 +213,7 @@ function Shell({ session }: { session: Session }) {
   const canManageBatch = (batch: ReviewBatch) => role === 'ADMIN' || (role === 'REVIEWER' && batch.created_by === session.user.id)
   const selectedKey = location.pathname.startsWith('/users') ? '/users' : '/batches'
   const menuItems = [
-    { key: '/batches', label: <Link to="/batches">批次列表</Link> },
+    { key: '/batches', label: <Link to="/batches">代码评审</Link> },
     ...(isAdmin ? [{ key: '/users', label: <Link to="/users">用户管理</Link> }] : []),
   ]
 
@@ -367,8 +381,8 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
           <Form.Item name="week_code" label="周标识" rules={[{ required: true, message: '请输入周标识' }]}>
             <Input placeholder="2026-W36" />
           </Form.Item>
-          <Form.Item name="default_branch" label="默认代码基线分支">
-            <Input placeholder="master / feature_dev" />
+          <Form.Item name="default_branch" label="默认代码基线分支" rules={[{ required: true, message: '请选择默认代码基线分支' }]}>
+            <Select placeholder="选择代码基线分支" options={defaultBranchOptions} />
           </Form.Item>
           <Form.Item name="remark" label="备注">
             <Input.TextArea rows={3} />
@@ -580,22 +594,30 @@ function SourcePreview({ parsed }: { parsed: { stories: SourceStoryInput[]; issu
 function AiResultPage({ batchId, canManage }: { batchId: string; canManage: boolean }) {
   const [file, setFile] = useState<File | null>(null)
   const [parsed, setParsed] = useState<Awaited<ReturnType<typeof parseAiWorkbook>> | null>(null)
+  const [defaultBranch, setDefaultBranch] = useState<DefaultBranch>()
   const { message, modal } = AntApp.useApp()
   const queryClient = useQueryClient()
   const workspaceQuery = useBatchWorkspace(batchId)
   const aiImportsQuery = useQuery({ queryKey: ['ai-imports', batchId], queryFn: () => listAiImports(batchId) })
-  const setActiveMutation = useMutation({
-    mutationFn: setActiveAiImport,
+  const setDefaultBranchMutation = useMutation({
+    mutationFn: () => {
+      if (!defaultBranch) throw new Error('请选择代码基线分支')
+      return setBatchDefaultBranch(batchId, defaultBranch)
+    },
     onSuccess: () => {
-      message.success('生效版本已切换')
+      message.success('代码基线分支已设置')
       queryClient.invalidateQueries({ queryKey: ['batch-workspace', batchId] })
       queryClient.invalidateQueries({ queryKey: ['batch', batchId] })
+      queryClient.invalidateQueries({ queryKey: ['batches'] })
     },
     onError: (error) => message.error(error.message),
   })
   const importMutation = useMutation({
     mutationFn: async () => {
       if (!file || !parsed || !workspaceQuery.data) throw new Error('请先上传并解析AI结果文件')
+      const { baseline_branch: baselineBranch, baseline_commit: baselineCommit, ai_model: aiModel } = parsed.batchInfo
+      if (!baselineBranch || !baselineCommit || !aiModel || !parsed.analyzedAt) throw new Error('批次信息中的基线元数据未通过校验')
+
       const fileHash = await hashFile(file)
       const existingFile = await findImportFileByHash(batchId, 'AI_RESULT', fileHash)
       if (existingFile) throw new Error('该AI结果文件已导入，请不要重复上传')
@@ -606,10 +628,10 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
         storagePath,
         fileHash,
         templateVersion,
-        baselineBranch: parsed.batchInfo.baseline_branch || null,
-        baselineCommit: parsed.batchInfo.baseline_commit || null,
-        aiModel: parsed.batchInfo.ai_model || null,
-        analyzedAt: parsed.batchInfo.analyzed_at ? new Date(parsed.batchInfo.analyzed_at).toISOString() : null,
+        baselineBranch,
+        baselineCommit,
+        aiModel,
+        analyzedAt: parsed.analyzedAt,
         results: parsed.results,
         evidence: parsed.evidence,
       })
@@ -635,9 +657,20 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
   return (
     <Space direction="vertical" size="large" className="page-stack">
       {readOnly ? <Alert type="warning" showIcon title={canManage ? '批次已完成' : '无管理权限'} description={canManage ? '批次完成后默认只读，如需继续导入或切换生效版本请先在统计看板重新打开批次。' : '只有管理员或该批次的创建者可以管理 AI 结果。'} /> : null}
+      {!isSupportedDefaultBranch(workspaceQuery.data.batch.default_branch) && !alreadyImportedAi ? (
+        <Card>
+          <Alert type="info" showIcon title="请先设置代码基线分支" description="该历史批次尚未配置受支持的分支。设置后可下载 AI 模板；导入 AI 结果后不能再修改。" />
+          <Space className="select-with-margin" wrap>
+            <Select placeholder="选择代码基线分支" options={defaultBranchOptions} value={defaultBranch} onChange={setDefaultBranch} disabled={readOnly} />
+            <Button type="primary" disabled={readOnly || !defaultBranch} loading={setDefaultBranchMutation.isPending} onClick={() => setDefaultBranchMutation.mutate()}>
+              保存分支
+            </Button>
+          </Space>
+        </Card>
+      ) : null}
       <Card>
         <Space wrap>
-          <Button type="primary" disabled={!workspaceQuery.data.stories.length} onClick={() => downloadAiTemplate(workspaceQuery.data.batch, workspaceQuery.data.stories)}>
+          <Button type="primary" disabled={!workspaceQuery.data.stories.length || !isSupportedDefaultBranch(workspaceQuery.data.batch.default_branch)} onClick={() => downloadAiTemplate(workspaceQuery.data.batch, workspaceQuery.data.stories)}>
             下载AI填写模板
           </Button>
           <Text type="secondary">模板包含批次信息、需求评审、代码证据三个 Sheet。</Text>
@@ -691,7 +724,7 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
           <Upload.Dragger
             accept=".xlsx,.xls"
             maxCount={1}
-            disabled={readOnly}
+            disabled={readOnly || !isSupportedDefaultBranch(workspaceQuery.data.batch.default_branch)}
             beforeUpload={async (selectedFile) => {
               const result = await parseAiWorkbook(selectedFile, workspaceQuery.data.batch, workspaceQuery.data.stories)
               if (result.batchInfo.batch_id !== workspaceQuery.data.batch.id) {
@@ -745,31 +778,19 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
           columns={[
             { title: '版本', dataIndex: 'version', width: 90, render: (version) => `V${version}` },
             { title: '生效状态', dataIndex: 'is_active', width: 120, render: (active) => active ? <Tag color="green">当前生效</Tag> : <Tag>历史版本</Tag> },
-            { title: '基线分支', dataIndex: 'baseline_branch', render: (value) => value || '-' },
-            { title: 'Commit', dataIndex: 'baseline_commit', render: (value) => value || '-' },
-            { title: 'AI模型', dataIndex: 'ai_model', render: (value) => value || '-' },
+            { title: '分析基线', render: (_value, record) => <BaselineImportDetails aiImport={record} /> },
             { title: '导入时间', dataIndex: 'created_at', render: (value) => new Date(value).toLocaleString() },
             {
               title: '操作',
-              width: 220,
+              width: 120,
               render: (_value, record) => (
-                <Space>
-                  <Button
-                    size="small"
-                    disabled={readOnly || record.is_active}
-                    loading={setActiveMutation.isPending}
-                    onClick={() => setActiveMutation.mutate(record.id)}
-                  >
-                    设为生效
-                  </Button>
-                  <Button
-                    size="small"
-                    disabled={!record.import_file?.storage_path}
-                    onClick={() => record.import_file && downloadStorageFile(record.import_file.storage_path)}
-                  >
-                    下载文件
-                  </Button>
-                </Space>
+                <Button
+                  size="small"
+                  disabled={!record.import_file?.storage_path}
+                  onClick={() => record.import_file && downloadStorageFile(record.import_file.storage_path)}
+                >
+                  下载文件
+                </Button>
               ),
             },
           ]}
@@ -1142,19 +1163,18 @@ function DashboardPage({ batchId, canManage }: { batchId: string; canManage: boo
           <Space wrap className="dashboard-hero__meta">
             <Tag color={statusColor(batch.status)}>{batchStatusLabels[batch.status]}</Tag>
             {activeImport ? <Text type="secondary">AI 报告 V{activeImport.version}</Text> : <Text type="secondary">尚未导入 AI 报告</Text>}
-            {activeImport?.baseline_branch ? <Text type="secondary">分支：{activeImport.baseline_branch}</Text> : null}
-            {activeImport?.baseline_commit ? <Text type="secondary">Commit：{activeImport.baseline_commit}</Text> : null}
-            {activeImport?.ai_model ? <Text type="secondary">模型：{activeImport.ai_model}</Text> : null}
           </Space>
+          {activeImport ? <BaselineImportDetails aiImport={activeImport} /> : null}
         </div>
         {canManage ? (
           <div className="dashboard-hero__actions">
             {batch.status === 'COMPLETED' ? (
-              <Button loading={reopenMutation.isPending} onClick={() => reopenMutation.mutate()}>重新打开批次</Button>
+              <Button size="large" loading={reopenMutation.isPending} onClick={() => reopenMutation.mutate()}>重新打开批次</Button>
             ) : (
-              <Button type="primary" loading={completeMutation.isPending} onClick={() => completeMutation.mutate(false)}>完成批次</Button>
+              <Tooltip title="完成前会检查待确认项">
+                <Button type="primary" size="large" loading={completeMutation.isPending} onClick={() => completeMutation.mutate(false)}>完成批次</Button>
+              </Tooltip>
             )}
-            <Text type="secondary">完成前会检查待确认项。</Text>
           </div>
         ) : null}
       </section>
@@ -1265,7 +1285,7 @@ function AiResultCard({ result, evidence, aiImport }: { result: AiReviewResult |
           <Text type="secondary">置信度</Text>
           {result.confidence === null ? <Text type="secondary">未填写</Text> : <><Progress percent={result.confidence} size="small" strokeColor="#2563eb" /><Text>{result.confidence}%</Text></>}
         </div>
-        {aiImport ? <div className="review-ai-baseline"><Text type="secondary">分析基线</Text><Text>{aiImport.baseline_branch || '-'} {aiImport.baseline_commit ? `· ${aiImport.baseline_commit.slice(0, 8)}` : ''}</Text>{aiImport.ai_model ? <Text type="secondary">{aiImport.ai_model}</Text> : null}</div> : null}
+        {aiImport ? <div className="review-ai-baseline"><Text type="secondary">分析基线</Text><BaselineImportDetails aiImport={aiImport} /></div> : null}
       </div>
 
       <div className="review-ai-highlight">
@@ -1355,6 +1375,52 @@ function splitOwners(ownersText: string) {
 
 function applicationGroupName(story: ReviewStory) {
   return story.application_name || '未填写应用'
+}
+
+function BaselineMetaChip({ label, value, tone, mono = false }: { label: string; value: string; tone?: 'warning'; mono?: boolean }) {
+  return (
+    <span className={`baseline-chip${tone ? ` baseline-chip--${tone}` : ''}`}>
+      <span className="baseline-chip__label">{label}</span>
+      <span className={`baseline-chip__value${mono ? ' baseline-chip__value--mono' : ''}`}>{value}</span>
+    </span>
+  )
+}
+
+function BaselineCommitChips({ metadata }: { metadata: BaselineCommit }) {
+  if (!metadata.commits.length) return null
+
+  return (
+    <div className="baseline-meta__row">
+      {metadata.commits.map((commit) => (
+        <Tooltip key={`${commit.repository}-${commit.sha}`} title={commit.subject ? `${commit.sha}\n${commit.subject}` : commit.sha}>
+          <span>
+            <BaselineMetaChip label={commit.repository} value={commit.sha.slice(0, 8)} mono />
+          </span>
+        </Tooltip>
+      ))}
+    </div>
+  )
+}
+
+function BaselineImportDetails({ aiImport }: { aiImport: AiImportRecord }) {
+  const metadata = parseBaselineCommit(aiImport.baseline_commit)
+  const branchMismatch = Boolean(metadata && metadata.actual_branch !== aiImport.baseline_branch)
+
+  return (
+    <div className="baseline-meta">
+      <div className="baseline-meta__row">
+        <BaselineMetaChip label="配置分支" value={aiImport.baseline_branch || '-'} />
+        {metadata ? <BaselineMetaChip label="实际分支" value={metadata.actual_branch} tone={branchMismatch ? 'warning' : undefined} /> : null}
+        <BaselineMetaChip label="模型" value={aiImport.ai_model || '-'} />
+        <BaselineMetaChip label="分析时间" value={aiImport.analyzed_at ? new Date(aiImport.analyzed_at).toLocaleString() : '-'} />
+      </div>
+      {metadata ? (
+        <BaselineCommitChips metadata={metadata} />
+      ) : aiImport.baseline_commit ? (
+        <Text type="secondary" className="baseline-meta__raw">{aiImport.baseline_commit}</Text>
+      ) : null}
+    </div>
+  )
 }
 
 function percentage(value: number, total: number) {

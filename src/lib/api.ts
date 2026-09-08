@@ -9,6 +9,7 @@ import type {
   AiReviewResult,
   BatchOperationLog,
   BatchWorkspace,
+  DefaultBranch,
   HumanReview,
   HumanReviewResult,
   ImportFileRecord,
@@ -23,7 +24,7 @@ import type {
 export interface CreateBatchInput {
   name: string
   week_code: string
-  default_branch?: string | null
+  default_branch: DefaultBranch
   remark?: string | null
 }
 
@@ -33,10 +34,10 @@ export interface ConfirmAiImportInput {
   storagePath: string
   fileHash: string
   templateVersion: string
-  baselineBranch: string | null
-  baselineCommit: string | null
-  aiModel: string | null
-  analyzedAt: string | null
+  baselineBranch: string
+  baselineCommit: string
+  aiModel: string
+  analyzedAt: string
   results: unknown[]
   evidence: AiEvidenceInput[]
 }
@@ -118,6 +119,15 @@ export async function createBatch(input: CreateBatchInput) {
     .select('*')
     .single()
   return unwrap<ReviewBatch>({ data, error })
+}
+
+export async function setBatchDefaultBranch(batchId: string, defaultBranch: DefaultBranch) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('set_review_batch_default_branch', {
+    p_batch_id: batchId,
+    p_default_branch: defaultBranch,
+  })
+  return unwrap<string>({ data, error })
 }
 
 export async function listBatches() {
@@ -291,12 +301,6 @@ export async function confirmAiResultImport(input: ConfirmAiImportInput) {
     p_results: input.results,
     p_evidence: input.evidence,
   })
-  return unwrap<string>({ data, error })
-}
-
-export async function setActiveAiImport(aiImportRecordId: string) {
-  const client = requireSupabase()
-  const { data, error } = await client.rpc('set_active_ai_import', { p_ai_import_record_id: aiImportRecordId })
   return unwrap<string>({ data, error })
 }
 

@@ -10,6 +10,19 @@ export type ImportFileType = 'SOURCE' | 'AI_RESULT' | 'TEMPLATE'
 
 export type EvidenceType = '现有实现' | '缺失依据' | '风险依据'
 
+export type DefaultBranch = 'feature_dev' | 'feature_sit' | 'release'
+
+export interface BaselineCommitEntry {
+  repository: string
+  sha: string
+  subject?: string
+}
+
+export interface BaselineCommit {
+  actual_branch: string
+  commits: BaselineCommitEntry[]
+}
+
 export interface UserProfile {
   id: string
   display_name: string | null
