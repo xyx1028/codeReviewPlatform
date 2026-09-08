@@ -192,7 +192,10 @@ function Shell({ session }: { session: Session }) {
     onError: (error) => message.error(error.message),
   })
 
-  const isAdmin = profileQuery.data?.role === 'ADMIN'
+  const role = profileQuery.data?.role
+  const isAdmin = role === 'ADMIN'
+  const canCreateBatch = role === 'ADMIN' || role === 'REVIEWER'
+  const canManageBatch = (batch: ReviewBatch) => role === 'ADMIN' || (role === 'REVIEWER' && batch.created_by === session.user.id)
   const selectedKey = location.pathname.startsWith('/users') ? '/users' : '/batches'
   const menuItems = [
     { key: '/batches', label: <Link to="/batches">批次列表</Link> },
@@ -208,7 +211,7 @@ function Shell({ session }: { session: Session }) {
         </div>
         <Space>
           <Tag color={profileQuery.data?.role === 'ADMIN' ? 'green' : 'blue'}>{profileQuery.data?.role ?? '未配置角色'}</Tag>
-          {profileQuery.data?.role !== 'ADMIN' ? (
+          {role === 'REVIEWER' ? (
             <Button size="small" onClick={() => claimAdminMutation.mutate()} loading={claimAdminMutation.isPending}>
               申领初始管理员
             </Button>
@@ -228,9 +231,9 @@ function Shell({ session }: { session: Session }) {
         <Content className="app-content">
           <Routes>
             <Route path="/" element={<Navigate to="/batches" replace />} />
-            <Route path="/batches" element={<BatchesPage />} />
+            <Route path="/batches" element={<BatchesPage canCreateBatch={canCreateBatch} canManageBatch={canManageBatch} />} />
             <Route path="/users" element={<AdminUsersPage isAdmin={isAdmin} />} />
-            <Route path="/batches/:batchId/*" element={<BatchPage />} />
+            <Route path="/batches/:batchId/*" element={<BatchPage canManageBatch={canManageBatch} />} />
             <Route path="*" element={<Navigate to="/batches" replace />} />
           </Routes>
         </Content>
@@ -287,14 +290,14 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
     <Space direction="vertical" size="large" className="page-stack">
       <PageTitle title="用户管理" />
       <Card>
-        <Alert type="info" showIcon title="角色说明" description="管理员可以创建批次、导入文件、完成/重开批次并管理用户；审核者用于提交人工结论；查看者只查看数据。" />
+        <Alert type="info" showIcon title="角色说明" description="管理员可以管理所有批次并管理用户；审核者可以创建和管理自己创建的批次；查看者只查看数据。" />
       </Card>
       <Table rowKey="id" loading={usersQuery.isLoading} columns={columns} dataSource={usersQuery.data ?? []} />
     </Space>
   )
 }
 
-function BatchesPage() {
+function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boolean; canManageBatch: (batch: ReviewBatch) => boolean }) {
   const [open, setOpen] = useState(false)
   const [form] = Form.useForm<CreateBatchInput>()
   const navigate = useNavigate()
@@ -330,7 +333,7 @@ function BatchesPage() {
     {
       title: '操作',
       width: 100,
-      render: (_value, record) => (
+      render: (_value, record) => canManageBatch(record) ? (
         <Button
           danger
           size="small"
@@ -347,13 +350,13 @@ function BatchesPage() {
         >
           删除
         </Button>
-      ),
+      ) : null,
     },
   ]
 
   return (
     <Space direction="vertical" size="large" className="page-stack">
-      <PageTitle title="批次列表" extra={<Button type="primary" onClick={() => setOpen(true)}>创建批次</Button>} />
+      <PageTitle title="批次列表" extra={canCreateBatch ? <Button type="primary" onClick={() => setOpen(true)}>创建批次</Button> : null} />
       <Table rowKey="id" loading={batchesQuery.isLoading} columns={columns} dataSource={batchesQuery.data ?? []} />
       <Modal title="创建每周评审批次" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={createMutation.isPending}>
         <Form form={form} layout="vertical" onFinish={(values) => createMutation.mutate(values)}>
@@ -375,7 +378,7 @@ function BatchesPage() {
   )
 }
 
-function BatchPage() {
+function BatchPage({ canManageBatch }: { canManageBatch: (batch: ReviewBatch) => boolean }) {
   const { batchId } = useParams()
   const batchQuery = useQuery({ queryKey: ['batch', batchId], enabled: Boolean(batchId), queryFn: () => getBatch(batchId!) })
   const location = useLocation()
@@ -385,6 +388,7 @@ function BatchPage() {
   if (batchQuery.isLoading) return <Spin />
   if (!batchQuery.data) return <Empty description="批次不存在" />
 
+  const canManage = canManageBatch(batchQuery.data)
   const tabs = [
     { key: 'dashboard', label: '统计看板' },
     { key: 'import', label: '原始需求导入' },
@@ -402,17 +406,17 @@ function BatchPage() {
       <Tabs activeKey={activeKey} items={tabs} onChange={(key) => navigate(`/batches/${batchId}/${key}`)} />
       <Routes>
         <Route path="/" element={<Navigate to="dashboard" replace />} />
-        <Route path="dashboard" element={<DashboardPage batchId={batchId} />} />
-        <Route path="import" element={<SourceImportPage batchId={batchId} batch={batchQuery.data} />} />
-        <Route path="ai-result" element={<AiResultPage batchId={batchId} />} />
+        <Route path="dashboard" element={<DashboardPage batchId={batchId} canManage={canManage} />} />
+        <Route path="import" element={<SourceImportPage batchId={batchId} batch={batchQuery.data} canManage={canManage} />} />
+        <Route path="ai-result" element={<AiResultPage batchId={batchId} canManage={canManage} />} />
         <Route path="reviews" element={<ReviewListPage batchId={batchId} />} />
-        <Route path="reviews/:storyId" element={<ReviewDetailPage batchId={batchId} />} />
+        <Route path="reviews/:storyId" element={<ReviewDetailPage batchId={batchId} canManage={canManage} />} />
       </Routes>
     </Space>
   )
 }
 
-function SourceImportPage({ batchId, batch }: { batchId: string; batch: ReviewBatch }) {
+function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batch: ReviewBatch; canManage: boolean }) {
   const [file, setFile] = useState<File | null>(null)
   const [headers, setHeaders] = useState<string[]>([])
   const [rows, setRows] = useState<Record<string, unknown>[]>([])
@@ -420,7 +424,7 @@ function SourceImportPage({ batchId, batch }: { batchId: string; batch: ReviewBa
   const { message } = AntApp.useApp()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
-  const readOnly = batch.status === 'COMPLETED'
+  const readOnly = !canManage || batch.status === 'COMPLETED'
   const storiesQuery = useQuery({ queryKey: ['stories', batchId], queryFn: () => listStories(batchId) })
   const sourceFilesQuery = useQuery({ queryKey: ['import-files', batchId, 'SOURCE'], queryFn: () => listImportFiles(batchId, 'SOURCE') })
   const alreadyImported = Boolean(storiesQuery.data?.length)
@@ -451,7 +455,7 @@ function SourceImportPage({ batchId, batch }: { batchId: string; batch: ReviewBa
 
   return (
     <Space direction="vertical" size="large" className="page-stack">
-      {readOnly ? <Alert type="warning" showIcon title="批次已完成" description="批次完成后默认只读，如需继续导入请先在统计看板重新打开批次。" /> : null}
+      {readOnly ? <Alert type="warning" showIcon title={canManage ? '批次已完成' : '无管理权限'} description={canManage ? '批次完成后默认只读，如需继续导入请先在统计看板重新打开批次。' : '只有管理员或该批次的创建者可以导入文件。'} /> : null}
       {alreadyImported ? (
         <>
           <Alert
@@ -572,7 +576,7 @@ function SourcePreview({ parsed }: { parsed: { stories: SourceStoryInput[]; issu
   )
 }
 
-function AiResultPage({ batchId }: { batchId: string }) {
+function AiResultPage({ batchId, canManage }: { batchId: string; canManage: boolean }) {
   const [file, setFile] = useState<File | null>(null)
   const [parsed, setParsed] = useState<Awaited<ReturnType<typeof parseAiWorkbook>> | null>(null)
   const { message, modal } = AntApp.useApp()
@@ -624,12 +628,12 @@ function AiResultPage({ batchId }: { batchId: string }) {
   if (workspaceQuery.isLoading) return <Spin />
   if (!workspaceQuery.data) return <Empty />
 
-  const readOnly = workspaceQuery.data.batch.status === 'COMPLETED'
+  const readOnly = !canManage || workspaceQuery.data.batch.status === 'COMPLETED'
   const alreadyImportedAi = Boolean(aiImportsQuery.data?.length)
 
   return (
     <Space direction="vertical" size="large" className="page-stack">
-      {readOnly ? <Alert type="warning" showIcon title="批次已完成" description="批次完成后默认只读，如需继续导入或切换生效版本请先在统计看板重新打开批次。" /> : null}
+      {readOnly ? <Alert type="warning" showIcon title={canManage ? '批次已完成' : '无管理权限'} description={canManage ? '批次完成后默认只读，如需继续导入或切换生效版本请先在统计看板重新打开批次。' : '只有管理员或该批次的创建者可以管理 AI 结果。'} /> : null}
       <Card>
         <Space wrap>
           <Button type="primary" disabled={!workspaceQuery.data.stories.length} onClick={() => downloadAiTemplate(workspaceQuery.data.batch, workspaceQuery.data.stories)}>
@@ -900,7 +904,7 @@ type HumanReviewFormValues = {
   comment: string
 }
 
-function ReviewDetailPage({ batchId }: { batchId: string }) {
+function ReviewDetailPage({ batchId, canManage }: { batchId: string; canManage: boolean }) {
   const { storyId } = useParams()
   const navigate = useNavigate()
   const workspaceQuery = useBatchWorkspace(batchId)
@@ -936,9 +940,9 @@ function ReviewDetailPage({ batchId }: { batchId: string }) {
       nextStoryId,
       reviewableIndex,
       reviewableTotal: reviewableStories.length,
-      readOnly: workspaceQuery.data.batch.status === 'COMPLETED',
+      readOnly: !canManage || workspaceQuery.data.batch.status === 'COMPLETED',
     }
-  }, [storyId, workspaceQuery.data])
+  }, [canManage, storyId, workspaceQuery.data])
 
   if (workspaceQuery.isLoading) return <Spin />
   if (!detail) return <Empty description="需求不存在" />
@@ -1006,7 +1010,7 @@ function HumanReviewPanel({ batchId, detail }: { batchId: string; detail: Review
   return (
     <Card className="review-decision-card" title="人工结论">
       <Space direction="vertical" className="page-stack">
-        {detail.readOnly ? <Alert type="warning" showIcon title="批次已完成" description="批次完成后默认只读，人工结论已锁定。" /> : null}
+        {detail.readOnly ? <Alert type="warning" showIcon title="当前页面只读" description="批次已完成，或当前账号不是该批次的管理员或创建者。" /> : null}
         {detail.aiResult ? (
           <>
             <div className="review-decision-context">
@@ -1039,7 +1043,7 @@ function HumanReviewPanel({ batchId, detail }: { batchId: string; detail: Review
   )
 }
 
-function DashboardPage({ batchId }: { batchId: string }) {
+function DashboardPage({ batchId, canManage }: { batchId: string; canManage: boolean }) {
   const workspaceQuery = useBatchWorkspace(batchId)
   const operationLogQuery = useQuery({ queryKey: ['operation-log', batchId], queryFn: () => listBatchOperationLogs(batchId) })
   const queryClient = useQueryClient()
@@ -1105,14 +1109,16 @@ function DashboardPage({ batchId }: { batchId: string }) {
             {activeImport?.ai_model ? <Text type="secondary">模型：{activeImport.ai_model}</Text> : null}
           </Space>
         </div>
-        <div className="dashboard-hero__actions">
-          {batch.status === 'COMPLETED' ? (
-            <Button loading={reopenMutation.isPending} onClick={() => reopenMutation.mutate()}>重新打开批次</Button>
-          ) : (
-            <Button type="primary" loading={completeMutation.isPending} onClick={() => completeMutation.mutate(false)}>完成批次</Button>
-          )}
-          <Text type="secondary">完成前会检查待确认项。</Text>
-        </div>
+        {canManage ? (
+          <div className="dashboard-hero__actions">
+            {batch.status === 'COMPLETED' ? (
+              <Button loading={reopenMutation.isPending} onClick={() => reopenMutation.mutate()}>重新打开批次</Button>
+            ) : (
+              <Button type="primary" loading={completeMutation.isPending} onClick={() => completeMutation.mutate(false)}>完成批次</Button>
+            )}
+            <Text type="secondary">完成前会检查待确认项。</Text>
+          </div>
+        ) : null}
       </section>
 
       <Row gutter={[16, 16]}>
