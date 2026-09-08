@@ -275,9 +275,8 @@ a.dashboard-distribution-item:focus-visible {
   font-weight: 700;
 }
 
-.review-table-card .ant-table-thead > tr > th:first-child,
-.review-table-card .ant-table-tbody > tr > td:first-child {
-  padding-left: 48px;
+.review-table-inset {
+  padding-inline-start: 24px;
 }
 
 .review-table-card .ant-table-thead > tr > th:last-child,

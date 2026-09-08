@@ -352,7 +352,7 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
         <Button
           danger
           size="small"
-          loading={deleteMutation.isPending}
+          loading={deleteMutation.isPending && deleteMutation.variables === record.id}
           onClick={() => {
             modal.confirm({
               title: '删除批次',
@@ -932,15 +932,17 @@ function ReviewListPage({ batchId }: { batchId: string }) {
         </Space>
       </Card>
       <Card className="review-table-card" bodyStyle={{ padding: 0 }}>
-        <Table
-          rowKey={(row) => row.story.id}
-          loading={workspaceQuery.isLoading}
-          columns={columns}
-          dataSource={rows}
-          size="middle"
-          scroll={{ x: 1120 }}
-          pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
-        />
+        <div className="review-table-inset">
+          <Table
+            rowKey={(row) => row.story.id}
+            loading={workspaceQuery.isLoading}
+            columns={columns}
+            dataSource={rows}
+            size="middle"
+            scroll={{ x: 1120 }}
+            pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
+          />
+        </div>
       </Card>
     </Space>
   )
