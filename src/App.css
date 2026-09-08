@@ -96,6 +96,24 @@
   background: #fafafa;
 }
 
+a.dashboard-distribution-item {
+  color: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+a.dashboard-distribution-item:hover {
+  border-color: #93c5fd;
+  box-shadow: 0 6px 16px rgba(37, 99, 235, 0.12);
+  transform: translateY(-1px);
+}
+
+a.dashboard-distribution-item:focus-visible {
+  outline: 3px solid #1d4ed8;
+  outline-offset: 2px;
+}
+
 .dashboard-distribution-value {
   margin: 4px 0;
   color: #0f172a;
@@ -128,6 +146,33 @@
 
 .dashboard-progress-cell .ant-progress {
   margin: 0;
+}
+
+.dashboard-group-row {
+  cursor: pointer;
+}
+
+.dashboard-group-row:hover > td {
+  background: #eff6ff !important;
+}
+
+.dashboard-group-row:focus-within > td {
+  background: #dbeafe !important;
+}
+
+.dashboard-group-link {
+  color: #2563eb;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.dashboard-group-link:hover {
+  text-decoration: underline;
+}
+
+.dashboard-group-link:focus-visible {
+  outline: 3px solid #1d4ed8;
+  outline-offset: 2px;
 }
 
 .dashboard-log-card {
@@ -470,7 +515,8 @@
 
 @media (prefers-reduced-motion: reduce) {
   .dashboard-kpi-card,
-  .dashboard-card {
+  .dashboard-card,
+  a.dashboard-distribution-item {
     transition: none;
   }
 }

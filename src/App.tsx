@@ -72,6 +72,7 @@ import { supabaseConfigured } from './lib/supabase'
 import type {
   AdminUserListItem,
   AiReviewResult,
+  AiVerdict,
   BatchStatus,
   BatchWorkspace,
   HumanReviewResult,
@@ -779,9 +780,9 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
 }
 
 function ReviewListPage({ batchId }: { batchId: string }) {
-  const [owner, setOwner] = useState<string | undefined>()
-  const [verdict, setVerdict] = useState<string | undefined>()
   const [reviewStatus, setReviewStatus] = useState<string | undefined>()
+  const location = useLocation()
+  const navigate = useNavigate()
   const workspaceQuery = useBatchWorkspace(batchId)
   const ownerOptions = useMemo(() => {
     const names = new Set<string>()
@@ -790,6 +791,32 @@ function ReviewListPage({ batchId }: { batchId: string }) {
     })
     return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN')).map((name) => ({ value: name, label: name }))
   }, [workspaceQuery.data])
+  const applicationOptions = useMemo(() => {
+    const names = new Set<string>()
+    workspaceQuery.data?.stories.forEach((story) => names.add(applicationGroupName(story)))
+    return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN')).map((name) => ({ value: name, label: name }))
+  }, [workspaceQuery.data])
+  const getSingleSearchParam = (name: string) => {
+    const values = new URLSearchParams(location.search).getAll(name)
+    return values.length === 1 && values[0] ? values[0] : undefined
+  }
+  const verdictParam = getSingleSearchParam('verdict')
+  const ownerParam = getSingleSearchParam('owner')
+  const applicationParam = getSingleSearchParam('application')
+  const verdict = verdictParam && aiVerdictOptions.some((option) => option.value === verdictParam)
+    ? verdictParam as AiVerdict
+    : undefined
+  const owner = ownerParam && ownerOptions.some((option) => option.value === ownerParam) ? ownerParam : undefined
+  const application = applicationParam && applicationOptions.some((option) => option.value === applicationParam) ? applicationParam : undefined
+  const updateFilters = (changes: Partial<Record<'verdict' | 'owner' | 'application', string | undefined>>) => {
+    const searchParams = new URLSearchParams(location.search)
+    Object.entries(changes).forEach(([name, value]) => {
+      if (value) searchParams.set(name, value)
+      else searchParams.delete(name)
+    })
+    const search = searchParams.toString()
+    navigate({ pathname: location.pathname, search: search ? `?${search}` : '' })
+  }
 
   const rows = useMemo(() => {
     if (!workspaceQuery.data) return []
@@ -804,15 +831,16 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       return { story, result, review, evidenceCount: result ? evidenceCountByResult.get(result.id) ?? 0 : 0 }
     }).filter((row) => {
       const ownerMatched = owner ? splitOwners(row.story.owners_text).includes(owner) : true
+      const applicationMatched = application ? applicationGroupName(row.story) === application : true
       const verdictMatched = verdict ? row.result?.verdict === verdict : true
       const reviewMatched = reviewStatus === 'reviewed' ? Boolean(row.review) : reviewStatus === 'pending' ? !row.review : true
-      return ownerMatched && verdictMatched && reviewMatched
+      return ownerMatched && applicationMatched && verdictMatched && reviewMatched
     })
-  }, [owner, reviewStatus, verdict, workspaceQuery.data])
+  }, [application, owner, reviewStatus, verdict, workspaceQuery.data])
 
   const aiTagColors = { IMPLEMENTED: 'green', PARTIAL: 'orange', NOT_IMPLEMENTED: 'red', UNCERTAIN: 'default' }
   const humanTagColors = { CORRECT: 'green', PARTIALLY_CORRECT: 'orange', INCORRECT: 'red', NEED_DISCUSSION: 'purple' }
-  const activeFilterCount = [owner, verdict, reviewStatus].filter(Boolean).length
+  const activeFilterCount = [owner, application, verdict, reviewStatus].filter(Boolean).length
   const columns: ColumnsType<(typeof rows)[number]> = [
     { title: '编码', dataIndex: ['story', 'story_code'], width: 150, render: (_value, row) => <Link className="review-story-code" to={`/batches/${batchId}/reviews/${row.story.id}`}>{row.story.story_code}</Link> },
     { title: '需求名称', dataIndex: ['story', 'story_name'], width: 340 },
@@ -822,7 +850,7 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       width: 190,
       render: (value) => <Space size={[4, 4]} wrap>{splitOwners(value).map((name) => <Tag key={name}>{name}</Tag>)}</Space>,
     },
-    { title: '应用', dataIndex: ['story', 'application_name'], width: 120, render: (value) => value || '-' },
+    { title: '应用', dataIndex: ['story', 'application_name'], width: 120, render: (_value, row) => applicationGroupName(row.story) },
     {
       title: 'AI判断',
       width: 120,
@@ -848,7 +876,7 @@ function ReviewListPage({ batchId }: { batchId: string }) {
             <Text strong>筛选条件</Text>
             <Text type="secondary" className="review-filter-summary">当前显示 {rows.length} / {workspaceQuery.data?.stories.length ?? 0} 条需求</Text>
           </div>
-          {activeFilterCount ? <Button type="link" onClick={() => { setOwner(undefined); setVerdict(undefined); setReviewStatus(undefined) }}>清空筛选</Button> : null}
+          {activeFilterCount ? <Button type="link" onClick={() => { updateFilters({ owner: undefined, application: undefined, verdict: undefined }); setReviewStatus(undefined) }}>清空筛选</Button> : null}
         </div>
         <Space wrap className="review-filter-controls">
           <Select
@@ -858,10 +886,20 @@ function ReviewListPage({ batchId }: { batchId: string }) {
             className="filter-select"
             options={ownerOptions}
             value={owner}
-            onChange={setOwner}
+            onChange={(value) => updateFilters({ owner: value })}
             filterOption={(input, option) => String(option?.label ?? '').includes(input)}
           />
-          <Select allowClear placeholder="AI判断" className="filter-select" options={aiVerdictOptions} value={verdict} onChange={setVerdict} />
+          <Select
+            allowClear
+            showSearch
+            placeholder="按应用筛选"
+            className="filter-select"
+            options={applicationOptions}
+            value={application}
+            onChange={(value) => updateFilters({ application: value })}
+            filterOption={(input, option) => String(option?.label ?? '').includes(input)}
+          />
+          <Select allowClear placeholder="AI判断" className="filter-select" options={aiVerdictOptions} value={verdict} onChange={(value) => updateFilters({ verdict: value })} />
           <Select
             allowClear
             placeholder="人工状态"
@@ -1083,10 +1121,10 @@ function DashboardPage({ batchId, canManage }: { batchId: string; canManage: boo
   const { batch, activeImport } = workspaceQuery.data
   const stats = buildStats(workspaceQuery.data)
   const aiItems: DistributionItem[] = [
-    { label: aiVerdictLabels.IMPLEMENTED, value: stats.aiDistribution.IMPLEMENTED, color: '#16a34a' },
-    { label: aiVerdictLabels.PARTIAL, value: stats.aiDistribution.PARTIAL, color: '#f59e0b' },
-    { label: aiVerdictLabels.NOT_IMPLEMENTED, value: stats.aiDistribution.NOT_IMPLEMENTED, color: '#ef4444' },
-    { label: aiVerdictLabels.UNCERTAIN, value: stats.aiDistribution.UNCERTAIN, color: '#64748b' },
+    { label: aiVerdictLabels.IMPLEMENTED, value: stats.aiDistribution.IMPLEMENTED, color: '#16a34a', to: `/batches/${batchId}/reviews?verdict=IMPLEMENTED` },
+    { label: aiVerdictLabels.PARTIAL, value: stats.aiDistribution.PARTIAL, color: '#f59e0b', to: `/batches/${batchId}/reviews?verdict=PARTIAL` },
+    { label: aiVerdictLabels.NOT_IMPLEMENTED, value: stats.aiDistribution.NOT_IMPLEMENTED, color: '#ef4444', to: `/batches/${batchId}/reviews?verdict=NOT_IMPLEMENTED` },
+    { label: aiVerdictLabels.UNCERTAIN, value: stats.aiDistribution.UNCERTAIN, color: '#64748b', to: `/batches/${batchId}/reviews?verdict=UNCERTAIN` },
   ]
   const humanItems: DistributionItem[] = [
     { label: humanReviewLabels.CORRECT, value: stats.humanDistribution.CORRECT, color: '#16a34a' },
@@ -1154,8 +1192,8 @@ function DashboardPage({ batchId, canManage }: { batchId: string; canManage: boo
       </Row>
 
       <Row gutter={[16, 16]}>
-        <Col xs={24} xl={12}><GroupedProgress title="按负责人统计" rows={stats.byOwner} note="协作需求按负责人分别计入" /></Col>
-        <Col xs={24} xl={12}><GroupedProgress title="按应用统计" rows={stats.byApplication} /></Col>
+        <Col xs={24} xl={12}><GroupedProgress title="按负责人统计" rows={stats.byOwner} batchId={batchId} filterKey="owner" note="协作需求按负责人分别计入" /></Col>
+        <Col xs={24} xl={12}><GroupedProgress title="按应用统计" rows={stats.byApplication} batchId={batchId} filterKey="application" /></Col>
       </Row>
 
       <Card className="dashboard-card dashboard-log-card" title="操作日志">
@@ -1307,11 +1345,16 @@ type DistributionItem = {
   label: string
   value: number
   color: string
+  to?: string
 }
 
 function splitOwners(ownersText: string) {
   const owners = ownersText.split(/[，,、；;]/).map((name) => name.trim()).filter(Boolean)
   return [...new Set(owners.length ? owners : ['未分配'])]
+}
+
+function applicationGroupName(story: ReviewStory) {
+  return story.application_name || '未填写应用'
 }
 
 function percentage(value: number, total: number) {
@@ -1342,19 +1385,37 @@ function DistributionCard({ title, items, total }: { title: string; items: Distr
   return (
     <Card className="dashboard-card dashboard-distribution-card" title={title}>
       <div className="dashboard-distribution-grid">
-        {items.map((item) => (
-          <div key={item.label} className="dashboard-distribution-item" style={{ borderInlineStartColor: item.color }}>
-            <Text type="secondary">{item.label}</Text>
-            <div className="dashboard-distribution-value">{item.value}</div>
-            <Text type="secondary">{percentage(item.value, total)}%</Text>
-          </div>
-        ))}
+        {items.map((item) => {
+          const content = (
+            <>
+              <Text type="secondary">{item.label}</Text>
+              <div className="dashboard-distribution-value">{item.value}</div>
+              <Text type="secondary">{percentage(item.value, total)}%</Text>
+            </>
+          )
+          const style = { borderInlineStartColor: item.color }
+          return item.to ? (
+            <Link key={item.label} to={item.to} className="dashboard-distribution-item" style={style} aria-label={`查看${item.label}的评审列表（${item.value} 条）`}>
+              {content}
+            </Link>
+          ) : (
+            <div key={item.label} className="dashboard-distribution-item" style={style}>
+              {content}
+            </div>
+          )
+        })}
       </div>
     </Card>
   )
 }
 
-function GroupedProgress({ title, rows, note }: { title: string; rows: DashboardGroup[]; note?: string }) {
+function GroupedProgress({ title, rows, batchId, filterKey, note }: { title: string; rows: DashboardGroup[]; batchId: string; filterKey: 'owner' | 'application'; note?: string }) {
+  const navigate = useNavigate()
+  const reviewListPath = (name: string) => {
+    const search = new URLSearchParams([[filterKey, name]]).toString()
+    return `/batches/${batchId}/reviews?${search}`
+  }
+
   return (
     <Card className="dashboard-card" title={<div className="dashboard-card-heading">{title}{note ? <Text type="secondary" className="dashboard-card-note">{note}</Text> : null}</div>}>
       <Table
@@ -1363,8 +1424,20 @@ function GroupedProgress({ title, rows, note }: { title: string; rows: Dashboard
         pagination={false}
         scroll={{ x: 680 }}
         dataSource={rows}
+        onRow={(row) => ({
+          className: 'dashboard-group-row',
+          onClick: (event) => {
+            if (event.target instanceof Element && event.target.closest('a')) return
+            navigate(reviewListPath(row.name))
+          },
+        })}
         columns={[
-          { title: '名称', dataIndex: 'name', width: 180 },
+          {
+            title: '名称',
+            dataIndex: 'name',
+            width: 180,
+            render: (name: string) => <Link className="dashboard-group-link" to={reviewListPath(name)} aria-label={`查看${name}的评审列表`}>{name}</Link>,
+          },
           { title: '总数', dataIndex: 'total', width: 72 },
           {
             title: 'AI 分析进度',
@@ -1417,7 +1490,7 @@ function buildStats(workspace: BatchWorkspace) {
     const aiDone = resultByStory.has(story.id)
     const reviewed = latestReviewByStory.has(story.id)
     splitOwners(story.owners_text).forEach((owner) => addGrouped(owners, owner, aiDone, reviewed))
-    addGrouped(applications, story.application_name || '未填写应用', aiDone, reviewed)
+    addGrouped(applications, applicationGroupName(story), aiDone, reviewed)
   })
 
   const sortGroups = (groups: DashboardGroup[]) => groups.sort((a, b) => {
