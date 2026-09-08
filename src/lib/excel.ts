@@ -12,6 +12,7 @@ import type {
   ValidationIssue,
 } from '../types'
 
+
 export const templateVersion = '1.0'
 
 export const sourceFieldLabels: Record<SourceFieldKey, string> = {
