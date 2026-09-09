@@ -371,7 +371,7 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
 
   return (
     <Space direction="vertical" size="large" className="page-stack">
-      <PageTitle title="批次列表" extra={canCreateBatch ? <Button type="primary" onClick={() => setOpen(true)}>创建批次</Button> : null} />
+      <PageTitle title="评审列表" extra={canCreateBatch ? <Button type="primary" onClick={() => setOpen(true)}>创建代码评审</Button> : null} />
       <Table rowKey="id" loading={batchesQuery.isLoading} columns={columns} dataSource={batchesQuery.data ?? []} />
       <Modal title="创建每周评审批次" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={createMutation.isPending}>
         <Form form={form} layout="vertical" onFinish={(values) => createMutation.mutate(values)}>
