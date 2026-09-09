@@ -1,0 +1,54 @@
+# Worker pool for the AI automation MVP. (Plan §17.2)
+#
+# Default topology: 4 replicas x 2 story slots each = capacity of 8 concurrent
+# stories. The real ceiling is still the model's max_parallel_tasks.
+#
+# Start (local or intranet):
+#   docker compose -f docker-compose.worker.yml up -d --scale worker=4
+#
+# Secrets MUST be injected by the platform / a .env file that is NOT committed.
+
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: codereviewplatform-worker:latest
+    restart: unless-stopped
+    # No ports are published: the worker is outbound-only. (Plan §17.2)
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      GIT_AUTH_MODE: ${GIT_AUTH_MODE:-token}
+      GITLAB_BASE_URL: ${GITLAB_BASE_URL:-https://git.kingdee.com}
+      GITLAB_DEPLOY_USER: ${GITLAB_DEPLOY_USER:-}
+      GITLAB_DEPLOY_TOKEN: ${GITLAB_DEPLOY_TOKEN:-}
+      # Each replica gets a unique WORKER_ID from its container hostname. (Plan §17.2)
+      WORKER_ID: ${WORKER_ID:-worker-{{.Task.Slot}}}
+      WORKSPACE_ROOT: /workspace/jobs
+      CODE_CACHE_ROOT: /workspace/cache
+      POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-5000}
+      STORY_TASK_LEASE_SECONDS: ${STORY_TASK_LEASE_SECONDS:-900}
+      HEARTBEAT_INTERVAL_MS: ${HEARTBEAT_INTERVAL_MS:-30000}
+      # 2 slots per replica -> 4 replicas x 2 = capacity 8. (Plan §13.1, §17.2)
+      WORKER_STORY_CONCURRENCY: ${WORKER_STORY_CONCURRENCY:-2}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    # Derive a stable, unique WORKER_ID from the container id at runtime.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - 'export WORKER_ID="worker-$(hostname)"; exec npm run worker:start'
+    # Hardening. (Plan §17.2)
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    tmpfs:
+      - /tmp
+    volumes:
+      # Anonymous volumes are allocated per container, so scaled replicas never
+      # share writable job/cache directories on the same Docker host.
+      - /workspace
+    deploy:
+      replicas: 4
+      restart_policy:
+        condition: unless-stopped

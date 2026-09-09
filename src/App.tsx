@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import {
@@ -11,6 +11,7 @@ import {
   Empty,
   Form,
   Input,
+  InputNumber,
   Layout,
   List,
   Menu,
@@ -23,6 +24,7 @@ import {
   Spin,
   Statistic,
   Steps,
+  Switch,
   Table,
   Tabs,
   Tag,
@@ -36,46 +38,65 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   adminListUsers,
   adminUpdateUserRole,
+  adminCreateModelConfig,
+  adminListModelConfigs,
+  adminSetModelEnabled,
+  adminTestModelConfig,
+  adminUpdateModelConfig,
   claimInitialAdmin,
   completeBatch,
   confirmAiResultImport,
   confirmSourceImport,
   createBatch,
   deleteBatch,
+  enqueueAnalysisJob,
+  getActiveAnalysisWorkers,
   getBatch,
   findImportFileByHash,
   getBatchWorkspace,
   getFileDownloadUrl,
+  getLatestAnalysisJob,
+  getModelConcurrencyStatus,
   getMyProfile,
   getSession,
   listAiImports,
+  listAnalysisStoryTasks,
   listBatches,
-  listBatchOperationLogs,
+  listEnabledModelConfigs,
   listImportFiles,
+  listOperationLogs,
+  listRepositorySnapshots,
   listStories,
   onAuthChange,
   reopenBatch,
+  retryAnalysisJob,
   saveHumanReview,
   setBatchDefaultBranch,
+  setBatchModel,
   signIn,
   signOut,
   signUp,
   uploadBatchFile,
 } from './lib/api'
-import type { CreateBatchInput } from './lib/api'
+import type { CreateBatchInput, ModelConfigInput } from './lib/api'
 import { downloadAiTemplate, inferFieldMapping, parseAiWorkbook, parseSourceRows, readFirstSheet, sourceFieldLabels, templateVersion } from './lib/excel'
 import type { FieldMapping, SourceFieldKey } from './lib/excel'
 import { parseBaselineCommit } from './lib/baseline'
 import { hashFile } from './lib/hash'
-import { aiVerdictLabels, aiVerdictOptions, batchStatusLabels, humanReviewLabels, humanReviewOptions } from './lib/labels'
+import { aiVerdictLabels, aiVerdictOptions, analysisErrorCodeMeta, analysisJobStatusLabels, batchStatusLabels, humanReviewLabels, humanReviewOptions, storyTaskStatusLabels } from './lib/labels'
 import { aiFillPrompt } from './lib/prompt'
 import { supabaseConfigured } from './lib/supabase'
 import type {
   AdminUserListItem,
   AiImportRecord,
+  AiModelConfigSummary,
   AiReviewResult,
   AiVerdict,
+  AnalysisJob,
+  AnalysisRepositorySnapshot,
+  AnalysisStoryTaskWithStory,
   BaselineCommit,
+  BatchOperationLogWithBatch,
   BatchStatus,
   BatchWorkspace,
   DefaultBranch,
@@ -92,6 +113,7 @@ const { Header, Content, Sider } = Layout
 const { Title, Text, Paragraph } = Typography
 
 type AuthMode = 'sign-in' | 'sign-up'
+type AiResultMode = 'auto' | 'manual'
 
 const defaultBranchOptions: { value: DefaultBranch; label: DefaultBranch }[] = [
   { value: 'feature_dev', label: 'feature_dev' },
@@ -211,9 +233,17 @@ function Shell({ session }: { session: Session }) {
   const isAdmin = role === 'ADMIN'
   const canCreateBatch = role === 'ADMIN' || role === 'REVIEWER'
   const canManageBatch = (batch: ReviewBatch) => role === 'ADMIN' || (role === 'REVIEWER' && batch.created_by === session.user.id)
-  const selectedKey = location.pathname.startsWith('/users') ? '/users' : '/batches'
+  const selectedKey = location.pathname.startsWith('/users')
+    ? '/users'
+    : location.pathname.startsWith('/models')
+      ? '/models'
+      : location.pathname.startsWith('/operation-log')
+        ? '/operation-log'
+        : '/batches'
   const menuItems = [
     { key: '/batches', label: <Link to="/batches">代码评审</Link> },
+    { key: '/operation-log', label: <Link to="/operation-log">操作日志</Link> },
+    ...(isAdmin ? [{ key: '/models', label: <Link to="/models">模型管理</Link> }] : []),
     ...(isAdmin ? [{ key: '/users', label: <Link to="/users">用户管理</Link> }] : []),
   ]
 
@@ -247,6 +277,8 @@ function Shell({ session }: { session: Session }) {
           <Routes>
             <Route path="/" element={<Navigate to="/batches" replace />} />
             <Route path="/batches" element={<BatchesPage canCreateBatch={canCreateBatch} canManageBatch={canManageBatch} />} />
+            <Route path="/operation-log" element={<OperationLogPage />} />
+            <Route path="/models" element={<ModelConfigPage isAdmin={isAdmin} />} />
             <Route path="/users" element={<AdminUsersPage isAdmin={isAdmin} />} />
             <Route path="/batches/:batchId/*" element={<BatchPage canManageBatch={canManageBatch} />} />
             <Route path="*" element={<Navigate to="/batches" replace />} />
@@ -254,6 +286,210 @@ function Shell({ session }: { session: Session }) {
         </Content>
       </Layout>
     </Layout>
+  )
+}
+
+const modelProviderOptions = [
+  { value: 'openai-compatible', label: 'openai-compatible' },
+  { value: 'deepseek-harness', label: 'deepseek-harness（后续）' },
+]
+
+interface ModelFormValues {
+  display_name: string
+  provider: string
+  base_url: string
+  model_name: string
+  max_parallel_tasks: number
+  request_timeout_seconds: number
+  api_key?: string
+}
+
+function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
+  const queryClient = useQueryClient()
+  const { message } = AntApp.useApp()
+  const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState<AiModelConfigSummary | null>(null)
+  const [form] = Form.useForm<ModelFormValues>()
+
+  const modelsQuery = useQuery({ queryKey: ['admin-model-configs'], enabled: isAdmin, queryFn: adminListModelConfigs })
+
+  const upsertMutation = useMutation({
+    mutationFn: async (values: ModelFormValues) => {
+      const payload: ModelConfigInput = {
+        display_name: values.display_name.trim(),
+        provider: values.provider,
+        base_url: values.base_url.trim(),
+        model_name: values.model_name.trim(),
+        max_parallel_tasks: values.max_parallel_tasks,
+        request_timeout_ms: Math.round(values.request_timeout_seconds * 1000),
+        // 留空表示不轮换密钥；编辑时永不回显旧值
+        api_key: values.api_key && values.api_key.length ? values.api_key : null,
+      }
+      if (editing) return adminUpdateModelConfig(editing.id, payload)
+      return adminCreateModelConfig(payload)
+    },
+    onSuccess: () => {
+      message.success(editing ? '模型配置已更新' : '模型配置已创建')
+      setOpen(false)
+      setEditing(null)
+      form.resetFields()
+      queryClient.invalidateQueries({ queryKey: ['admin-model-configs'] })
+      queryClient.invalidateQueries({ queryKey: ['enabled-model-configs'] })
+    },
+    onError: (error) => message.error(error.message),
+  })
+
+  const setEnabledMutation = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) => adminSetModelEnabled(id, enabled),
+    onSuccess: () => {
+      message.success('模型状态已更新')
+      queryClient.invalidateQueries({ queryKey: ['admin-model-configs'] })
+      queryClient.invalidateQueries({ queryKey: ['enabled-model-configs'] })
+    },
+    onError: (error) => message.error(error.message),
+  })
+
+  const testMutation = useMutation({
+    mutationFn: (id: string) => adminTestModelConfig(id),
+    onSuccess: (result) => {
+      if (result?.ok) {
+        message.success(`连接测试通过${result.latency_ms ? `（${result.latency_ms}ms）` : ''}`)
+      } else {
+        message.warning(result?.message ?? '连接测试未通过')
+      }
+    },
+    onError: (error) => message.error(error.message),
+  })
+
+  if (!isAdmin) {
+    return <Alert type="warning" showIcon title="无权限访问" description="只有管理员可以管理模型配置。" />
+  }
+
+  const openCreate = () => {
+    setEditing(null)
+    form.resetFields()
+    form.setFieldsValue({ provider: 'openai-compatible', max_parallel_tasks: 4, request_timeout_seconds: 180 })
+    setOpen(true)
+  }
+
+  const openEdit = (record: AiModelConfigSummary) => {
+    setEditing(record)
+    // API Key 编辑时永不回显，字段留空
+    form.setFieldsValue({
+      display_name: record.display_name,
+      provider: record.provider,
+      base_url: record.base_url,
+      model_name: record.model_name,
+      max_parallel_tasks: record.max_parallel_tasks,
+      request_timeout_seconds: Math.round(record.request_timeout_ms / 1000),
+      api_key: '',
+    })
+    setOpen(true)
+  }
+
+  const columns: ColumnsType<AiModelConfigSummary> = [
+    { title: '模型名称', dataIndex: 'display_name' },
+    { title: 'Provider', dataIndex: 'provider', width: 160 },
+    { title: 'Base URL', dataIndex: 'base_url', ellipsis: true },
+    { title: 'Model', dataIndex: 'model_name', width: 160 },
+    {
+      title: 'API Key',
+      dataIndex: 'has_api_key',
+      width: 110,
+      render: (has: boolean) => (has ? <Tag color="green">已配置</Tag> : <Tag color="red">未配置</Tag>),
+    },
+    { title: '最大并发', dataIndex: 'max_parallel_tasks', width: 90 },
+    {
+      title: '超时',
+      dataIndex: 'request_timeout_ms',
+      width: 90,
+      render: (ms: number) => `${Math.round(ms / 1000)}s`,
+    },
+    {
+      title: '启用',
+      dataIndex: 'enabled',
+      width: 100,
+      render: (enabled: boolean, record) => (
+        <Switch
+          checked={enabled}
+          loading={setEnabledMutation.isPending && setEnabledMutation.variables?.id === record.id}
+          onChange={(checked) => setEnabledMutation.mutate({ id: record.id, enabled: checked })}
+        />
+      ),
+    },
+    { title: '更新时间', dataIndex: 'updated_at', width: 180, render: (value: string) => new Date(value).toLocaleString() },
+    {
+      title: '操作',
+      width: 170,
+      render: (_value, record) => (
+        <Space>
+          <Button size="small" onClick={() => openEdit(record)}>编辑</Button>
+          <Button
+            size="small"
+            loading={testMutation.isPending && testMutation.variables === record.id}
+            disabled={!record.has_api_key}
+            onClick={() => testMutation.mutate(record.id)}
+          >
+            测试连接
+          </Button>
+        </Space>
+      ),
+    },
+  ]
+
+  return (
+    <Space direction="vertical" size="large" className="page-stack">
+      <PageTitle title="模型管理" extra={<Button type="primary" onClick={openCreate}>新增模型</Button>} />
+      <Card>
+        <Alert
+          type="info"
+          showIcon
+          title="安全说明"
+          description="API Key 通过 admin-model-config Edge Function 加密写入 Supabase Vault，前端与数据库普通表都不返回密钥。编辑时不回显旧 Key，留空表示不轮换；已被历史批次引用的模型只可停用，不可删除。"
+        />
+      </Card>
+      <Table rowKey="id" loading={modelsQuery.isLoading} columns={columns} dataSource={modelsQuery.data ?? []} pagination={false} />
+      <Modal
+        title={editing ? `编辑模型：${editing.display_name}` : '新增模型'}
+        open={open}
+        onCancel={() => {
+          setOpen(false)
+          setEditing(null)
+        }}
+        onOk={() => form.submit()}
+        confirmLoading={upsertMutation.isPending}
+        destroyOnClose
+      >
+        <Form form={form} layout="vertical" onFinish={(values) => upsertMutation.mutate(values)}>
+          <Form.Item name="display_name" label="模型名称" rules={[{ required: true, message: '请输入用于识别的名称，例如 Qwen 主账号' }]}>
+            <Input placeholder="Qwen 主账号" />
+          </Form.Item>
+          <Form.Item name="provider" label="Provider" rules={[{ required: true, message: '请选择 Provider' }]}>
+            <Select options={modelProviderOptions} />
+          </Form.Item>
+          <Form.Item name="base_url" label="Base URL" rules={[{ required: true, message: '请输入模型兼容接口地址' }]}>
+            <Input placeholder="https://.../v1" />
+          </Form.Item>
+          <Form.Item name="model_name" label="Model" rules={[{ required: true, message: '请输入实际模型名称' }]}>
+            <Input placeholder="qwen-max" />
+          </Form.Item>
+          <Form.Item
+            name="api_key"
+            label={editing ? 'API Key（留空表示不修改）' : 'API Key'}
+            rules={editing ? [] : [{ required: true, message: '请输入 API Key' }]}
+            extra={editing ? '出于安全，编辑时不显示原 Key；仅在需要轮换时填写新值。' : undefined}
+          >
+            <Input.Password autoComplete="new-password" placeholder={editing ? '不修改请留空' : '仅密码方式输入'} />
+          </Form.Item>
+          <Form.Item name="max_parallel_tasks" label="最大并发需求数（1~20）" rules={[{ required: true, message: '请输入最大并发需求数' }]}>
+            <InputNumber min={1} max={20} className="full-width" />
+          </Form.Item>
+          <Form.Item name="request_timeout_seconds" label="请求超时（10~600 秒）" rules={[{ required: true, message: '请输入请求超时秒数' }]}>
+            <InputNumber min={10} max={600} className="full-width" />
+          </Form.Item>
+        </Form>
+      </Modal>
+    </Space>
   )
 }
 
@@ -319,6 +555,16 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
   const queryClient = useQueryClient()
   const { message, modal } = AntApp.useApp()
   const batchesQuery = useQuery({ queryKey: ['batches'], queryFn: listBatches })
+  const enabledModelsQuery = useQuery({
+    queryKey: ['enabled-model-configs'],
+    enabled: canCreateBatch,
+    queryFn: listEnabledModelConfigs,
+  })
+  const modelNameById = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const model of enabledModelsQuery.data ?? []) map.set(model.id, model.display_name)
+    return map
+  }, [enabledModelsQuery.data])
   const createMutation = useMutation({
     mutationFn: createBatch,
     onSuccess: (batch) => {
@@ -344,6 +590,15 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
     { title: '周标识', dataIndex: 'week_code', width: 140 },
     { title: '状态', dataIndex: 'status', width: 150, render: (status: BatchStatus) => <Tag color={statusColor(status)}>{batchStatusLabels[status]}</Tag> },
     { title: '默认分支', dataIndex: 'default_branch', width: 140, render: (value) => value || '-' },
+    {
+      title: '分析模型',
+      dataIndex: 'ai_model_config_id',
+      width: 160,
+      render: (_value, record) => {
+        const name = record.ai_model_snapshot?.display_name ?? (record.ai_model_config_id ? modelNameById.get(record.ai_model_config_id) : null)
+        return name ? <Tag color="geekblue">{name}</Tag> : <Tag color="orange">未选择</Tag>
+      },
+    },
     { title: '创建时间', dataIndex: 'created_at', width: 180, render: (value) => new Date(value).toLocaleString() },
     {
       title: '操作',
@@ -378,11 +633,40 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
           <Form.Item name="name" label="批次名称" rules={[{ required: true, message: '请输入批次名称' }]}>
             <Input placeholder="2026 年第 36 周需求评审" />
           </Form.Item>
-          <Form.Item name="week_code" label="周标识" rules={[{ required: true, message: '请输入周标识' }]}>
+          <Form.Item
+            name="week_code"
+            label="周标识"
+            normalize={(value) => typeof value === 'string' ? value.trim() : value}
+            rules={[
+              { required: true, message: '请输入周标识' },
+              {
+                validator: async (_rule, value) => {
+                  if (!value) return
+                  if (batchesQuery.data?.some((batch) => batch.week_code === value)) throw new Error('周标识已存在，请换一个')
+                },
+              },
+            ]}
+          >
             <Input placeholder="2026-W36" />
           </Form.Item>
           <Form.Item name="default_branch" label="默认代码基线分支" rules={[{ required: true, message: '请选择默认代码基线分支' }]}>
             <Select placeholder="选择代码基线分支" options={defaultBranchOptions} />
+          </Form.Item>
+          <Form.Item
+            name="ai_model_config_id"
+            label="本批次分析模型"
+            rules={[{ required: true, message: '请选择本批次使用的模型' }]}
+            extra={enabledModelsQuery.data && enabledModelsQuery.data.length === 0 ? '暂无已启用且已配置密钥的模型，请先在“模型管理”中配置。' : undefined}
+          >
+            <Select
+              placeholder="只显示已启用且已配置 Key 的模型"
+              loading={enabledModelsQuery.isLoading}
+              options={(enabledModelsQuery.data ?? []).map((model) => ({
+                value: model.id,
+                label: `${model.display_name} / ${model.model_name}`,
+              }))}
+              notFoundContent="暂无可用模型"
+            />
           </Form.Item>
           <Form.Item name="remark" label="备注">
             <Input.TextArea rows={3} />
@@ -591,7 +875,403 @@ function SourcePreview({ parsed }: { parsed: { stories: SourceStoryInput[]; issu
   )
 }
 
+
+const ACTIVE_JOB_STATUSES: AnalysisJob['status'][] = ['QUEUED', 'PREPARING_CODE', 'PROCESSING', 'FINALIZING']
+
+function isActiveJob(job: AnalysisJob | null | undefined) {
+  return Boolean(job && ACTIVE_JOB_STATUSES.includes(job.status))
+}
+
+function formatDuration(startedAt: string | null, finishedAt: string | null) {
+  if (!startedAt) return '—'
+  const start = new Date(startedAt).getTime()
+  const end = finishedAt ? new Date(finishedAt).getTime() : Date.now()
+  let seconds = Math.max(0, Math.floor((end - start) / 1000))
+  const hh = Math.floor(seconds / 3600)
+  seconds -= hh * 3600
+  const mm = Math.floor(seconds / 60)
+  const ss = seconds - mm * 60
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(hh)}:${pad(mm)}:${pad(ss)}`
+}
+
+const REQUIRED_REPOSITORIES = ['kdmanage-backend', 'kdmanage-frontend', 'tmanage-backend', 'tmanage-frontend']
+
+/**
+ * AI 自动分析卡片：主入口。
+ * - 前置条件校验（权限、批次未完成、分支、模型、密钥、需求、无运行任务、无既有 AI 结果）。
+ * - 历史批次可补选模型。
+ * - 运行中每 4 秒轮询任务、快照、逐需求任务。
+ * - 展示仓库快照、retrieval/analysis 进度、处理中需求、运行时长、错误码与可重试提示、按原 Commit 重试。
+ */
+function AutoAnalysisSection({
+  batch,
+  storyCount,
+  canManage,
+  hasExistingAiResult,
+}: {
+  batch: ReviewBatch
+  storyCount: number
+  canManage: boolean
+  hasExistingAiResult: boolean
+}) {
+  const { message } = AntApp.useApp()
+  const queryClient = useQueryClient()
+  const [supplementalModelId, setSupplementalModelId] = useState<string>()
+
+  const jobQuery = useQuery({
+    queryKey: ['analysis-job', batch.id],
+    queryFn: () => getLatestAnalysisJob(batch.id),
+    refetchInterval: (query) => (isActiveJob(query.state.data as AnalysisJob | null) ? 4000 : false),
+  })
+  const job = jobQuery.data ?? null
+  const jobActive = isActiveJob(job)
+
+  const snapshotsQuery = useQuery({
+    queryKey: ['analysis-snapshots', job?.id],
+    enabled: Boolean(job?.id),
+    queryFn: () => listRepositorySnapshots(job!.id),
+    refetchInterval: jobActive ? 4000 : false,
+  })
+  const storyTasksQuery = useQuery({
+    queryKey: ['analysis-story-tasks', job?.id],
+    enabled: Boolean(job?.id),
+    queryFn: () => listAnalysisStoryTasks(job!.id),
+    refetchInterval: jobActive ? 4000 : false,
+  })
+
+  const enabledModelsQuery = useQuery({
+    queryKey: ['enabled-model-configs'],
+    enabled: canManage,
+    queryFn: listEnabledModelConfigs,
+  })
+
+  // 近 15 秒在线 Worker：活动任务时每 4 秒刷新在线数/处理中数。
+  const workersQuery = useQuery({
+    queryKey: ['active-analysis-workers'],
+    queryFn: getActiveAnalysisWorkers,
+    refetchInterval: jobActive ? 4000 : 15000,
+  })
+
+  // 当前批次模型的并发状态（最大并发/活跃）。
+  const concurrencyQuery = useQuery({
+    queryKey: ['model-concurrency', batch.ai_model_config_id],
+    enabled: Boolean(batch.ai_model_config_id),
+    queryFn: () => getModelConcurrencyStatus(batch.ai_model_config_id!),
+    refetchInterval: jobActive ? 4000 : false,
+  })
+
+  const invalidateAll = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['analysis-job', batch.id] })
+    queryClient.invalidateQueries({ queryKey: ['batch', batch.id] })
+    queryClient.invalidateQueries({ queryKey: ['batch-workspace', batch.id] })
+    queryClient.invalidateQueries({ queryKey: ['ai-imports', batch.id] })
+    queryClient.invalidateQueries({ queryKey: ['batches'] })
+  }, [queryClient, batch.id])
+
+  const setModelMutation = useMutation({
+    mutationFn: () => {
+      if (!supplementalModelId) throw new Error('请选择本批次使用的模型')
+      return setBatchModel(batch.id, supplementalModelId)
+    },
+    onSuccess: () => {
+      message.success('已为本批次选择模型')
+      invalidateAll()
+    },
+    onError: (error) => message.error(error.message),
+  })
+
+  const enqueueMutation = useMutation({
+    mutationFn: () => enqueueAnalysisJob(batch.id),
+    onSuccess: () => {
+      message.success('已发起 AI 分析')
+      invalidateAll()
+    },
+    onError: (error) => message.error(error.message),
+  })
+
+  const retryMutation = useMutation({
+    mutationFn: () => {
+      if (!job) throw new Error('没有可重试的任务')
+      return retryAnalysisJob(job.id)
+    },
+    onSuccess: () => {
+      message.success('已按原 Commit 快照重试')
+      invalidateAll()
+    },
+    onError: (error) => message.error(error.message),
+  })
+
+  // 运行中每秒刷新一次运行时长展示
+  const [, forceTick] = useState(0)
+  useEffect(() => {
+    if (!jobActive) return
+    const timer = setInterval(() => forceTick((n) => n + 1), 1000)
+    return () => clearInterval(timer)
+  }, [jobActive])
+
+  const branchSupported = isSupportedDefaultBranch(batch.default_branch)
+  const enabledModels = enabledModelsQuery.data ?? []
+  // 实际确认所选模型仍在“已启用 + 已配置密钥”列表中（后端 has_api_key 已核验 Vault 存在）。
+  const selectedModelEnabled = Boolean(
+    batch.ai_model_config_id &&
+      enabledModels.some((m) => m.id === batch.ai_model_config_id && m.enabled && m.has_api_key),
+  )
+  const selectedModel = enabledModels.find((m) => m.id === batch.ai_model_config_id) ?? null
+  const modelReady = Boolean(batch.ai_model_config_id) && selectedModelEnabled
+  const batchCompleted = batch.status === 'COMPLETED'
+
+  // 自动分析成功后刷新导入/工作区（活动轮询停止的临界点）。
+  const prevStatusRef = useRef<AnalysisJob['status'] | null>(null)
+  useEffect(() => {
+    const current = job?.status ?? null
+    if (prevStatusRef.current && prevStatusRef.current !== 'SUCCEEDED' && current === 'SUCCEEDED') {
+      invalidateAll()
+    }
+    prevStatusRef.current = current
+  }, [job?.status, invalidateAll])
+
+  // 前置条件（方案 5.2）
+  const preconditions = [
+    { label: '有管理该批次的权限', ok: canManage },
+    { label: '批次未完成', ok: !batchCompleted },
+    { label: '已选择受支持分支', ok: branchSupported },
+    { label: '已选择可用模型（启用且已配置密钥）', ok: modelReady },
+    { label: '已导入至少一条需求', ok: storyCount > 0 },
+    { label: '当前没有运行中的分析任务', ok: !jobActive },
+    { label: '当前批次尚未产生 AI 结果', ok: !hasExistingAiResult },
+  ]
+  const canStart = preconditions.every((item) => item.ok)
+
+  const snapshots = snapshotsQuery.data ?? []
+  const storyTasks = storyTasksQuery.data ?? []
+  const retrievedCount = storyTasks.filter((t) => t.retrieval_status === 'SUCCEEDED').length
+  const analyzedCount = storyTasks.filter((t) => t.analysis_status === 'SUCCEEDED').length
+  const processingStories = storyTasks.filter(
+    (t) => t.retrieval_status === 'RUNNING' || t.analysis_status === 'RUNNING',
+  )
+  const totalStories = job?.total_stories || storyTasks.length || storyCount
+  const modelDisplay =
+    batch.ai_model_snapshot?.display_name ??
+    job?.model_snapshot?.display_name ??
+    (batch.ai_model_config_id ? '已选择模型' : '未选择')
+  const modelName = batch.ai_model_snapshot?.model_name ?? job?.model_snapshot?.model_name ?? ''
+  const maxParallel =
+    concurrencyQuery.data?.max_parallel_tasks ??
+    selectedModel?.max_parallel_tasks ??
+    (batch.ai_model_snapshot?.max_parallel_tasks as number | undefined) ??
+    null
+  const activeTasks = concurrencyQuery.data?.active_tasks ?? null
+  const workers = workersQuery.data ?? null
+
+  const errorMeta = job?.error_code ? analysisErrorCodeMeta[job.error_code] : undefined
+  const retryable = job?.status === 'FAILED'
+
+  return (
+    <Card title="自动 AI 分析" className="auto-analysis-card">
+      <Row gutter={[16, 8]}>
+        <Col xs={12} md={6}><Statistic title="分支" value={batch.default_branch ?? '未选择'} /></Col>
+        <Col xs={12} md={6}><Statistic title="需求" value={`${storyCount} 条`} /></Col>
+        <Col xs={12} md={6}>
+          <Statistic title="模型" value={modelName ? `${modelDisplay} / ${modelName}` : modelDisplay} />
+          {maxParallel != null ? (
+            <Text type="secondary">
+              最大并发 {maxParallel}
+              {activeTasks != null ? ` · 活跃 ${activeTasks}` : ''}
+            </Text>
+          ) : null}
+        </Col>
+        <Col xs={12} md={6}>
+          <Statistic title="任务状态" value={job ? analysisJobStatusLabels[job.status] ?? job.status : '未开始'} />
+          <Text type="secondary">
+            Worker 在线 {workers?.online ?? 0} · 处理中 {workers?.processing ?? 0}
+          </Text>
+        </Col>
+      </Row>
+
+      <Divider />
+
+      {!batch.ai_model_config_id && canManage && !batchCompleted ? (
+        <Alert
+          type="warning"
+          showIcon
+          className="mb-md"
+          title="该批次尚未选择分析模型"
+          description={
+            <Space direction="vertical" className="full-width">
+              <Text type="secondary">历史批次允许在首次开始分析前补选一次模型。</Text>
+              <Space wrap>
+                <Select
+                  placeholder="选择已启用且已配置 Key 的模型"
+                  style={{ minWidth: 260 }}
+                  loading={enabledModelsQuery.isLoading}
+                  value={supplementalModelId}
+                  onChange={setSupplementalModelId}
+                  options={enabledModels.map((model) => ({
+                    value: model.id,
+                    label: `${model.display_name} / ${model.model_name}（并发 ${model.max_parallel_tasks}）`,
+                  }))}
+                  notFoundContent="暂无可用模型"
+                />
+                <Button type="primary" loading={setModelMutation.isPending} disabled={!supplementalModelId} onClick={() => setModelMutation.mutate()}>
+                  保存模型
+                </Button>
+              </Space>
+            </Space>
+          }
+        />
+      ) : null}
+
+      {batch.ai_model_config_id && !selectedModelEnabled && canManage && !batchCompleted && !hasExistingAiResult ? (
+        <Alert
+          type="error"
+          showIcon
+          className="mb-md"
+          title="所选模型当前不可用"
+          description="该批次绑定的模型已被停用或缺少 API Key（Vault 中无记录）。请在“模型管理”中重新启用或配置密钥后再开始分析。"
+        />
+      ) : null}
+
+      {/* 前置条件清单 */}
+      <div className="precondition-list">
+        {preconditions.map((item) => (
+          <Tag key={item.label} color={item.ok ? 'green' : 'default'} icon={undefined}>
+            {item.ok ? '✓' : '•'} {item.label}
+          </Tag>
+        ))}
+      </div>
+
+      <div className="mt-md">
+        <Space wrap>
+          <Button
+            type="primary"
+            disabled={!canStart}
+            loading={enqueueMutation.isPending}
+            onClick={() => enqueueMutation.mutate()}
+          >
+            开始 AI 分析
+          </Button>
+          {jobActive ? <Tag color="processing">分析进行中，页面每 4 秒自动刷新</Tag> : null}
+        </Space>
+      </div>
+
+      {job ? (
+        <>
+          <Divider />
+          <Row gutter={[16, 16]}>
+            <Col xs={24} md={8}>
+              <Statistic
+                title="代码准备"
+                value={`${snapshots.length}/4 仓库`}
+                valueStyle={{ color: snapshots.length === 4 ? '#389e0d' : undefined }}
+              />
+            </Col>
+            <Col xs={24} md={8}>
+              <Statistic title="AI 检索" value={`${retrievedCount}/${totalStories}`} />
+              <Progress percent={totalStories ? Math.round((retrievedCount / totalStories) * 100) : 0} size="small" />
+            </Col>
+            <Col xs={24} md={8}>
+              <Statistic title="AI 分析" value={`${analyzedCount}/${totalStories}`} />
+              <Progress percent={totalStories ? Math.round((analyzedCount / totalStories) * 100) : 0} size="small" />
+            </Col>
+          </Row>
+
+          <Row gutter={[16, 16]} className="mt-md">
+            <Col xs={24} md={12}>
+              <Text type="secondary">已运行：</Text>
+              <Text strong> {formatDuration(job.started_at, job.finished_at)}</Text>
+            </Col>
+            <Col xs={24} md={12}>
+              <Text type="secondary">处理中需求：</Text>
+              {processingStories.length ? (
+                <Space wrap size={[4, 4]}>
+                  {processingStories.map((t) => (
+                    <Tag key={t.id} color="blue">
+                      {taskStoryLabel(t)}
+                      {t.retrieval_status === 'RUNNING' ? `（${storyTaskStatusLabels.RUNNING}·检索）` : ''}
+                      {t.analysis_status === 'RUNNING' ? `（${storyTaskStatusLabels.RUNNING}·分析）` : ''}
+                    </Tag>
+                  ))}
+                </Space>
+              ) : (
+                <Text type="secondary"> 无</Text>
+              )}
+            </Col>
+          </Row>
+
+          {/* 仓库快照 */}
+          <Divider titlePlacement="left" plain>仓库快照</Divider>
+          <Table<AnalysisRepositorySnapshot>
+            rowKey="id"
+            size="small"
+            pagination={false}
+            loading={snapshotsQuery.isLoading}
+            locale={{ emptyText: '仓库快照准备中' }}
+            dataSource={snapshots}
+            columns={[
+              { title: '仓库', dataIndex: 'repository_name', width: 200 },
+              { title: '分支', dataIndex: 'requested_branch', width: 140 },
+              {
+                title: 'Commit',
+                dataIndex: 'commit_sha',
+                render: (sha: string) => <Text code>{sha.slice(0, 12)}</Text>,
+              },
+              { title: 'Subject', dataIndex: 'commit_subject', render: (value) => value || '-' },
+            ]}
+          />
+          {snapshots.length > 0 && snapshots.length < 4 ? (
+            <Text type="secondary">
+              待准备仓库：{REQUIRED_REPOSITORIES.filter((name) => !snapshots.some((s) => s.repository_name === name)).join('、')}
+            </Text>
+          ) : null}
+
+          {/* 失败与重试 */}
+          {job.status === 'FAILED' ? (
+            <Alert
+              className="mt-md"
+              type="error"
+              showIcon
+              title={`分析失败${job.error_code ? `（${job.error_code}）` : ''}`}
+              description={
+                <Space direction="vertical">
+                  <Text>{errorMeta?.message ?? job.error_message ?? '任务失败，请查看错误码。'}</Text>
+                  <Text type="secondary">
+                    {errorMeta
+                      ? errorMeta.retryable
+                        ? '该错误可重试：将复用原 Commit 快照。'
+                        : '该错误不建议自动重试，请先处理根因（如分支/密钥）。'
+                      : ''}
+                  </Text>
+                  {canManage ? (
+                    <Button
+                      danger
+                      loading={retryMutation.isPending}
+                      disabled={!retryable}
+                      onClick={() => retryMutation.mutate()}
+                    >
+                      按原 Commit 重试
+                    </Button>
+                  ) : null}
+                </Space>
+              }
+            />
+          ) : null}
+
+          {job.status === 'SUCCEEDED' ? (
+            <Alert className="mt-md" type="success" showIcon title="AI 自动分析已完成" description="结果已写入当前批次，可进入评审列表进行人工确认。" />
+          ) : null}
+        </>
+      ) : null}
+    </Card>
+  )
+}
+
+function taskStoryLabel(task: AnalysisStoryTaskWithStory) {
+  // 优先展示需求编号（join review_story）；缺失时退化为短 story_id。
+  return task.review_story?.story_code ?? task.story_id.slice(0, 8)
+}
 function AiResultPage({ batchId, canManage }: { batchId: string; canManage: boolean }) {
+  const [resultMode, setResultMode] = useState<AiResultMode>('auto')
   const [file, setFile] = useState<File | null>(null)
   const [parsed, setParsed] = useState<Awaited<ReturnType<typeof parseAiWorkbook>> | null>(null)
   const [defaultBranch, setDefaultBranch] = useState<DefaultBranch>()
@@ -668,12 +1348,43 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
           </Space>
         </Card>
       ) : null}
-      <Card>
+      <Card title="选择 AI 结果处理方式" className="ai-result-mode-picker">
+        <Text type="secondary">两种流程相互独立，请选择当前要使用的处理方式。</Text>
+        <Radio.Group
+          className="ai-result-mode-options"
+          value={resultMode}
+          buttonStyle="solid"
+          onChange={(event) => setResultMode(event.target.value as AiResultMode)}
+        >
+          <Radio.Button value="auto">
+            <div className="ai-result-mode-content">
+              <Text strong>自动 AI 分析</Text>
+              <Text type="secondary">平台自动准备代码、检索需求并生成分析结果</Text>
+            </div>
+          </Radio.Button>
+          <Radio.Button value="manual">
+            <div className="ai-result-mode-content">
+              <Text strong>人工 AI Excel 兜底</Text>
+              <Text type="secondary">下载模板交给外部 AI 填写，再上传校验并导入</Text>
+            </div>
+          </Radio.Button>
+        </Radio.Group>
+      </Card>
+      {resultMode === 'auto' ? (
+        <AutoAnalysisSection
+          batch={workspaceQuery.data.batch}
+          storyCount={workspaceQuery.data.stories.length}
+          canManage={canManage}
+          hasExistingAiResult={alreadyImportedAi}
+        />
+      ) : (
+        <Space direction="vertical" size="large" className="page-stack">
+          <Card title="人工 AI Excel 兜底流程">
         <Space wrap>
           <Button type="primary" disabled={!workspaceQuery.data.stories.length || !isSupportedDefaultBranch(workspaceQuery.data.batch.default_branch)} onClick={() => downloadAiTemplate(workspaceQuery.data.batch, workspaceQuery.data.stories)}>
             下载AI填写模板
           </Button>
-          <Text type="secondary">模板包含批次信息、需求评审、代码证据三个 Sheet。</Text>
+          <Text type="secondary">保留人工兜底：如需手工分析可下载模板，模板包含批次信息、需求评审、代码证据三个 Sheet。</Text>
         </Space>
       </Card>
       <Card title="AI填写规范（复制给AI）">
@@ -769,6 +1480,8 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
           ) : null}
         </>
       )}
+        </Space>
+      )}
       <Card title="AI报告版本">
         <Table
           rowKey="id"
@@ -778,19 +1491,28 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
           columns={[
             { title: '版本', dataIndex: 'version', width: 90, render: (version) => `V${version}` },
             { title: '生效状态', dataIndex: 'is_active', width: 120, render: (active) => active ? <Tag color="green">当前生效</Tag> : <Tag>历史版本</Tag> },
+            {
+              title: '来源',
+              dataIndex: 'import_file_id',
+              width: 110,
+              render: (importFileId: string | null) =>
+                importFileId ? <Tag color="blue">人工导入</Tag> : <Tag color="geekblue">AI 自动分析</Tag>,
+            },
             { title: '分析基线', render: (_value, record) => <BaselineImportDetails aiImport={record} /> },
             { title: '导入时间', dataIndex: 'created_at', render: (value) => new Date(value).toLocaleString() },
             {
               title: '操作',
               width: 120,
               render: (_value, record) => (
-                <Button
-                  size="small"
-                  disabled={!record.import_file?.storage_path}
-                  onClick={() => record.import_file && downloadStorageFile(record.import_file.storage_path)}
-                >
-                  下载文件
-                </Button>
+                <Tooltip title={record.import_file_id ? '' : 'AI 自动分析结果无导出文件，下载不可用'}>
+                  <Button
+                    size="small"
+                    disabled={!record.import_file?.storage_path}
+                    onClick={() => record.import_file && downloadStorageFile(record.import_file.storage_path)}
+                  >
+                    下载文件
+                  </Button>
+                </Tooltip>
               ),
             },
           ]}
@@ -1106,7 +1828,6 @@ function HumanReviewPanel({ batchId, detail }: { batchId: string; detail: Review
 
 function DashboardPage({ batchId, canManage }: { batchId: string; canManage: boolean }) {
   const workspaceQuery = useBatchWorkspace(batchId)
-  const operationLogQuery = useQuery({ queryKey: ['operation-log', batchId], queryFn: () => listBatchOperationLogs(batchId) })
   const queryClient = useQueryClient()
   const { message, modal } = AntApp.useApp()
   const completeMutation = useMutation({
@@ -1116,7 +1837,7 @@ function DashboardPage({ batchId, canManage }: { batchId: string; canManage: boo
       queryClient.invalidateQueries({ queryKey: ['batch-workspace', batchId] })
       queryClient.invalidateQueries({ queryKey: ['batch', batchId] })
       queryClient.invalidateQueries({ queryKey: ['batches'] })
-      queryClient.invalidateQueries({ queryKey: ['operation-log', batchId] })
+      queryClient.invalidateQueries({ queryKey: ['operation-log'] })
     },
     onError: (error) => {
       modal.confirm({
@@ -1133,7 +1854,7 @@ function DashboardPage({ batchId, canManage }: { batchId: string; canManage: boo
       queryClient.invalidateQueries({ queryKey: ['batch-workspace', batchId] })
       queryClient.invalidateQueries({ queryKey: ['batch', batchId] })
       queryClient.invalidateQueries({ queryKey: ['batches'] })
-      queryClient.invalidateQueries({ queryKey: ['operation-log', batchId] })
+      queryClient.invalidateQueries({ queryKey: ['operation-log'] })
     },
     onError: (error) => message.error(error.message),
   })
@@ -1181,7 +1902,7 @@ function DashboardPage({ batchId, canManage }: { batchId: string; canManage: boo
         ) : null}
       </section>
 
-      <Row gutter={[16, 16]}>
+      <Row gutter={[12, 12]}>
         <Col xs={24} md={8}>
           <Card className="dashboard-kpi-card dashboard-kpi-card--neutral">
             <Statistic title="需求总数" value={stats.total} />
@@ -1208,32 +1929,78 @@ function DashboardPage({ batchId, canManage }: { batchId: string; canManage: boo
         </Col>
       </Row>
 
-      <Row gutter={[16, 16]}>
+      <Row gutter={[12, 12]}>
         <Col xs={24} lg={12}><DistributionCard title="AI 判断分布" items={aiItems} total={stats.aiDone} /></Col>
         <Col xs={24} lg={12}><DistributionCard title="人工结论分布" items={humanItems} total={stats.reviewed} /></Col>
       </Row>
 
-      <Row gutter={[16, 16]}>
+      <Row gutter={[12, 12]}>
         <Col xs={24} xl={12}><GroupedProgress title="按负责人统计" rows={stats.byOwner} batchId={batchId} filterKey="owner" note="协作需求按负责人分别计入" /></Col>
         <Col xs={24} xl={12}><GroupedProgress title="按应用统计" rows={stats.byApplication} batchId={batchId} filterKey="application" /></Col>
       </Row>
+    </div>
+  )
+}
 
-      <Card className="dashboard-card dashboard-log-card" title="操作日志">
-        <List
-          dataSource={operationLogQuery.data ?? []}
-          locale={{ emptyText: '暂无完成或重新打开记录' }}
-          renderItem={(item) => (
-            <List.Item>
-              <Space wrap>
-                <Tag color={item.action === 'COMPLETE' ? 'green' : 'gold'}>{item.action === 'COMPLETE' ? '完成批次' : '重新打开'}</Tag>
-                <Text>{new Date(item.created_at).toLocaleString()}</Text>
-                {item.action === 'COMPLETE' ? <Text type="secondary">{item.forced ? `强制完成，当时仍有 ${item.pending_count ?? 0} 条未确认` : '正常完成'}</Text> : null}
-              </Space>
-            </List.Item>
-          )}
+function OperationLogPage() {
+  const [weekCode, setWeekCode] = useState<string | undefined>()
+  const operationLogQuery = useQuery({ queryKey: ['operation-log'], queryFn: listOperationLogs })
+  const weekCodeOptions = useMemo(() => {
+    const codes = new Set<string>()
+    operationLogQuery.data?.forEach((item) => {
+      if (item.review_batch?.week_code) codes.add(item.review_batch.week_code)
+    })
+    return [...codes].sort((a, b) => b.localeCompare(a, 'zh-CN')).map((code) => ({ value: code, label: code }))
+  }, [operationLogQuery.data])
+  const filteredLogs = useMemo(() => {
+    if (!weekCode) return operationLogQuery.data ?? []
+    return (operationLogQuery.data ?? []).filter((item) => item.review_batch?.week_code === weekCode)
+  }, [operationLogQuery.data, weekCode])
+  const columns: ColumnsType<BatchOperationLogWithBatch> = [
+    {
+      title: '代码评审',
+      width: 260,
+      render: (_value, record) => record.review_batch
+        ? <Link to={`/batches/${record.review_batch.id}/dashboard`}>{record.review_batch.name}</Link>
+        : <Text type="secondary">批次已删除</Text>,
+    },
+    { title: '周标识', width: 140, render: (_value, record) => record.review_batch?.week_code ?? '-' },
+    { title: '操作', width: 120, render: (_value, record) => <Tag color={record.action === 'COMPLETE' ? 'green' : 'gold'}>{record.action === 'COMPLETE' ? '完成批次' : '重新打开'}</Tag> },
+    { title: '操作时间', dataIndex: 'created_at', width: 200, render: (value) => new Date(value).toLocaleString() },
+    {
+      title: '说明',
+      render: (_value, record) => record.action === 'COMPLETE'
+        ? <Text type="secondary">{record.forced ? `强制完成，当时仍有 ${record.pending_count ?? 0} 条未确认` : '正常完成'}</Text>
+        : <Text type="secondary">批次已重新打开</Text>,
+    },
+  ]
+
+  return (
+    <Space direction="vertical" size="large" className="page-stack">
+      <PageTitle title="操作日志" />
+      <Card className="dashboard-card dashboard-log-card">
+        <Space wrap className="operation-log-filter">
+          <Text strong>筛选条件</Text>
+          <Select
+            allowClear
+            showSearch
+            placeholder="按周标识筛选"
+            className="filter-select"
+            options={weekCodeOptions}
+            value={weekCode}
+            onChange={setWeekCode}
+            filterOption={(input, option) => String(option?.label ?? '').includes(input)}
+          />
+        </Space>
+        <Table
+          rowKey="id"
+          loading={operationLogQuery.isLoading}
+          columns={columns}
+          dataSource={filteredLogs}
+          pagination={{ pageSize: 10, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
         />
       </Card>
-    </div>
+    </Space>
   )
 }
 
@@ -1456,9 +2223,9 @@ function DistributionCard({ title, items, total }: { title: string; items: Distr
         {items.map((item) => {
           const content = (
             <>
-              <Text type="secondary">{item.label}</Text>
+              <Text type="secondary" className="dashboard-distribution-label">{item.label}</Text>
               <div className="dashboard-distribution-value">{item.value}</div>
-              <Text type="secondary">{percentage(item.value, total)}%</Text>
+              <Text type="secondary" className="dashboard-distribution-percent">{percentage(item.value, total)}%</Text>
             </>
           )
           const style = { borderInlineStartColor: item.color }

@@ -47,8 +47,130 @@ export interface ReviewBatch {
   remark: string | null
   created_by: string | null
   completed_at: string | null
+  ai_model_config_id: string | null
+  ai_model_snapshot: AiModelSnapshot | null
   created_at: string
   updated_at: string
+}
+
+// ---------------------------------------------------------------------------
+// AI 自动化 MVP：模型配置与分析任务（前端仅使用无密钥类型）
+// ---------------------------------------------------------------------------
+
+export type ModelProvider = 'openai-compatible' | 'deepseek-harness'
+
+/** 模型配置摘要：前端唯一可见的模型信息，绝不包含 API Key 或 secret UUID。 */
+export interface AiModelConfigSummary {
+  id: string
+  display_name: string
+  provider: string
+  base_url: string
+  model_name: string
+  enabled: boolean
+  has_api_key: boolean
+  max_parallel_tasks: number
+  request_timeout_ms: number
+  created_by?: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** 批次/任务保存的模型快照，不含密钥。 */
+export interface AiModelSnapshot {
+  model_config_id: string
+  display_name: string
+  provider: string
+  base_url: string
+  model_name: string
+  max_parallel_tasks?: number
+  request_timeout_ms?: number
+  retrieval_prompt_version?: string
+  analysis_prompt_version?: string
+}
+
+export type AnalysisJobStatus =
+  | 'QUEUED'
+  | 'PREPARING_CODE'
+  | 'PROCESSING'
+  | 'FINALIZING'
+  | 'SUCCEEDED'
+  | 'FAILED'
+
+export interface AnalysisJob {
+  id: string
+  batch_id: string
+  model_config_id: string
+  model_snapshot: AiModelSnapshot | null
+  requested_branch: DefaultBranch
+  status: AnalysisJobStatus
+  requested_by: string
+  worker_id: string | null
+  attempt: number
+  total_stories: number
+  retrieved_stories: number
+  analyzed_stories: number
+  error_code: string | null
+  error_message: string | null
+  locked_at: string | null
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface AnalysisRepositorySnapshot {
+  id: string
+  job_id: string
+  repository_name: string
+  requested_branch: DefaultBranch
+  commit_sha: string
+  commit_subject: string | null
+  prepared_at: string
+}
+
+export type StoryTaskStatus = 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
+
+export interface AnalysisStoryTask {
+  id: string
+  job_id: string
+  story_id: string
+  retrieval_status: StoryTaskStatus
+  analysis_status: StoryTaskStatus
+  worker_id: string | null
+  lease_expires_at: string | null
+  heartbeat_at: string | null
+  retrieval_model: string | null
+  analysis_model: string | null
+  retrieval_prompt_version: string | null
+  analysis_prompt_version: string | null
+  retrieval_attempt: number
+  analysis_attempt: number
+  error_code: string | null
+  error_message: string | null
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** join review_story 后带需求编号/名称的任务视图（用于前端展示编号）。 */
+export interface AnalysisStoryTaskWithStory extends AnalysisStoryTask {
+  review_story: { story_code: string; story_name: string } | null
+}
+
+/** 近 15 秒在线 Worker 汇总。 */
+export interface AnalysisWorkerStatus {
+  online: number
+  processing: number
+  slots: number
+}
+
+/** 模型级并发状态。 */
+export interface ModelConcurrencyStatus {
+  model_config_id: string
+  max_parallel_tasks: number
+  active_tasks: number
+  available_slots: number
 }
 
 export interface ReviewStory {
@@ -152,6 +274,10 @@ export interface BatchOperationLog {
   forced: boolean
   performed_by: string | null
   created_at: string
+}
+
+export interface BatchOperationLogWithBatch extends BatchOperationLog {
+  review_batch: Pick<ReviewBatch, 'id' | 'name' | 'week_code'> | null
 }
 
 export interface SourceStoryInput {

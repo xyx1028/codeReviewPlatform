@@ -6,8 +6,15 @@ import type {
   AiCodeEvidence,
   AiEvidenceInput,
   AiImportRecord,
+  AiModelConfigSummary,
   AiReviewResult,
+  AnalysisJob,
+  AnalysisRepositorySnapshot,
+  AnalysisStoryTaskWithStory,
+  AnalysisWorkerStatus,
+  ModelConcurrencyStatus,
   BatchOperationLog,
+  BatchOperationLogWithBatch,
   BatchWorkspace,
   DefaultBranch,
   HumanReview,
@@ -25,6 +32,7 @@ export interface CreateBatchInput {
   name: string
   week_code: string
   default_branch: DefaultBranch
+  ai_model_config_id: string
   remark?: string | null
 }
 
@@ -348,4 +356,176 @@ export async function listBatchOperationLogs(batchId: string) {
     .eq('batch_id', batchId)
     .order('created_at', { ascending: false })
   return unwrap<BatchOperationLog[]>({ data, error })
+}
+
+export async function listOperationLogs() {
+  const client = requireSupabase()
+  const { data, error } = await client
+    .from('batch_operation_log')
+    .select('*, review_batch(id, name, week_code)')
+    .order('created_at', { ascending: false })
+  return unwrap<BatchOperationLogWithBatch[]>({ data, error })
+}
+
+// ---------------------------------------------------------------------------
+// AI 自动化 MVP：模型管理 + 分析任务 API
+//
+// 安全约束（见方案第 7.8 / 9.2 / 14.2 节）：
+// - 前端只使用无密钥类型 AiModelConfigSummary。
+// - 模型的创建/更新（含 API Key 写入）只能通过 admin-model-config Edge Function，
+//   由服务端再次校验 ADMIN 身份并写入 Supabase Vault；前端绝不接触密钥或 secret UUID。
+// - API Key 仅密码输入；编辑时永不回显，留空表示不轮换。
+// ---------------------------------------------------------------------------
+
+/** 模型元数据写入输入（不含密钥）。API Key 单独字段传入 Edge Function。 */
+export interface ModelConfigInput {
+  display_name: string
+  provider: string
+  base_url: string
+  model_name: string
+  max_parallel_tasks: number
+  request_timeout_ms: number
+  /** 明文 API Key。仅在新增或轮换时提供；留空表示不修改现有密钥。 */
+  api_key?: string | null
+}
+
+/** 通过 admin-model-config Edge Function 执行受限的模型密钥操作。 */
+async function invokeAdminModelConfig<T>(action: string, payload: Record<string, unknown>) {
+  const client = requireSupabase()
+  const { data, error } = await client.functions.invoke('admin-model-config', {
+    body: { action, ...payload },
+  })
+  if (error) {
+    // Edge Function 返回的业务错误信息尽量透传给前端
+    const context = (error as { context?: { body?: unknown } }).context
+    const bodyMessage =
+      context && typeof context.body === 'object' && context.body
+        ? (context.body as { message?: string; error?: string }).message ??
+          (context.body as { message?: string; error?: string }).error
+        : undefined
+    throw new Error(bodyMessage ?? error.message)
+  }
+  const result = data as { data?: T; error?: string } | T
+  if (result && typeof result === 'object' && 'error' in result && (result as { error?: string }).error) {
+    throw new Error((result as { error: string }).error)
+  }
+  if (result && typeof result === 'object' && 'data' in result) {
+    return (result as { data: T }).data
+  }
+  return result as T
+}
+
+/** 供有创建批次权限的用户读取：仅返回已启用且已配置密钥的模型（无密钥字段）。 */
+export async function listEnabledModelConfigs() {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('list_enabled_model_configs')
+  return unwrap<AiModelConfigSummary[]>({ data, error })
+}
+
+/** ADMIN：返回全部模型配置的无密钥摘要及“是否已配置密钥”。 */
+export async function adminListModelConfigs() {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_list_model_configs')
+  return unwrap<AiModelConfigSummary[]>({ data, error })
+}
+
+/** ADMIN：创建模型配置，密钥写入 Vault，经 Edge Function 完成。返回新建配置 id。 */
+export async function adminCreateModelConfig(input: ModelConfigInput) {
+  return invokeAdminModelConfig<{ id: string }>('create', { input })
+}
+
+/** ADMIN：更新模型配置。api_key 留空时保留原密钥，绝不回显旧值。返回配置 id。 */
+export async function adminUpdateModelConfig(id: string, input: ModelConfigInput) {
+  return invokeAdminModelConfig<{ id: string }>('update', { id, input })
+}
+
+/** ADMIN：启用/停用模型（不物理删除，保留历史引用）。返回配置 id。 */
+export async function adminSetModelEnabled(id: string, enabled: boolean) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_set_model_enabled', {
+    p_id: id,
+    p_enabled: enabled,
+  })
+  return unwrap<string>({ data, error })
+}
+
+/** ADMIN：连接测试（仅最小测试请求，不携带代码或需求），经 Edge Function 完成。 */
+export async function adminTestModelConfig(id: string) {
+  return invokeAdminModelConfig<{ ok: boolean; message?: string; latency_ms?: number }>('test', { id })
+}
+
+/** 批次管理者：为未开始任务的批次选择已启用模型（历史批次补选）。返回批次 id。 */
+export async function setBatchModel(batchId: string, modelConfigId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('set_batch_model', {
+    p_batch_id: batchId,
+    p_model_config_id: modelConfigId,
+  })
+  return unwrap<string>({ data, error })
+}
+
+/** 登录用户：校验权限与前置条件，复制批次分支，建立任务与 story task。返回 job id。 */
+export async function enqueueAnalysisJob(batchId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('enqueue_analysis_job', { p_batch_id: batchId })
+  return unwrap<string>({ data, error })
+}
+
+/** 读取批次最新的一个分析任务；无任务时返回 null。 */
+export async function getLatestAnalysisJob(batchId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client
+    .from('analysis_job')
+    .select('*')
+    .eq('batch_id', batchId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) throw new Error(error.message)
+  return (data ?? null) as AnalysisJob | null
+}
+
+/** 读取某任务的 4 个仓库快照。 */
+export async function listRepositorySnapshots(jobId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client
+    .from('analysis_repository_snapshot')
+    .select('*')
+    .eq('job_id', jobId)
+    .order('repository_name')
+  return unwrap<AnalysisRepositorySnapshot[]>({ data, error })
+}
+
+/** 读取某任务的逐需求任务（含检索/分析状态、处理中 Worker、错误码），并 join 需求编号。 */
+export async function listAnalysisStoryTasks(jobId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client
+    .from('analysis_story_task')
+    .select('*, review_story(story_code, story_name)')
+    .eq('job_id', jobId)
+    .order('created_at')
+  return unwrap<AnalysisStoryTaskWithStory[]>({ data, error })
+}
+
+/** 只读：近 15 秒在线 Worker 汇总（在线数 / 处理中数 / 总槽位）。 */
+export async function getActiveAnalysisWorkers() {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('list_active_analysis_workers')
+  return unwrap<AnalysisWorkerStatus>({ data, error })
+}
+
+/** 只读：某模型配置当前并发状态（最大并发 / 活跃 / 空闲槽位）。 */
+export async function getModelConcurrencyStatus(modelConfigId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('get_model_concurrency_status', {
+    p_model_config_id: modelConfigId,
+  })
+  return unwrap<ModelConcurrencyStatus>({ data, error })
+}
+
+/** 批次管理者：只允许 FAILED 任务按原快照重试（复用原 Commit SHA）。返回 job id。 */
+export async function retryAnalysisJob(jobId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('retry_analysis_job', { p_job_id: jobId })
+  return unwrap<string>({ data, error })
 }

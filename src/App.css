@@ -1,7 +1,7 @@
 .dashboard-page {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   padding: 4px;
 }
 
@@ -107,9 +107,22 @@
 }
 
 .dashboard-kpi-card {
-  min-height: 150px;
+  min-height: 128px;
   border-inline-start: 5px solid #64748b;
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+}
+
+.dashboard-kpi-card .ant-card-body {
+  padding: 18px 20px;
+}
+
+.dashboard-kpi-card .ant-statistic-title {
+  margin-bottom: 2px;
+}
+
+.dashboard-kpi-card .ant-statistic-content {
+  font-weight: 700;
+  line-height: 1.15;
 }
 
 .dashboard-kpi-card--neutral {
@@ -127,34 +140,67 @@
   background: linear-gradient(135deg, #ffffff, #f0fdf4);
 }
 
-.dashboard-kpi-card .ant-statistic-content {
-  font-weight: 700;
-}
-
 .dashboard-kpi-footer {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 18px;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.dashboard-distribution-card .ant-card-head {
+  min-height: 48px;
+  padding: 0 16px;
+}
+
+.dashboard-distribution-card .ant-card-head-title {
+  padding: 13px 0;
 }
 
 .dashboard-distribution-card .ant-card-body {
-  padding: 16px;
+  padding: 12px 16px;
 }
 
 .dashboard-distribution-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 8px;
 }
 
 .dashboard-distribution-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: 1fr 1fr;
+  align-items: center;
   min-width: 0;
-  padding: 12px 14px;
+  min-height: 58px;
+  padding: 8px 10px;
   border: 1px solid #e5e7eb;
   border-inline-start: 4px solid;
   border-radius: 10px;
   background: #fafafa;
+}
+
+.dashboard-distribution-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-distribution-percent {
+  align-self: end;
+}
+
+.dashboard-distribution-value {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  align-self: center;
+  margin: 0;
+  color: #0f172a;
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 1;
 }
 
 a.dashboard-distribution-item {
@@ -175,16 +221,12 @@ a.dashboard-distribution-item:focus-visible {
   outline-offset: 2px;
 }
 
-.dashboard-distribution-value {
-  margin: 4px 0;
-  color: #0f172a;
-  font-size: 24px;
-  font-weight: 700;
-  line-height: 1.2;
-}
-
 .dashboard-card {
   box-shadow: 0 6px 20px rgba(15, 23, 42, 0.04);
+}
+
+.operation-log-filter {
+  margin-bottom: 16px;
 }
 
 .dashboard-card-heading {
@@ -561,6 +603,27 @@ a.dashboard-distribution-item:focus-visible {
     align-items: flex-start;
   }
 
+  .dashboard-kpi-card {
+    min-height: 122px;
+  }
+
+  .dashboard-kpi-card .ant-card-body {
+    padding: 16px;
+  }
+
+  .dashboard-distribution-card .ant-card-head {
+    min-height: 44px;
+    padding: 0 14px;
+  }
+
+  .dashboard-distribution-card .ant-card-head-title {
+    padding: 11px 0;
+  }
+
+  .dashboard-distribution-card .ant-card-body {
+    padding: 10px 14px;
+  }
+
   .dashboard-distribution-grid {
     grid-template-columns: 1fr;
   }
@@ -589,4 +652,73 @@ a.dashboard-distribution-item:focus-visible {
   a.dashboard-distribution-item {
     transition: none;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* AI 自动化 MVP：自动分析卡片与前置条件展示                            */
+/* ------------------------------------------------------------------ */
+.auto-analysis-card .precondition-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ai-result-mode-picker .ant-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ai-result-mode-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 100%;
+}
+
+.ai-result-mode-options .ant-radio-button-wrapper {
+  display: flex;
+  align-items: center;
+  height: auto;
+  min-height: 76px;
+  padding: 14px 18px;
+  white-space: normal;
+}
+
+.ai-result-mode-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ai-result-mode-options .ant-radio-button-wrapper-checked .ant-typography {
+  color: inherit;
+}
+
+@media (max-width: 640px) {
+  .ai-result-mode-options {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-result-mode-options .ant-radio-button-wrapper:first-child {
+    border-radius: 8px 8px 0 0;
+  }
+
+  .ai-result-mode-options .ant-radio-button-wrapper:last-child {
+    border-left-width: 1px;
+    border-radius: 0 0 8px 8px;
+  }
+}
+
+.precondition-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mt-md {
+  margin-top: 16px;
+}
+
+.mb-md {
+  margin-bottom: 16px;
 }

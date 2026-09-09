@@ -30,3 +30,30 @@ If you are developing a production application, we recommend enabling type-aware
 ```
 
 See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+
+## AI Automation Worker
+
+The background analysis Worker lives under `worker/` and builds independently of
+the frontend. It polls Supabase, prepares the four whitelisted repositories at a
+frozen commit SHA, runs the two-stage `ReviewHarness` (retrieval → analysis) over
+read-only code tools, validates structured results, and writes AI results via
+service-role RPCs.
+
+Scripts:
+
+```bash
+npm run worker:build   # tsc -p tsconfig.worker.json  -> dist-worker/
+npm run worker:start   # node dist-worker/index.js
+npm run worker:check-connectivity # GitLab + Supabase/Vault + minimal model ping
+npm run worker:dev     # tsx worker/src/index.ts
+npm run test:worker    # vitest run worker
+```
+
+Container deployment (default 4 replicas × 2 story slots = capacity 8):
+
+```bash
+docker compose -f docker-compose.worker.yml up -d --scale worker=4
+```
+
+See `worker/OPERATIONS.md` for the full Secret checklist, deployment,
+connectivity verification, logging/audit rules, and the weekly runbook.

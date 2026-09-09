@@ -1,0 +1,33 @@
+# Worker image for the AI automation MVP. (Plan §17.1, §17.2)
+# Runs as a non-root user; no ports are exposed (outbound-only worker).
+FROM node:24-bookworm-slim
+
+# git + ripgrep are required by the read-only code tools; ca-certificates for TLS.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git ripgrep ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install exact, locked dependencies.
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Build the worker.
+COPY tsconfig.worker.json ./
+COPY worker ./worker
+RUN npm run worker:build
+
+ENV NODE_ENV=production
+ENV WORKSPACE_ROOT=/workspace/jobs
+ENV CODE_CACHE_ROOT=/workspace/cache
+
+# Create the non-root user and the workspace it owns. (Plan §17.2)
+RUN groupadd --system worker \
+  && useradd --system --gid worker --home-dir /workspace worker \
+  && mkdir -p /workspace/jobs /workspace/cache \
+  && chown -R worker:worker /workspace /app
+
+USER worker
+
+CMD ["npm", "run", "worker:start"]
