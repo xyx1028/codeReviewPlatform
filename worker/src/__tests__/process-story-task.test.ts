@@ -48,6 +48,20 @@ const RETRIEVAL: RetrievalResult = {
   insufficientEvidence: false,
 }
 
+const MIXED_RETRIEVAL: RetrievalResult = {
+  ...RETRIEVAL,
+  candidates: [
+    ...RETRIEVAL.candidates,
+    {
+      repository: 'kdmanage-backend',
+      filePath: 'tmanage-backend',
+      startLine: 1,
+      endLine: 1,
+      reason: 'model returned a repository-like path that is not a file',
+    },
+  ],
+}
+
 const ANALYSIS: AnalysisResult = {
   storyCode: 'PRJ-001',
   verdict: 'IMPLEMENTED',
@@ -73,13 +87,18 @@ const ANALYSIS: AnalysisResult = {
 class RecordingHarness implements ReviewHarness {
   retrieveCalls = 0
   analyzeCalls = 0
-  constructor(private analysisResult: AnalysisResult = ANALYSIS) {}
+  analysisInputs: AnalysisInput[] = []
+  constructor(
+    private analysisResult: AnalysisResult = ANALYSIS,
+    private retrievalResult: RetrievalResult = RETRIEVAL,
+  ) {}
   async retrieve(_i: RetrievalInput, _t: RetrievalTools): Promise<RetrievalResult> {
     this.retrieveCalls++
-    return RETRIEVAL
+    return this.retrievalResult
   }
-  async analyze(_i: AnalysisInput): Promise<AnalysisResult> {
+  async analyze(input: AnalysisInput): Promise<AnalysisResult> {
     this.analyzeCalls++
+    this.analysisInputs.push(input)
     return this.analysisResult
   }
 }
@@ -148,15 +167,19 @@ function baseTask(overrides: Partial<StoryTask> = {}): StoryTask {
 }
 
 describe('processStoryTask', () => {
-  it('runs both stages and saves results for a fresh task', async () => {
-    const { db, calls } = fakeJobsDb()
-    const harness = new RecordingHarness()
+  it('runs both stages and saves only materialized candidates for a fresh task', async () => {
+    const { db, calls, saved } = fakeJobsDb()
+    const harness = new RecordingHarness(ANALYSIS, MIXED_RETRIEVAL)
     const outcome = await processStoryTask(harness, db, ctx(), baseTask(), silentLogger())
     expect(outcome.ok).toBe(true)
     expect(harness.retrieveCalls).toBe(1)
     expect(harness.analyzeCalls).toBe(1)
     expect(calls).toContain('saveRetrievalResult')
     expect(calls).toContain('saveAnalysisResult')
+    expect(saved.retrieval).toEqual(RETRIEVAL)
+    expect(harness.analysisInputs[0]?.retrieval).toEqual(RETRIEVAL)
+    expect(harness.analysisInputs[0]?.snippets).toHaveLength(1)
+    expect(harness.analysisInputs[0]?.snippets[0]?.filePath).toBe('src/A.java')
   })
 
   it('recovers a saved SUCCEEDED retrieval and skips stage one', async () => {
@@ -165,11 +188,26 @@ describe('processStoryTask', () => {
     const task = baseTask({ retrieval_status: 'SUCCEEDED', retrieval_output: RETRIEVAL })
     const outcome = await processStoryTask(harness, db, ctx(), task, silentLogger())
     expect(outcome.ok).toBe(true)
-    // Stage one skipped: no retrieve call, no saveRetrievalResult.
+    // Stage one skipped and an unchanged recovered result is not saved again.
     expect(harness.retrieveCalls).toBe(0)
     expect(harness.analyzeCalls).toBe(1)
     expect(calls).not.toContain('saveRetrievalResult')
     expect(calls).toContain('saveAnalysisResult')
+  })
+
+  it('cleans unavailable candidates from a recovered retrieval before analysis', async () => {
+    const { db, calls, saved } = fakeJobsDb()
+    const harness = new RecordingHarness()
+    const task = baseTask({
+      retrieval_status: 'SUCCEEDED',
+      retrieval_output: MIXED_RETRIEVAL,
+    })
+    const outcome = await processStoryTask(harness, db, ctx(), task, silentLogger())
+    expect(outcome.ok).toBe(true)
+    expect(harness.retrieveCalls).toBe(0)
+    expect(calls).toContain('saveRetrievalResult')
+    expect(saved.retrieval).toEqual(RETRIEVAL)
+    expect(harness.analysisInputs[0]?.retrieval).toEqual(RETRIEVAL)
   })
 
   it('re-runs stage one when the stored retrieval is malformed', async () => {

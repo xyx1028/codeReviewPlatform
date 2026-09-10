@@ -103,7 +103,6 @@ export async function processStoryTask(
     let retrieval: RetrievalResult
     if (recovered) {
       retrieval = recovered
-      stage = 'analysis'
       log.info('retrieval_recovered', {
         event: 'retrieval_recovered',
         stage: 'retrieval',
@@ -135,6 +134,21 @@ export async function processStoryTask(
       repositories: ctx.repositories,
     })
 
+    const materializedKeys = new Set(
+      taskWorkspace.files.map((file) => `${file.repository}::${file.filePath}`),
+    )
+    const effectiveCandidates = retrieval.candidates.filter((candidate) =>
+      materializedKeys.has(`${candidate.repository}::${candidate.filePath}`),
+    )
+    const effectiveRetrieval: RetrievalResult = {
+      ...retrieval,
+      candidates: effectiveCandidates,
+      insufficientEvidence: retrieval.insufficientEvidence || effectiveCandidates.length === 0,
+    }
+    const retrievalFiltered =
+      effectiveCandidates.length !== retrieval.candidates.length ||
+      effectiveRetrieval.insufficientEvidence !== retrieval.insufficientEvidence
+
     const workspaceRepoPaths = new Map<RepositoryName, string>(
       taskWorkspace.repositories.map((repo) => [repo.name, repo.path]),
     )
@@ -153,7 +167,7 @@ export async function processStoryTask(
       })),
     }
     const snippets = await freezeSnippets(
-      retrieval,
+      effectiveRetrieval,
       workspaceRetrieveCtx,
       workspaceRepoPaths,
     )
@@ -161,19 +175,17 @@ export async function processStoryTask(
     log.info('task_workspace_prepared', {
       event: 'task_workspace_prepared',
       stage,
-      files: taskWorkspace.repositories.length === 0
-        ? 0
-        : new Set(retrieval.candidates.map((candidate) =>
-          `${candidate.repository}::${candidate.filePath}`)).size,
+      files: taskWorkspace.files.length,
+      skipped_candidates: retrieval.candidates.length - effectiveCandidates.length,
       bytes: taskWorkspace.totalBytes,
     })
 
-    if (!recovered) {
+    if (!recovered || retrievalFiltered) {
       if (leaseLost) throw new TaskLeaseLostError()
       await jobsDb.saveRetrievalResult(
         task.id,
         ctx.workerId,
-        retrieval,
+        effectiveRetrieval,
         ctx.modelName,
         RETRIEVAL_PROMPT_VERSION,
       )
@@ -189,7 +201,7 @@ export async function processStoryTask(
         repoPaths: workspaceRepoPaths,
       },
       task,
-      retrieval,
+      effectiveRetrieval,
       snippets,
     )
     if (leaseLost) throw new TaskLeaseLostError()

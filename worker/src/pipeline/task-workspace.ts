@@ -16,7 +16,7 @@ import {
 import { join, relative, resolve, sep } from 'node:path'
 import type { RetrievalResult } from '../ai/schemas.js'
 import type { RepositoryName } from '../git/repositories.js'
-import { isInside, resolveSafePath } from '../security/path-policy.js'
+import { isInside, PathPolicyError, resolveSafePath } from '../security/path-policy.js'
 import { TOOL_LIMITS } from '../tools/types.js'
 import type { PreparedRepoRef } from './process-story-task.js'
 
@@ -63,6 +63,7 @@ export interface PreparedTaskWorkspace {
   root: string
   manifestPath: string
   repositories: PreparedRepoRef[]
+  files: TaskWorkspaceFile[]
   totalBytes: number
   /** Internal cleanup identity; callers must not construct this value. */
   cleanup: {
@@ -117,10 +118,11 @@ export function prepareTaskWorkspace(input: TaskWorkspaceInput): PreparedTaskWor
         throw new Error(`candidate repository not prepared: ${candidate.repository}`)
       }
 
-      const source = openCandidateFile(repo.path, candidate.filePath)
+      let source: ReturnType<typeof openCandidateFile> | null = null
       try {
+        source = openCandidateFile(repo.path, candidate.filePath)
         if (source.size > TOOL_LIMITS.maxFileBytes) {
-          throw new Error(
+          throw new CandidateUnavailableError(
             `candidate file exceeds ${TOOL_LIMITS.maxFileBytes} bytes: ${candidate.repository}/${candidate.filePath}`,
           )
         }
@@ -149,8 +151,10 @@ export function prepareTaskWorkspace(input: TaskWorkspaceInput): PreparedTaskWor
           size: content.byteLength,
           sha256: createHash('sha256').update(content).digest('hex'),
         })
+      } catch (error) {
+        if (!(error instanceof CandidateUnavailableError)) throw error
       } finally {
-        source.close()
+        source?.close()
       }
     }
 
@@ -186,6 +190,7 @@ export function prepareTaskWorkspace(input: TaskWorkspaceInput): PreparedTaskWor
       root: attemptRoot,
       manifestPath: safeChild(attemptRoot, 'manifest.json'),
       repositories,
+      files,
       totalBytes,
       cleanup: {
         workspaceRoot,
@@ -295,32 +300,76 @@ function createDestinationPath(repoRoot: string, filePath: string): string {
   return destination
 }
 
+class CandidateUnavailableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CandidateUnavailableError'
+  }
+}
+
+function isUnavailableCandidateFsError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code
+  return code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP'
+}
+
 function openCandidateFile(
   repoRoot: string,
   filePath: string,
 ): { fd: number; size: number; close: () => void } {
-  resolveSafePath(repoRoot, filePath)
+  try {
+    resolveSafePath(repoRoot, filePath)
+  } catch (error) {
+    if (error instanceof PathPolicyError) {
+      throw new CandidateUnavailableError(error.message)
+    }
+    throw error
+  }
 
   const root = realpathSync(repoRoot)
   const lexicalPath = resolve(root, filePath)
   if (!isInside(root, lexicalPath) || lexicalPath === root) {
-    throw new Error(`candidate path escapes repository: ${filePath}`)
+    throw new CandidateUnavailableError(`candidate path escapes repository: ${filePath}`)
   }
 
   let current = root
   for (const segment of filePath.split('/')) {
     current = safeChild(current, segment)
-    const stat = lstatSync(current)
-    if (stat.isSymbolicLink()) {
-      throw new Error(`candidate path contains a symbolic link: ${filePath}`)
+    try {
+      const stat = lstatSync(current)
+      if (stat.isSymbolicLink()) {
+        throw new CandidateUnavailableError(
+          `candidate path contains a symbolic link: ${filePath}`,
+        )
+      }
+      if (current === lexicalPath && !stat.isFile()) {
+        throw new CandidateUnavailableError(
+          `candidate is not a regular file: ${filePath}`,
+        )
+      }
+    } catch (error) {
+      if (error instanceof CandidateUnavailableError) throw error
+      if (isUnavailableCandidateFsError(error)) {
+        throw new CandidateUnavailableError(
+          `candidate file is unavailable: ${filePath}`,
+        )
+      }
+      throw error
     }
   }
 
-  const fd = openSync(lexicalPath, constants.O_RDONLY | constants.O_NOFOLLOW)
+  let fd: number
+  try {
+    fd = openSync(lexicalPath, constants.O_RDONLY | constants.O_NOFOLLOW)
+  } catch (error) {
+    if (isUnavailableCandidateFsError(error)) {
+      throw new CandidateUnavailableError(`candidate file is unavailable: ${filePath}`)
+    }
+    throw error
+  }
   try {
     const stat = fstatSync(fd)
     if (!stat.isFile()) {
-      throw new Error(`candidate is not a regular file: ${filePath}`)
+      throw new Error(`candidate file type changed while copying: ${filePath}`)
     }
     return {
       fd,

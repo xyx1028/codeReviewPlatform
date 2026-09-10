@@ -1,9 +1,9 @@
 -- 0010_ai_automation_mvp_test.sql
 -- ---------------------------------------------------------------------------
--- AI 自动化 MVP（迁移 0010）行为回归测试。
+-- AI 自动化 MVP（迁移 0010..0016）行为回归测试。
 --
 -- 运行要求：
---   * 目标库已按顺序应用 0001..0010（真实 Supabase 或本地 Postgres 均可）。
+--   * 目标库已按顺序应用 0001..0016（真实 Supabase 或本地 Postgres 均可）。
 --   * 以超级用户 / 库属主（通常 postgres）执行，需能 `set local role`。
 --   * 使用 psql 并开启 ON_ERROR_STOP，任一断言失败即以非零码退出。
 --
@@ -430,8 +430,13 @@ begin
   perform pg_temp.assert(v_first_task_ret >= 1,
     'job.analyzed_stories progressed to include the saved task');
 
-  -- D2. fail_story_task 令整个 job FAILED
+  -- D2. fail_story_task 令整个 job FAILED，并撤销同 Job 的全部任务租约。
   --     使用 second_task（w-task-4 持有且租约有效）。
+  select retrieval_output, analysis_output into v_arr, v_snap_json
+  from public.analysis_story_task where id = v_first_task;
+  select id into v_task from public.analysis_story_task
+  where job_id = v_job and worker_id = 'w-task-3';
+
   set local role service_role;
   perform public.fail_story_task(v_second_task, 'w-task-4', 'analysis', 'E_TEST', 'boom');
   reset role;
@@ -440,6 +445,47 @@ begin
   perform pg_temp.assert(v_txt = 'FAILED', 'single task failure marks whole job FAILED');
   select analysis_status into v_txt from public.analysis_story_task where id = v_second_task;
   perform pg_temp.assert(v_txt = 'FAILED', 'failed task analysis_status FAILED');
+  perform pg_temp.assert(not exists (
+    select 1 from public.analysis_story_task
+    where job_id = v_job
+      and (retrieval_status = 'RUNNING' or analysis_status = 'RUNNING')
+  ), 'job failure leaves no task stage RUNNING');
+  perform pg_temp.assert(not exists (
+    select 1 from public.analysis_story_task
+    where job_id = v_job
+      and (worker_id is not null or lease_expires_at is not null or heartbeat_at is not null)
+  ), 'job failure clears all sibling task ownership and leases');
+  perform pg_temp.assert((
+    select worker_id is null and locked_at is null
+      and finalizer_worker_id is null and finalize_lease_expires_at is null
+    from public.analysis_job where id = v_job
+  ), 'job failure clears all job-level ownership');
+  perform pg_temp.assert((
+    select retrieval_status = 'PENDING' and analysis_status = 'PENDING'
+    from public.analysis_story_task where id = v_task
+  ), 'running sibling returns to PENDING without being marked FAILED');
+  perform pg_temp.assert((
+    select retrieval_status = 'SUCCEEDED' and analysis_status = 'SUCCEEDED'
+      and retrieval_output = v_arr and analysis_output = v_snap_json
+    from public.analysis_story_task where id = v_first_task
+  ), 'job failure preserves completed task status and outputs');
+
+  set local role service_role;
+  v_bool := public.heartbeat_story_task(v_task, 'w-task-3', 900);
+  reset role;
+  perform pg_temp.assert(v_bool = false, 'revoked sibling lease cannot heartbeat');
+  perform pg_temp.assert_raises(
+    format('select public.save_retrieval_result(%L, %L, %L::jsonb)', v_task, 'w-task-3', '{"late":true}'),
+    'TASK_LEASE_LOST',
+    'revoked sibling lease rejects late retrieval save');
+  perform pg_temp.assert_raises(
+    format('select public.save_analysis_result(%L, %L, %L::jsonb)', v_first_task, 'w-takeover', '{"late":true}'),
+    'TASK_LEASE_LOST',
+    'completed task old owner cannot write after job failure');
+  set local role service_role;
+  v_result_env := public.claim_next_story_task('w-after-failure', 900);
+  reset role;
+  perform pg_temp.assert(v_result_env is null, 'FAILED job offers no further story tasks');
 
   -- D2b. 错误 owner 调用 fail_story_task -> TASK_LEASE_LOST
   --      重新造一个持租约任务用于验证错误 owner 被拒。
@@ -684,6 +730,9 @@ begin
     has_function_privilege('service_role', 'public.claim_next_story_task(text, integer)', 'EXECUTE'),
     'service_role has EXECUTE on claim_next_story_task');
   perform pg_temp.assert(
+    has_function_privilege('service_role', 'public.fail_story_task(uuid, text, text, text, text)', 'EXECUTE'),
+    'service_role has EXECUTE on fail_story_task');
+  perform pg_temp.assert(
     has_function_privilege('service_role', 'public.complete_analysis_job(uuid, text, jsonb, jsonb)', 'EXECUTE'),
     'service_role has EXECUTE on complete_analysis_job');
   perform pg_temp.assert(
@@ -699,6 +748,9 @@ begin
   perform pg_temp.assert(
     not has_function_privilege('authenticated', 'public.claim_next_story_task(text, integer)', 'EXECUTE'),
     'authenticated has NO EXECUTE on claim_next_story_task');
+  perform pg_temp.assert(
+    not has_function_privilege('authenticated', 'public.fail_story_task(uuid, text, text, text, text)', 'EXECUTE'),
+    'authenticated has NO EXECUTE on fail_story_task');
   perform pg_temp.assert(
     not has_function_privilege('authenticated', 'public.complete_analysis_job(uuid, text, jsonb, jsonb)', 'EXECUTE'),
     'authenticated has NO EXECUTE on complete_analysis_job');

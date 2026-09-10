@@ -124,28 +124,24 @@ export async function freezeSnippets(
   const snippets: FrozenSnippet[] = []
   let totalChars = 0
   for (const c of result.candidates.slice(0, RETRIEVAL_LIMITS.maxCandidates)) {
-    try {
-      const snippet = await readCode(resolve, {
-        repository: c.repository,
-        path: c.filePath,
-        startLine: c.startLine,
-        endLine: c.endLine,
-      })
-      if (totalChars + snippet.content.length > RETRIEVAL_LIMITS.maxContextChars) {
-        break
-      }
-      totalChars += snippet.content.length
-      snippets.push({
-        repository: c.repository,
-        commitSha: shaByRepo.get(c.repository) ?? '',
-        filePath: snippet.filePath,
-        startLine: snippet.startLine,
-        endLine: snippet.endLine,
-        content: snippet.content,
-      })
-    } catch {
-      // Skip unreadable candidates; evidence validation will catch invalid refs.
+    const snippet = await readCode(resolve, {
+      repository: c.repository,
+      path: c.filePath,
+      startLine: c.startLine,
+      endLine: c.endLine,
+    })
+    if (totalChars + snippet.content.length > RETRIEVAL_LIMITS.maxContextChars) {
+      break
     }
+    totalChars += snippet.content.length
+    snippets.push({
+      repository: c.repository,
+      commitSha: shaByRepo.get(c.repository) ?? '',
+      filePath: snippet.filePath,
+      startLine: snippet.startLine,
+      endLine: snippet.endLine,
+      content: snippet.content,
+    })
   }
   return snippets
 }
