@@ -1,9 +1,9 @@
 /**
  * retrieve-story: run stage one for a single story task. (Plan §11)
  *
- * Builds the read-only RetrievalTools bound to the job's prepared repositories,
- * enforces the tool-call limit, and returns a validated RetrievalResult plus the
- * frozen snippets used as stage-two context.
+ * Builds the read-only RetrievalTools bound to the complete cached repository
+ * snapshots and enforces the tool-call limit. Candidate code is frozen only
+ * after it has been copied into the isolated task workspace.
  */
 
 import type { ReviewHarness, RetrievalTools } from '../ai/harness.js'
@@ -37,7 +37,7 @@ export interface RetrieveStoryContext {
   }>
 }
 
-/** Build the four read-only tools bound to the prepared repositories. */
+/** Build the four read-only tools bound to the prepared cache snapshots. */
 export function buildRetrievalTools(
   repoPaths: Map<RepositoryName, string>,
 ): RetrievalTools {
@@ -77,17 +77,18 @@ function toStory(task: StoryTask) {
   }
 }
 
+/** Run retrieval against complete immutable cache snapshots. */
 export async function retrieveStory(
   harness: ReviewHarness,
   ctx: RetrieveStoryContext,
   task: StoryTask,
-): Promise<{ result: RetrievalResult; snippets: FrozenSnippet[] }> {
+): Promise<RetrievalResult> {
   const repoPaths = new Map<RepositoryName, string>(
     ctx.repositories.map((r) => [r.name, r.path]),
   )
   const tools = buildRetrievalTools(repoPaths)
 
-  const result = await harness.retrieve(
+  return harness.retrieve(
     {
       jobId: ctx.jobId,
       story: toStory(task),
@@ -100,15 +101,11 @@ export async function retrieveStory(
     },
     tools,
   )
-
-  const snippets = await freezeSnippets(result, ctx, repoPaths)
-  return { result, snippets }
 }
 
 /**
- * Read the actual code for each candidate from the prepared repositories at the
- * frozen SHA, bounded by the plan limits (max 12 snippets, 200 lines each,
- * ~60k chars total).
+ * Read snippets only from the supplied repository roots. Stage two passes task
+ * workspace roots here, never the complete cache snapshots.
  */
 export async function freezeSnippets(
   result: RetrievalResult,

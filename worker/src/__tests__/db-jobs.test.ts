@@ -25,6 +25,9 @@ function enrichedTask(overrides: Record<string, unknown> = {}): Record<string, u
   return {
     id: 'task-1',
     job_id: 'job-1',
+    worker_id: 'w1',
+    retrieval_attempt: 2,
+    analysis_attempt: 1,
     retrieval_status: 'PENDING',
     analysis_status: 'PENDING',
     lease_expires_at: null,

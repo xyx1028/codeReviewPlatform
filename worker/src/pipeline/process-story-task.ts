@@ -1,23 +1,10 @@
 /**
- * process-story-task: process ONE enriched story task end to end. (Plan §13)
+ * Process one enriched story task end to end.
  *
- * A replica receives an enriched task (job/model/snapshots/story) via
- * `claim_next_story_task`. It does NOT rely on having prepared the job itself:
- *
- *  1. Prepare each of the four repositories AT THEIR FROZEN SHA locally
- *     (prepareRepositoryAtSnapshot) — cache hit is reused, otherwise an exact
- *     shallow fetch is verified. It never silently uses the latest branch.
- *  2. Build a per-job Harness (API key resolved for this worker only) using the
- *     model snapshot's request_timeout_ms.
- *  3. If stage one (retrieval) already SUCCEEDED, parse the stored output and
- *     re-freeze snippets from the candidate paths, then jump straight to stage
- *     two. Otherwise run stage one and persist it.
- *  4. Run stage two and persist it.
- *
- * Any failure is written to the DB via failStoryTask (never only logged) with
- * the stage that failed. The lease is renewed on an interval; a lost lease
- * aborts before writing stale results. Memory references to prepared repos and
- * the harness are released by the caller after the task returns.
+ * Stage one searches complete immutable commit snapshots from CODE_CACHE_ROOT.
+ * Its candidate files are then physically copied into a claim-specific task
+ * workspace. Stage two snippets and final evidence checks resolve exclusively
+ * against that workspace; the complete cache is never an analysis root.
  */
 
 import type { ReviewHarness } from '../ai/harness.js'
@@ -33,6 +20,11 @@ import { ANALYSIS_PROMPT_VERSION } from '../ai/prompts/analysis-v1.js'
 import { listTopLevelEntries } from '../git/prepare.js'
 import { rootLogger, type Logger } from '../logger.js'
 import { redactError } from '../security/redaction.js'
+import {
+  cleanupTaskWorkspace,
+  prepareTaskWorkspace,
+  type PreparedTaskWorkspace,
+} from './task-workspace.js'
 
 /** A repository already prepared on disk at its frozen SHA. */
 export interface PreparedRepoRef {
@@ -43,12 +35,13 @@ export interface PreparedRepoRef {
 
 export interface ProcessContext {
   workerId: string
+  workspaceRoot: string
   branch: BranchName
   modelName: string
   heartbeatIntervalMs: number
   /** Lease length (seconds) passed to heartbeat renewals. */
   leaseSeconds: number
-  /** The four repositories already prepared at the job's frozen SHAs. */
+  /** Complete immutable cache snapshots used only by stage one. */
   repositories: PreparedRepoRef[]
 }
 
@@ -87,36 +80,30 @@ export async function processStoryTask(
   })
   heartbeat.start()
 
-  const repoPaths = new Map<RepositoryName, string>(
-    ctx.repositories.map((r) => [r.name, r.path]),
-  )
-  const snapshots = ctx.repositories.map((r) => ({
-    name: r.name,
-    commitSha: r.commitSha,
-  }))
-  const retrieveCtx: RetrieveStoryContext = {
+  const cacheRetrieveCtx: RetrieveStoryContext = {
     jobId: task.job_id,
     branch: ctx.branch,
-    repositories: ctx.repositories.map((r) => ({
-      name: r.name,
-      commitSha: r.commitSha,
-      topLevelEntries: listTopLevelEntries(r.path),
-      path: r.path,
+    repositories: ctx.repositories.map((repo) => ({
+      name: repo.name,
+      commitSha: repo.commitSha,
+      topLevelEntries: listTopLevelEntries(repo.path),
+      path: repo.path,
     })),
   }
 
-  // `stage` tracks which phase we are in so a failure is recorded accurately.
   let stage: 'retrieval' | 'analysis' = 'retrieval'
+  let taskWorkspace: PreparedTaskWorkspace | null = null
 
   try {
-    let retrieval: RetrievalResult
-    let snippets
+    if (task.worker_id !== ctx.workerId) {
+      throw new TaskLeaseLostError()
+    }
 
     const recovered = tryRecoverRetrieval(task, log)
+    let retrieval: RetrievalResult
     if (recovered) {
-      // Stage one already succeeded — re-freeze snippets from candidate paths.
       retrieval = recovered
-      snippets = await freezeSnippets(retrieval, retrieveCtx, repoPaths)
+      stage = 'analysis'
       log.info('retrieval_recovered', {
         event: 'retrieval_recovered',
         stage: 'retrieval',
@@ -124,17 +111,8 @@ export async function processStoryTask(
       })
     } else {
       const retrievalStart = Date.now()
-      const out = await retrieveStory(harness, retrieveCtx, task)
-      retrieval = out.result
-      snippets = out.snippets
-      if (leaseLost) throw new TaskLeaseLostError()
-      await jobsDb.saveRetrievalResult(
-        task.id,
-        ctx.workerId,
-        retrieval,
-        ctx.modelName,
-        RETRIEVAL_PROMPT_VERSION,
-      )
+      const rawRetrieval = await retrieveStory(harness, cacheRetrieveCtx, task)
+      retrieval = validateRetrievalResult(rawRetrieval, task.story_code)
       log.info('retrieval_done', {
         event: 'retrieval_done',
         stage: 'retrieval',
@@ -143,12 +121,73 @@ export async function processStoryTask(
       })
     }
 
-    // Stage two: analysis.
+    if (leaseLost) throw new TaskLeaseLostError()
+
+    taskWorkspace = prepareTaskWorkspace({
+      workspaceRoot: ctx.workspaceRoot,
+      jobId: task.job_id,
+      taskId: task.id,
+      storyCode: task.story_code,
+      workerId: ctx.workerId,
+      retrievalAttempt: task.retrieval_attempt,
+      analysisAttempt: task.analysis_attempt,
+      retrieval,
+      repositories: ctx.repositories,
+    })
+
+    const workspaceRepoPaths = new Map<RepositoryName, string>(
+      taskWorkspace.repositories.map((repo) => [repo.name, repo.path]),
+    )
+    const workspaceSnapshots = taskWorkspace.repositories.map((repo) => ({
+      name: repo.name,
+      commitSha: repo.commitSha,
+    }))
+    const workspaceRetrieveCtx: RetrieveStoryContext = {
+      jobId: task.job_id,
+      branch: ctx.branch,
+      repositories: taskWorkspace.repositories.map((repo) => ({
+        name: repo.name,
+        commitSha: repo.commitSha,
+        topLevelEntries: [],
+        path: repo.path,
+      })),
+    }
+    const snippets = await freezeSnippets(
+      retrieval,
+      workspaceRetrieveCtx,
+      workspaceRepoPaths,
+    )
+
+    log.info('task_workspace_prepared', {
+      event: 'task_workspace_prepared',
+      stage,
+      files: taskWorkspace.repositories.length === 0
+        ? 0
+        : new Set(retrieval.candidates.map((candidate) =>
+          `${candidate.repository}::${candidate.filePath}`)).size,
+      bytes: taskWorkspace.totalBytes,
+    })
+
+    if (!recovered) {
+      if (leaseLost) throw new TaskLeaseLostError()
+      await jobsDb.saveRetrievalResult(
+        task.id,
+        ctx.workerId,
+        retrieval,
+        ctx.modelName,
+        RETRIEVAL_PROMPT_VERSION,
+      )
+    }
+
     stage = 'analysis'
     const analysisStart = Date.now()
     const { result: analysis, evidenceWithSha } = await analyzeStory(
       harness,
-      { branch: ctx.branch, repositorySnapshots: snapshots, repoPaths },
+      {
+        branch: ctx.branch,
+        repositorySnapshots: workspaceSnapshots,
+        repoPaths: workspaceRepoPaths,
+      },
       task,
       retrieval,
       snippets,
@@ -178,7 +217,6 @@ export async function processStoryTask(
       error_code: code,
       error_message: message,
     })
-    // Persist the failure to the DB at the current stage (never only log it).
     await jobsDb
       .failStoryTask({ taskId: task.id, workerId: ctx.workerId, stage, code, message })
       .catch((failErr) =>
@@ -196,14 +234,20 @@ export async function processStoryTask(
     }
   } finally {
     heartbeat.stop()
+    if (taskWorkspace) {
+      try {
+        cleanupTaskWorkspace(taskWorkspace)
+      } catch (cleanupError) {
+        log.warn('task_workspace_cleanup_failed', {
+          event: 'task_workspace_cleanup_failed',
+          error_message: redactError(cleanupError),
+        })
+      }
+    }
   }
 }
 
-/**
- * If the task already has a SUCCEEDED retrieval_output, strictly parse it so we
- * can skip stage one on takeover/recovery. Returns null when there is nothing
- * usable to recover (a fresh retrieval will run instead).
- */
+/** Recover a strictly validated stage-one result after lease takeover. */
 function tryRecoverRetrieval(task: StoryTask, log: Logger): RetrievalResult | null {
   if (task.retrieval_status !== 'SUCCEEDED' || !task.retrieval_output) {
     return null
@@ -211,7 +255,6 @@ function tryRecoverRetrieval(task: StoryTask, log: Logger): RetrievalResult | nu
   try {
     return validateRetrievalResult(task.retrieval_output, task.story_code)
   } catch (err) {
-    // Stored retrieval is malformed — re-run stage one rather than trust it.
     log.warn('retrieval_recover_invalid', {
       event: 'retrieval_recover_invalid',
       error_message: redactError(err),

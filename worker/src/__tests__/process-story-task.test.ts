@@ -9,6 +9,8 @@ import type { JobsDb, StoryTask } from '../db/jobs.js'
 import { Logger } from '../logger.js'
 
 const SHA = 'a'.repeat(40)
+const JOB_ID = '11111111-2222-4333-8444-555555555555'
+const TASK_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 
 function silentLogger(): Logger {
   return new Logger({ sink: () => {}, minLevel: 'error' })
@@ -94,16 +96,22 @@ class ThrowingHarness implements ReviewHarness {
 }
 
 let root: string
+let workspaceRoot: string
 beforeAll(() => {
-  root = mkdtempSync(join(tmpdir(), 'proc-'))
+  root = mkdtempSync(join(tmpdir(), 'proc-cache-'))
+  workspaceRoot = mkdtempSync(join(tmpdir(), 'proc-workspace-'))
   mkdirSync(join(root, 'src'), { recursive: true })
   writeFileSync(join(root, 'src', 'A.java'), 'l1\nl2\nl3\nl4\nl5\nl6\n')
 })
-afterAll(() => rmSync(root, { recursive: true, force: true }))
+afterAll(() => {
+  rmSync(root, { recursive: true, force: true })
+  rmSync(workspaceRoot, { recursive: true, force: true })
+})
 
 function ctx(): ProcessContext {
   return {
     workerId: 'w1',
+    workspaceRoot,
     branch: 'feature_dev',
     modelName: 'gpt',
     heartbeatIntervalMs: 60000,
@@ -114,13 +122,16 @@ function ctx(): ProcessContext {
 
 function baseTask(overrides: Partial<StoryTask> = {}): StoryTask {
   return {
-    id: 'task-1',
-    job_id: 'job-1',
+    id: TASK_ID,
+    job_id: JOB_ID,
+    worker_id: 'w1',
+    retrieval_attempt: 1,
+    analysis_attempt: 0,
     retrieval_status: 'PENDING',
     analysis_status: 'PENDING',
     lease_expires_at: null,
     retrieval_output: null,
-    job: { id: 'job-1', batch_id: 'b', model_config_id: 'm', requested_branch: 'feature_dev', total_stories: 1 },
+    job: { id: JOB_ID, batch_id: 'b', model_config_id: 'm', requested_branch: 'feature_dev', total_stories: 1 },
     model: { model_config_id: 'm', display_name: 'D', provider: 'openai-compatible', base_url: 'u', model_name: 'gpt', retrieval_prompt_version: 'r', analysis_prompt_version: 'a' },
     snapshots: [{ repository_name: 'kdmanage-backend', requested_branch: 'feature_dev', commit_sha: SHA, commit_subject: null }],
     story: { story_id: 's', story_code: 'PRJ-001', story_name: 'demo', description: 'd', acceptance_criteria: null, project_name: null, application_name: null, source_data: {} },

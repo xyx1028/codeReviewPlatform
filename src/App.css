@@ -282,29 +282,6 @@ a.dashboard-distribution-item:focus-visible {
   opacity: 0.9;
 }
 
-.review-filter-card {
-  border-radius: 16px;
-  border-color: #dbeafe;
-  background: linear-gradient(135deg, #f8fbff 0%, #ffffff 100%);
-}
-
-.review-filter-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-
-.review-filter-summary {
-  margin-left: 10px;
-  font-size: 13px;
-}
-
-.review-filter-controls {
-  width: 100%;
-}
-
 .review-table-card {
   overflow: hidden;
   border-radius: 16px;

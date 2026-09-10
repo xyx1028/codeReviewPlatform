@@ -89,19 +89,49 @@ docker compose -f docker-compose.worker.yml up -d --scale worker=4
 - 不发布任何端口（出站-only）。
 - `restart: unless-stopped`。
 - 每副本唯一 `WORKER_ID`（由 hostname 生成）。
-- 每副本独立 workspace 卷，不共享可写工作区。
+- 每副本可使用独立 workspace；同机多个 Worker 也可共享 `WORKSPACE_ROOT`，每次 claim
+  通过独立 attempt 叶子隔离，禁止启动时递归清理共享目录。
 
-## 6. 工作目录生命周期（方案 §17.3）
+## 6. Cache 与 Task 工作目录生命周期（方案 §17.3）
 
 ```
-/workspace/jobs/<job-id>/<repository>/...
-/workspace/cache/<repository>/<commit-sha>/   # 按完整 SHA 命名的只读缓存
+/workspace/cache/<repository>/<commit-sha>/
+  # 完整、可复用的只读 Commit 快照，仅供阶段一检索
+
+/workspace/jobs/<job-id>/tasks/<task-id>/<claim-attempt>/
+├── manifest.json
+└── code/
+    └── <repository>/
+        └── <candidate-relative-path>
+            # 只物理复制当前需求的候选完整文件
 ```
 
-- 缓存按完整 SHA 命名，同一 SHA 可跨副本各自缓存；重试复用原 SHA 快照。
-- 只有目录名能解析为 UUID 的任务目录才允许清理（`worker/src/security/cleanup.ts`）。
-- 禁止对 `/workspace` 或未解析路径执行递归删除。
-- Worker 重启时扫描并清理遗留的 UUID 任务目录。
+`claim-attempt` 由 `retrieval_attempt`、`analysis_attempt` 与 Worker ID 的短哈希组成。
+同一 Task 租约过期后可能被另一个 Worker 接管；新旧 Worker 使用不同 attempt 叶子，
+不会共享可写目录。这里**不会**创建 `<job-id>/repositories`，也不会将四个完整仓库复制到
+Job 目录。
+
+处理边界如下：
+
+1. 阶段一的 `searchCode` / `findFiles` / `readCode` / `gitLog` 只访问完整 cache 快照。
+2. 阶段一返回候选后，Worker 拒绝链接和非普通文件，将去重后的候选完整文件物理复制到
+   Task attempt 的 `code/`，并记录仓库、Commit SHA、规范化路径、大小和 SHA-256。
+3. 阶段二 snippets、模型上下文及最终证据文件行数校验只使用 Task workspace；不能将
+   cache 作为阶段二仓库根目录。
+4. 当前 claim 完成或失败后，只递归删除自己创建的 attempt；`task/tasks/job` 父目录仅在
+   为空时通过非递归删除清理。因此 Worker 空闲或任务完成后 `jobs` 为空是正常现象。
+
+安全与恢复规则：
+
+- cache 按完整 SHA 命名，重试和不同 Task 复用同一只读快照。cache 只能由 Worker 的
+  原子发布流程写入并保持只读；不得允许其他同账号进程在任务期间修改快照内容。
+- 每个候选文件上限 1 MiB，每个 Task workspace 总上限 12 MiB。
+- Worker 启动时不扫描、也不递归删除 UUID Job 目录，避免两个本机 Worker 共享
+  `WORKSPACE_ROOT` 时互删正在使用的目录。
+- 进程崩溃可能留下 orphan attempt。当前优先保证并发安全，不按 FAILED、租约过期或心跳
+  失联自动删除；运维人员确认没有进程仍使用该 attempt 后再人工清理。
+- 接管 Worker 从数据库中的 `retrieval_output` 重新物化自己的 workspace，不依赖前一个
+  Worker 留下的目录。
 
 ## 7. 日志与审计（方案 §18）
 

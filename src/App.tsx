@@ -45,18 +45,17 @@ import {
   adminUpdateModelConfig,
   claimInitialAdmin,
   completeBatch,
+  consumeWechatAuthError,
   confirmAiResultImport,
   confirmSourceImport,
   createBatch,
   deleteBatch,
   enqueueAnalysisJob,
-  getActiveAnalysisWorkers,
   getBatch,
   findImportFileByHash,
   getBatchWorkspace,
   getFileDownloadUrl,
   getLatestAnalysisJob,
-  getModelConcurrencyStatus,
   getMyProfile,
   getSession,
   listAiImports,
@@ -64,6 +63,7 @@ import {
   listBatches,
   listEnabledModelConfigs,
   listImportFiles,
+  listModelDisplayNames,
   listOperationLogs,
   listRepositorySnapshots,
   listStories,
@@ -76,7 +76,9 @@ import {
   signIn,
   signOut,
   signUp,
+  startWechatSignIn,
   uploadBatchFile,
+  wechatLoginEnabled,
 } from './lib/api'
 import type { CreateBatchInput, ModelConfigInput } from './lib/api'
 import { downloadAiTemplate, inferFieldMapping, parseAiWorkbook, parseSourceRows, readFirstSheet, sourceFieldLabels, templateVersion } from './lib/excel'
@@ -85,6 +87,8 @@ import { parseBaselineCommit } from './lib/baseline'
 import { hashFile } from './lib/hash'
 import { aiVerdictLabels, aiVerdictOptions, analysisErrorCodeMeta, analysisJobStatusLabels, batchStatusLabels, humanReviewLabels, humanReviewOptions, storyTaskStatusLabels } from './lib/labels'
 import { aiFillPrompt } from './lib/prompt'
+import { WorkerManagementPage } from './pages/WorkerManagementPage'
+import { ProfilePage } from './pages/ProfilePage'
 import { supabaseConfigured } from './lib/supabase'
 import type {
   AdminUserListItem,
@@ -155,6 +159,18 @@ function useBatchWorkspace(batchId: string | undefined) {
   })
 }
 
+function useModelDisplayNameMap() {
+  const modelNamesQuery = useQuery({
+    queryKey: ['model-display-names'],
+    queryFn: listModelDisplayNames,
+  })
+  return useMemo(() => {
+    const map = new Map<string, string>()
+    for (const model of modelNamesQuery.data ?? []) map.set(model.id, model.display_name)
+    return map
+  }, [modelNamesQuery.data])
+}
+
 function SetupPage() {
   return (
     <main className="center-page">
@@ -173,6 +189,7 @@ function SetupPage() {
 
 function LoginPage() {
   const [mode, setMode] = useState<AuthMode>('sign-in')
+  const [wechatError] = useState(consumeWechatAuthError)
   const { message } = AntApp.useApp()
   const mutation = useMutation({
     mutationFn: async (values: { email: string; password: string }) => {
@@ -188,6 +205,7 @@ function LoginPage() {
       <Card className="login-card">
         <Title level={2}>AI 需求—代码一致性评审平台</Title>
         <Paragraph type="secondary">登录后管理每周评审批次、AI Excel 和人工确认。</Paragraph>
+        {wechatError ? <Alert type="error" showIcon title={wechatError} /> : null}
         <Form layout="vertical" onFinish={(values) => mutation.mutate(values)}>
           <Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email', message: '请输入邮箱' }]}>
             <Input autoComplete="email" />
@@ -204,6 +222,17 @@ function LoginPage() {
             </Button>
           </Space>
         </Form>
+        {wechatLoginEnabled ? (
+          <>
+            <Divider plain>其他登录方式</Divider>
+            <Button block onClick={() => startWechatSignIn().catch((error: Error) => message.error(error.message))}>
+              微信扫码登录
+            </Button>
+            <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
+              已有邮箱账号请先用邮箱登录，再到个人中心绑定微信，避免创建新账号。
+            </Paragraph>
+          </>
+        ) : null}
       </Card>
     </main>
   )
@@ -231,18 +260,26 @@ function Shell({ session }: { session: Session }) {
 
   const role = profileQuery.data?.role
   const isAdmin = role === 'ADMIN'
+  const isWechatOnly = session.user.email?.endsWith('@wechat.invalid') ?? false
+  const accountLabel = isWechatOnly ? (profileQuery.data?.display_name || '微信用户') : session.user.email
   const canCreateBatch = role === 'ADMIN' || role === 'REVIEWER'
   const canManageBatch = (batch: ReviewBatch) => role === 'ADMIN' || (role === 'REVIEWER' && batch.created_by === session.user.id)
-  const selectedKey = location.pathname.startsWith('/users')
-    ? '/users'
-    : location.pathname.startsWith('/models')
-      ? '/models'
-      : location.pathname.startsWith('/operation-log')
-        ? '/operation-log'
-        : '/batches'
+  const selectedKey = location.pathname.startsWith('/profile')
+    ? '/profile'
+    : location.pathname.startsWith('/users')
+      ? '/users'
+      : location.pathname.startsWith('/workers')
+        ? '/workers'
+        : location.pathname.startsWith('/models')
+          ? '/models'
+          : location.pathname.startsWith('/operation-log')
+            ? '/operation-log'
+            : '/batches'
   const menuItems = [
     { key: '/batches', label: <Link to="/batches">代码评审</Link> },
     { key: '/operation-log', label: <Link to="/operation-log">操作日志</Link> },
+    { key: '/profile', label: <Link to="/profile">个人中心</Link> },
+    ...(isAdmin ? [{ key: '/workers', label: <Link to="/workers">后台任务管理</Link> }] : []),
     ...(isAdmin ? [{ key: '/models', label: <Link to="/models">模型管理</Link> }] : []),
     ...(isAdmin ? [{ key: '/users', label: <Link to="/users">用户管理</Link> }] : []),
   ]
@@ -261,7 +298,7 @@ function Shell({ session }: { session: Session }) {
               申领初始管理员
             </Button>
           ) : null}
-          <Text className="header-email">{session.user.email}</Text>
+          <Text className="header-email">{accountLabel}</Text>
           <Button onClick={() => logoutMutation.mutate()} loading={logoutMutation.isPending}>退出</Button>
         </Space>
       </Header>
@@ -278,6 +315,17 @@ function Shell({ session }: { session: Session }) {
             <Route path="/" element={<Navigate to="/batches" replace />} />
             <Route path="/batches" element={<BatchesPage canCreateBatch={canCreateBatch} canManageBatch={canManageBatch} />} />
             <Route path="/operation-log" element={<OperationLogPage />} />
+            <Route
+              path="/profile"
+              element={(
+                <ProfilePage
+                  email={isWechatOnly ? null : (session.user.email ?? null)}
+                  displayName={profileQuery.data?.display_name ?? null}
+                  role={role}
+                />
+              )}
+            />
+            <Route path="/workers" element={<WorkerManagementPage isAdmin={isAdmin} />} />
             <Route path="/models" element={<ModelConfigPage isAdmin={isAdmin} />} />
             <Route path="/users" element={<AdminUsersPage isAdmin={isAdmin} />} />
             <Route path="/batches/:batchId/*" element={<BatchPage canManageBatch={canManageBatch} />} />
@@ -335,6 +383,8 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
       form.resetFields()
       queryClient.invalidateQueries({ queryKey: ['admin-model-configs'] })
       queryClient.invalidateQueries({ queryKey: ['enabled-model-configs'] })
+      queryClient.invalidateQueries({ queryKey: ['model-display-names'] })
+      queryClient.invalidateQueries({ queryKey: ['operation-log'] })
     },
     onError: (error) => message.error(error.message),
   })
@@ -560,11 +610,7 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
     enabled: canCreateBatch,
     queryFn: listEnabledModelConfigs,
   })
-  const modelNameById = useMemo(() => {
-    const map = new Map<string, string>()
-    for (const model of enabledModelsQuery.data ?? []) map.set(model.id, model.display_name)
-    return map
-  }, [enabledModelsQuery.data])
+  const modelNameById = useModelDisplayNameMap()
   const createMutation = useMutation({
     mutationFn: createBatch,
     onSuccess: (batch) => {
@@ -595,7 +641,8 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
       dataIndex: 'ai_model_config_id',
       width: 160,
       render: (_value, record) => {
-        const name = record.ai_model_snapshot?.display_name ?? (record.ai_model_config_id ? modelNameById.get(record.ai_model_config_id) : null)
+        const name = (record.ai_model_config_id ? modelNameById.get(record.ai_model_config_id) : null)
+          ?? record.ai_model_snapshot?.display_name
         return name ? <Tag color="geekblue">{name}</Tag> : <Tag color="orange">未选择</Tag>
       },
     },
@@ -945,21 +992,7 @@ function AutoAnalysisSection({
     enabled: canManage,
     queryFn: listEnabledModelConfigs,
   })
-
-  // 近 15 秒在线 Worker：活动任务时每 4 秒刷新在线数/处理中数。
-  const workersQuery = useQuery({
-    queryKey: ['active-analysis-workers'],
-    queryFn: getActiveAnalysisWorkers,
-    refetchInterval: jobActive ? 4000 : 15000,
-  })
-
-  // 当前批次模型的并发状态（最大并发/活跃）。
-  const concurrencyQuery = useQuery({
-    queryKey: ['model-concurrency', batch.ai_model_config_id],
-    enabled: Boolean(batch.ai_model_config_id),
-    queryFn: () => getModelConcurrencyStatus(batch.ai_model_config_id!),
-    refetchInterval: jobActive ? 4000 : false,
-  })
+  const modelNameById = useModelDisplayNameMap()
 
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['analysis-job', batch.id] })
@@ -1017,7 +1050,6 @@ function AutoAnalysisSection({
     batch.ai_model_config_id &&
       enabledModels.some((m) => m.id === batch.ai_model_config_id && m.enabled && m.has_api_key),
   )
-  const selectedModel = enabledModels.find((m) => m.id === batch.ai_model_config_id) ?? null
   const modelReady = Boolean(batch.ai_model_config_id) && selectedModelEnabled
   const batchCompleted = batch.status === 'COMPLETED'
 
@@ -1051,18 +1083,13 @@ function AutoAnalysisSection({
     (t) => t.retrieval_status === 'RUNNING' || t.analysis_status === 'RUNNING',
   )
   const totalStories = job?.total_stories || storyTasks.length || storyCount
+  const modelConfigId = batch.ai_model_config_id ?? job?.model_config_id ?? null
   const modelDisplay =
+    (modelConfigId ? modelNameById.get(modelConfigId) : null) ??
     batch.ai_model_snapshot?.display_name ??
     job?.model_snapshot?.display_name ??
-    (batch.ai_model_config_id ? '已选择模型' : '未选择')
+    (modelConfigId ? '已选择模型' : '未选择')
   const modelName = batch.ai_model_snapshot?.model_name ?? job?.model_snapshot?.model_name ?? ''
-  const maxParallel =
-    concurrencyQuery.data?.max_parallel_tasks ??
-    selectedModel?.max_parallel_tasks ??
-    (batch.ai_model_snapshot?.max_parallel_tasks as number | undefined) ??
-    null
-  const activeTasks = concurrencyQuery.data?.active_tasks ?? null
-  const workers = workersQuery.data ?? null
 
   const errorMeta = job?.error_code ? analysisErrorCodeMeta[job.error_code] : undefined
   const retryable = job?.status === 'FAILED'
@@ -1074,24 +1101,15 @@ function AutoAnalysisSection({
         <Col xs={12} md={6}><Statistic title="需求" value={`${storyCount} 条`} /></Col>
         <Col xs={12} md={6}>
           <Statistic title="模型" value={modelName ? `${modelDisplay} / ${modelName}` : modelDisplay} />
-          {maxParallel != null ? (
-            <Text type="secondary">
-              最大并发 {maxParallel}
-              {activeTasks != null ? ` · 活跃 ${activeTasks}` : ''}
-            </Text>
-          ) : null}
         </Col>
         <Col xs={12} md={6}>
           <Statistic title="任务状态" value={job ? analysisJobStatusLabels[job.status] ?? job.status : '未开始'} />
-          <Text type="secondary">
-            Worker 在线 {workers?.online ?? 0} · 处理中 {workers?.processing ?? 0}
-          </Text>
         </Col>
       </Row>
 
       <Divider />
 
-      {!batch.ai_model_config_id && canManage && !batchCompleted ? (
+      {!batch.ai_model_config_id && canManage && !batchCompleted && !hasExistingAiResult ? (
         <Alert
           type="warning"
           showIcon
@@ -1109,7 +1127,7 @@ function AutoAnalysisSection({
                   onChange={setSupplementalModelId}
                   options={enabledModels.map((model) => ({
                     value: model.id,
-                    label: `${model.display_name} / ${model.model_name}（并发 ${model.max_parallel_tasks}）`,
+                    label: `${model.display_name} / ${model.model_name}`,
                   }))}
                   notFoundContent="暂无可用模型"
                 />
@@ -1132,14 +1150,18 @@ function AutoAnalysisSection({
         />
       ) : null}
 
-      {/* 前置条件清单 */}
-      <div className="precondition-list">
-        {preconditions.map((item) => (
-          <Tag key={item.label} color={item.ok ? 'green' : 'default'} icon={undefined}>
-            {item.ok ? '✓' : '•'} {item.label}
-          </Tag>
-        ))}
-      </div>
+      {!hasExistingAiResult ? (
+        <>
+          {/* 开始自动分析前的条件检查 */}
+          <div className="precondition-list">
+            {preconditions.map((item) => (
+              <Tag key={item.label} color={item.ok ? 'green' : 'default'} icon={undefined}>
+                {item.ok ? '✓' : '•'} {item.label}
+              </Tag>
+            ))}
+          </div>
+        </>
+      ) : null}
 
       <div className="mt-md">
         <Space wrap>
@@ -1279,6 +1301,13 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
   const queryClient = useQueryClient()
   const workspaceQuery = useBatchWorkspace(batchId)
   const aiImportsQuery = useQuery({ queryKey: ['ai-imports', batchId], queryFn: () => listAiImports(batchId) })
+  const activeAiImport = aiImportsQuery.data?.find((item) => item.is_active) ?? null
+  const lockedResultMode: AiResultMode | null = activeAiImport
+    ? activeAiImport.import_file_id
+      ? 'manual'
+      : 'auto'
+    : null
+  const visibleResultMode = lockedResultMode ?? resultMode
   const setDefaultBranchMutation = useMutation({
     mutationFn: () => {
       if (!defaultBranch) throw new Error('请选择代码基线分支')
@@ -1328,11 +1357,14 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
     onError: (error) => message.error(error.message),
   })
 
-  if (workspaceQuery.isLoading) return <Spin />
+  if (workspaceQuery.isLoading || aiImportsQuery.isLoading) return <Spin />
   if (!workspaceQuery.data) return <Empty />
+  if (aiImportsQuery.isError) {
+    return <Alert type="error" showIcon title="AI 报告加载失败" description="暂时无法确认当前批次的 AI 结果来源，请刷新页面后重试。" />
+  }
 
   const readOnly = !canManage || workspaceQuery.data.batch.status === 'COMPLETED'
-  const alreadyImportedAi = Boolean(aiImportsQuery.data?.length)
+  const alreadyImportedAi = Boolean(activeAiImport)
 
   return (
     <Space direction="vertical" size="large" className="page-stack">
@@ -1348,29 +1380,48 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
           </Space>
         </Card>
       ) : null}
-      <Card title="选择 AI 结果处理方式" className="ai-result-mode-picker">
-        <Text type="secondary">两种流程相互独立，请选择当前要使用的处理方式。</Text>
-        <Radio.Group
-          className="ai-result-mode-options"
-          value={resultMode}
-          buttonStyle="solid"
-          onChange={(event) => setResultMode(event.target.value as AiResultMode)}
-        >
-          <Radio.Button value="auto">
-            <div className="ai-result-mode-content">
-              <Text strong>自动 AI 分析</Text>
-              <Text type="secondary">平台自动准备代码、检索需求并生成分析结果</Text>
-            </div>
-          </Radio.Button>
-          <Radio.Button value="manual">
-            <div className="ai-result-mode-content">
-              <Text strong>人工 AI Excel 兜底</Text>
-              <Text type="secondary">下载模板交给外部 AI 填写，再上传校验并导入</Text>
-            </div>
-          </Radio.Button>
-        </Radio.Group>
+      <Card
+        title={lockedResultMode ? 'AI 结果处理方式' : '选择 AI 结果处理方式'}
+        className="ai-result-mode-picker"
+        extra={lockedResultMode ? <Tag color="green">已锁定</Tag> : null}
+      >
+        {lockedResultMode ? (
+          <Alert
+            type="success"
+            showIcon
+            title={lockedResultMode === 'auto' ? '自动 AI 分析' : '人工手动 AI 分析'}
+            description={
+              lockedResultMode === 'auto'
+                ? '本批次已通过自动 AI 分析生成结果，处理方式已锁定，只展示自动分析看板。'
+                : '本批次已通过人工 AI Excel 导入结果，处理方式已锁定，只展示人工手动 AI 分析看板。'
+            }
+          />
+        ) : (
+          <>
+            <Text type="secondary">两种流程相互独立。产生 AI 结果后，处理方式将被锁定且不能再切换。</Text>
+            <Radio.Group
+              className="ai-result-mode-options"
+              value={resultMode}
+              buttonStyle="solid"
+              onChange={(event) => setResultMode(event.target.value as AiResultMode)}
+            >
+              <Radio.Button value="auto">
+                <div className="ai-result-mode-content">
+                  <Text strong>自动 AI 分析</Text>
+                  <Text type="secondary">平台自动准备代码、检索需求并生成分析结果</Text>
+                </div>
+              </Radio.Button>
+              <Radio.Button value="manual">
+                <div className="ai-result-mode-content">
+                  <Text strong>人工手动 AI 分析</Text>
+                  <Text type="secondary">下载模板交给外部 AI 填写，再上传校验并导入</Text>
+                </div>
+              </Radio.Button>
+            </Radio.Group>
+          </>
+        )}
       </Card>
-      {resultMode === 'auto' ? (
+      {visibleResultMode === 'auto' ? (
         <AutoAnalysisSection
           batch={workspaceQuery.data.batch}
           storyCount={workspaceQuery.data.stories.length}
@@ -1379,12 +1430,12 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
         />
       ) : (
         <Space direction="vertical" size="large" className="page-stack">
-          <Card title="人工 AI Excel 兜底流程">
+          <Card title="人工手动 AI 分析流程">
         <Space wrap>
           <Button type="primary" disabled={!workspaceQuery.data.stories.length || !isSupportedDefaultBranch(workspaceQuery.data.batch.default_branch)} onClick={() => downloadAiTemplate(workspaceQuery.data.batch, workspaceQuery.data.stories)}>
             下载AI填写模板
           </Button>
-          <Text type="secondary">保留人工兜底：如需手工分析可下载模板，模板包含批次信息、需求评审、代码证据三个 Sheet。</Text>
+          <Text type="secondary">如需人工分析，可下载模板；模板包含批次信息、需求评审、代码证据三个 Sheet。</Text>
         </Space>
       </Card>
       <Card title="AI填写规范（复制给AI）">
@@ -1523,7 +1574,12 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
 }
 
 function ReviewListPage({ batchId }: { batchId: string }) {
-  const [reviewStatus, setReviewStatus] = useState<string | undefined>()
+  const [localColumnFilters, setLocalColumnFilters] = useState<Record<'storyCode' | 'storyName' | 'evidence' | 'humanStatus', string[] | null>>({
+    storyCode: null,
+    storyName: null,
+    evidence: null,
+    humanStatus: null,
+  })
   const location = useLocation()
   const navigate = useNavigate()
   const workspaceQuery = useBatchWorkspace(batchId)
@@ -1546,9 +1602,9 @@ function ReviewListPage({ batchId }: { batchId: string }) {
   const verdictParam = getSingleSearchParam('verdict')
   const ownerParam = getSingleSearchParam('owner')
   const applicationParam = getSingleSearchParam('application')
-  const verdict = verdictParam && aiVerdictOptions.some((option) => option.value === verdictParam)
-    ? verdictParam as AiVerdict
-    : undefined
+  const verdict = verdictParam && (
+    verdictParam === 'UNANALYZED' || aiVerdictOptions.some((option) => option.value === verdictParam)
+  ) ? verdictParam as AiVerdict | 'UNANALYZED' : undefined
   const owner = ownerParam && ownerOptions.some((option) => option.value === ownerParam) ? ownerParam : undefined
   const application = applicationParam && applicationOptions.some((option) => option.value === applicationParam) ? applicationParam : undefined
   const updateFilters = (changes: Partial<Record<'verdict' | 'owner' | 'application', string | undefined>>) => {
@@ -1558,53 +1614,114 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       else searchParams.delete(name)
     })
     const search = searchParams.toString()
+    if (search === location.search.replace(/^\?/, '')) return
     navigate({ pathname: location.pathname, search: search ? `?${search}` : '' })
   }
 
   const rows = useMemo(() => {
     if (!workspaceQuery.data) return []
     const resultByStory = new Map(workspaceQuery.data.results.map((result) => [result.story_id, result]))
-    const reviewsByStory = new Map(workspaceQuery.data.humanReviews.map((review) => [review.story_id, review]))
+    const latestReviewByStory = new Map<string, BatchWorkspace['humanReviews'][number]>()
+    workspaceQuery.data.humanReviews.forEach((review) => {
+      const current = latestReviewByStory.get(review.story_id)
+      if (!current || new Date(review.reviewed_at).getTime() > new Date(current.reviewed_at).getTime()) {
+        latestReviewByStory.set(review.story_id, review)
+      }
+    })
     const evidenceCountByResult = new Map<string, number>()
     workspaceQuery.data.evidence.forEach((item) => evidenceCountByResult.set(item.ai_review_result_id, (evidenceCountByResult.get(item.ai_review_result_id) ?? 0) + 1))
 
     return workspaceQuery.data.stories.map((story) => {
       const result = resultByStory.get(story.id) ?? null
-      const review = reviewsByStory.get(story.id) ?? null
+      const review = latestReviewByStory.get(story.id) ?? null
       return { story, result, review, evidenceCount: result ? evidenceCountByResult.get(result.id) ?? 0 : 0 }
-    }).filter((row) => {
-      const ownerMatched = owner ? splitOwners(row.story.owners_text).includes(owner) : true
-      const applicationMatched = application ? applicationGroupName(row.story) === application : true
-      const verdictMatched = verdict ? row.result?.verdict === verdict : true
-      const reviewMatched = reviewStatus === 'reviewed' ? Boolean(row.review) : reviewStatus === 'pending' ? !row.review : true
-      return ownerMatched && applicationMatched && verdictMatched && reviewMatched
     })
-  }, [application, owner, reviewStatus, verdict, workspaceQuery.data])
+  }, [workspaceQuery.data])
 
+  const toColumnFilters = (values: string[]) =>
+    [...new Set(values)].sort((a, b) => a.localeCompare(b, 'zh-CN')).map((value) => ({ text: value, value }))
   const aiTagColors = { IMPLEMENTED: 'green', PARTIAL: 'orange', NOT_IMPLEMENTED: 'red', UNCERTAIN: 'default' }
   const humanTagColors = { CORRECT: 'green', PARTIALLY_CORRECT: 'orange', INCORRECT: 'red', NEED_DISCUSSION: 'purple' }
-  const activeFilterCount = [owner, application, verdict, reviewStatus].filter(Boolean).length
   const columns: ColumnsType<(typeof rows)[number]> = [
-    { title: '编码', dataIndex: ['story', 'story_code'], width: 150, render: (_value, row) => <Link className="review-story-code" to={`/batches/${batchId}/reviews/${row.story.id}`}>{row.story.story_code}</Link> },
-    { title: '需求名称', dataIndex: ['story', 'story_name'], width: 340 },
+    {
+      title: '编码',
+      key: 'storyCode',
+      dataIndex: ['story', 'story_code'],
+      width: 150,
+      filters: toColumnFilters(rows.map((row) => row.story.story_code)),
+      filteredValue: localColumnFilters.storyCode,
+      filterSearch: true,
+      onFilter: (value, row) => row.story.story_code === String(value),
+      render: (_value, row) => <Link className="review-story-code" to={`/batches/${batchId}/reviews/${row.story.id}`}>{row.story.story_code}</Link>,
+    },
+    {
+      title: '需求名称',
+      key: 'storyName',
+      dataIndex: ['story', 'story_name'],
+      width: 340,
+      filters: toColumnFilters(rows.map((row) => row.story.story_name)),
+      filteredValue: localColumnFilters.storyName,
+      filterSearch: true,
+      onFilter: (value, row) => row.story.story_name === String(value),
+    },
     {
       title: '负责人',
+      key: 'owner',
       dataIndex: ['story', 'owners_text'],
       width: 190,
+      filters: ownerOptions.map((option) => ({ text: option.label, value: option.value })),
+      filteredValue: owner ? [owner] : null,
+      filterSearch: true,
+      filterMultiple: false,
+      onFilter: (value, row) => splitOwners(row.story.owners_text).includes(String(value)),
       render: (value) => <Space size={[4, 4]} wrap>{splitOwners(value).map((name) => <Tag key={name}>{name}</Tag>)}</Space>,
     },
-    { title: '应用', dataIndex: ['story', 'application_name'], width: 120, render: (_value, row) => applicationGroupName(row.story) },
+    {
+      title: '应用',
+      key: 'application',
+      dataIndex: ['story', 'application_name'],
+      width: 120,
+      filters: applicationOptions.map((option) => ({ text: option.label, value: option.value })),
+      filteredValue: application ? [application] : null,
+      filterSearch: true,
+      filterMultiple: false,
+      onFilter: (value, row) => applicationGroupName(row.story) === String(value),
+      render: (_value, row) => applicationGroupName(row.story),
+    },
     {
       title: 'AI判断',
+      key: 'verdict',
       width: 120,
+      filters: [
+        ...aiVerdictOptions.map((option) => ({ text: option.label, value: option.value })),
+        { text: '未分析', value: 'UNANALYZED' },
+      ],
+      filteredValue: verdict ? [verdict] : null,
+      filterMultiple: false,
+      onFilter: (value, row) => (row.result?.verdict ?? 'UNANALYZED') === String(value),
       render: (_value, row) => row.result?.verdict
         ? <Tag color={aiTagColors[row.result.verdict]}>{aiVerdictLabels[row.result.verdict]}</Tag>
         : <Tag>未分析</Tag>,
     },
-    { title: '证据', width: 90, render: (_value, row) => <Tag color={row.evidenceCount ? 'geekblue' : 'default'}>{row.evidenceCount} 条</Tag> },
+    {
+      title: '证据',
+      key: 'evidence',
+      width: 90,
+      filters: [...new Set(rows.map((row) => row.evidenceCount))]
+        .sort((a, b) => a - b)
+        .map((count) => ({ text: `${count} 条`, value: String(count) })),
+      filteredValue: localColumnFilters.evidence,
+      onFilter: (value, row) => row.evidenceCount === Number(value),
+      render: (_value, row) => <Tag color={row.evidenceCount ? 'geekblue' : 'default'}>{row.evidenceCount} 条</Tag>,
+    },
     {
       title: '人工状态',
+      key: 'humanStatus',
       width: 150,
+      filters: [{ text: '待确认', value: 'pending' }, { text: '已确认', value: 'reviewed' }],
+      filteredValue: localColumnFilters.humanStatus,
+      filterMultiple: false,
+      onFilter: (value, row) => value === 'reviewed' ? Boolean(row.review) : !row.review,
       render: (_value, row) => row.review
         ? <Tag color={humanTagColors[row.review.result]}>{humanReviewLabels[row.review.result]}</Tag>
         : <Tag color="gold">待确认</Tag>,
@@ -1613,46 +1730,6 @@ function ReviewListPage({ batchId }: { batchId: string }) {
 
   return (
     <Space direction="vertical" size="large" className="page-stack review-list-page">
-      <Card className="review-filter-card">
-        <div className="review-filter-header">
-          <div>
-            <Text strong>筛选条件</Text>
-            <Text type="secondary" className="review-filter-summary">当前显示 {rows.length} / {workspaceQuery.data?.stories.length ?? 0} 条需求</Text>
-          </div>
-          {activeFilterCount ? <Button type="link" onClick={() => { updateFilters({ owner: undefined, application: undefined, verdict: undefined }); setReviewStatus(undefined) }}>清空筛选</Button> : null}
-        </div>
-        <Space wrap className="review-filter-controls">
-          <Select
-            allowClear
-            showSearch
-            placeholder="按负责人筛选"
-            className="filter-select"
-            options={ownerOptions}
-            value={owner}
-            onChange={(value) => updateFilters({ owner: value })}
-            filterOption={(input, option) => String(option?.label ?? '').includes(input)}
-          />
-          <Select
-            allowClear
-            showSearch
-            placeholder="按应用筛选"
-            className="filter-select"
-            options={applicationOptions}
-            value={application}
-            onChange={(value) => updateFilters({ application: value })}
-            filterOption={(input, option) => String(option?.label ?? '').includes(input)}
-          />
-          <Select allowClear placeholder="AI判断" className="filter-select" options={aiVerdictOptions} value={verdict} onChange={(value) => updateFilters({ verdict: value })} />
-          <Select
-            allowClear
-            placeholder="人工状态"
-            className="filter-select"
-            value={reviewStatus}
-            onChange={setReviewStatus}
-            options={[{ value: 'pending', label: '待确认' }, { value: 'reviewed', label: '已确认' }]}
-          />
-        </Space>
-      </Card>
       <Card className="review-table-card" bodyStyle={{ padding: 0 }}>
         <div className="review-table-inset">
           <Table
@@ -1663,6 +1740,20 @@ function ReviewListPage({ batchId }: { batchId: string }) {
             size="middle"
             scroll={{ x: 1120 }}
             pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
+            onChange={(_pagination, filters, _sorter, extra) => {
+              if (extra.action !== 'filter') return
+              const normalize = (values: unknown) => Array.isArray(values) ? values.map(String) : null
+              const storyCode = normalize(filters.storyCode)
+              const storyName = normalize(filters.storyName)
+              const evidence = normalize(filters.evidence)
+              const humanStatus = normalize(filters.humanStatus)
+              setLocalColumnFilters({ storyCode, storyName, evidence, humanStatus })
+              updateFilters({
+                owner: normalize(filters.owner)?.[0],
+                application: normalize(filters.application)?.[0],
+                verdict: normalize(filters.verdict)?.[0],
+              })
+            }}
           />
         </div>
       </Card>
@@ -1943,35 +2034,89 @@ function DashboardPage({ batchId, canManage }: { batchId: string; canManage: boo
 }
 
 function OperationLogPage() {
-  const [weekCode, setWeekCode] = useState<string | undefined>()
   const operationLogQuery = useQuery({ queryKey: ['operation-log'], queryFn: listOperationLogs })
-  const weekCodeOptions = useMemo(() => {
-    const codes = new Set<string>()
-    operationLogQuery.data?.forEach((item) => {
-      if (item.review_batch?.week_code) codes.add(item.review_batch.week_code)
-    })
-    return [...codes].sort((a, b) => b.localeCompare(a, 'zh-CN')).map((code) => ({ value: code, label: code }))
-  }, [operationLogQuery.data])
-  const filteredLogs = useMemo(() => {
-    if (!weekCode) return operationLogQuery.data ?? []
-    return (operationLogQuery.data ?? []).filter((item) => item.review_batch?.week_code === weekCode)
-  }, [operationLogQuery.data, weekCode])
+  const modelNameById = useModelDisplayNameMap()
+  const logs = operationLogQuery.data ?? []
+  const getObjectLabel = (record: BatchOperationLogWithBatch) => {
+    if (record.action === 'MODEL_DISPLAY_NAME_UPDATED') {
+      const currentName = record.model_config_id ? modelNameById.get(record.model_config_id) : null
+      return `模型：${currentName ?? record.new_model_display_name ?? '未知模型'}`
+    }
+    return record.review_batch?.name ?? '批次已删除'
+  }
+  const getActionLabel = (record: BatchOperationLogWithBatch) => {
+    if (record.action === 'COMPLETE') return '完成批次'
+    if (record.action === 'REOPEN') return '重新打开'
+    return '修改模型名称'
+  }
+  const getOperatorLabel = (record: BatchOperationLogWithBatch) =>
+    record.performed_by_display_name ?? record.performed_by ?? '-'
+  const getOperationDate = (record: BatchOperationLogWithBatch) =>
+    new Date(record.created_at).toLocaleDateString()
+  const getDescription = (record: BatchOperationLogWithBatch) => {
+    if (record.action === 'COMPLETE') {
+      return record.forced ? `强制完成，当时仍有 ${record.pending_count ?? 0} 条未确认` : '正常完成'
+    }
+    if (record.action === 'REOPEN') return '批次已重新打开'
+    return `模型名称：${record.old_model_display_name ?? '-'} → ${record.new_model_display_name ?? '-'}`
+  }
+  const toColumnFilters = (values: string[]) =>
+    [...new Set(values)].sort((a, b) => a.localeCompare(b, 'zh-CN')).map((value) => ({ text: value, value }))
   const columns: ColumnsType<BatchOperationLogWithBatch> = [
     {
-      title: '代码评审',
+      title: '操作对象',
       width: 260,
-      render: (_value, record) => record.review_batch
-        ? <Link to={`/batches/${record.review_batch.id}/dashboard`}>{record.review_batch.name}</Link>
-        : <Text type="secondary">批次已删除</Text>,
+      filters: toColumnFilters(logs.map(getObjectLabel)),
+      filterSearch: true,
+      onFilter: (value, record) => getObjectLabel(record) === String(value),
+      render: (_value, record) => {
+        if (record.action === 'MODEL_DISPLAY_NAME_UPDATED') return <Text>{getObjectLabel(record)}</Text>
+        return record.review_batch
+          ? <Link to={`/batches/${record.review_batch.id}/dashboard`}>{record.review_batch.name}</Link>
+          : <Text type="secondary">批次已删除</Text>
+      },
     },
-    { title: '周标识', width: 140, render: (_value, record) => record.review_batch?.week_code ?? '-' },
-    { title: '操作', width: 120, render: (_value, record) => <Tag color={record.action === 'COMPLETE' ? 'green' : 'gold'}>{record.action === 'COMPLETE' ? '完成批次' : '重新打开'}</Tag> },
-    { title: '操作时间', dataIndex: 'created_at', width: 200, render: (value) => new Date(value).toLocaleString() },
+    {
+      title: '周标识',
+      width: 140,
+      filters: toColumnFilters(logs.map((record) => record.review_batch?.week_code ?? '-')),
+      filterSearch: true,
+      onFilter: (value, record) => (record.review_batch?.week_code ?? '-') === String(value),
+      render: (_value, record) => record.review_batch?.week_code ?? '-',
+    },
+    {
+      title: '操作',
+      width: 150,
+      filters: toColumnFilters(logs.map(getActionLabel)),
+      onFilter: (value, record) => getActionLabel(record) === String(value),
+      render: (_value, record) => {
+        if (record.action === 'COMPLETE') return <Tag color="green">完成批次</Tag>
+        if (record.action === 'REOPEN') return <Tag color="gold">重新打开</Tag>
+        return <Tag color="blue">修改模型名称</Tag>
+      },
+    },
+    {
+      title: '操作人',
+      width: 180,
+      filters: toColumnFilters(logs.map(getOperatorLabel)),
+      filterSearch: true,
+      onFilter: (value, record) => getOperatorLabel(record) === String(value),
+      render: (_value, record) => getOperatorLabel(record),
+    },
+    {
+      title: '操作时间',
+      dataIndex: 'created_at',
+      width: 200,
+      filters: toColumnFilters(logs.map(getOperationDate)),
+      onFilter: (value, record) => getOperationDate(record) === String(value),
+      render: (value) => new Date(value).toLocaleString(),
+    },
     {
       title: '说明',
-      render: (_value, record) => record.action === 'COMPLETE'
-        ? <Text type="secondary">{record.forced ? `强制完成，当时仍有 ${record.pending_count ?? 0} 条未确认` : '正常完成'}</Text>
-        : <Text type="secondary">批次已重新打开</Text>,
+      filters: toColumnFilters(logs.map(getDescription)),
+      filterSearch: true,
+      onFilter: (value, record) => getDescription(record) === String(value),
+      render: (_value, record) => <Text type="secondary">{getDescription(record)}</Text>,
     },
   ]
 
@@ -1979,24 +2124,11 @@ function OperationLogPage() {
     <Space direction="vertical" size="large" className="page-stack">
       <PageTitle title="操作日志" />
       <Card className="dashboard-card dashboard-log-card">
-        <Space wrap className="operation-log-filter">
-          <Text strong>筛选条件</Text>
-          <Select
-            allowClear
-            showSearch
-            placeholder="按周标识筛选"
-            className="filter-select"
-            options={weekCodeOptions}
-            value={weekCode}
-            onChange={setWeekCode}
-            filterOption={(input, option) => String(option?.label ?? '').includes(input)}
-          />
-        </Space>
         <Table
           rowKey="id"
           loading={operationLogQuery.isLoading}
           columns={columns}
-          dataSource={filteredLogs}
+          dataSource={logs}
           pagination={{ pageSize: 10, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
         />
       </Card>
@@ -2172,15 +2304,19 @@ function BaselineCommitChips({ metadata }: { metadata: BaselineCommit }) {
 }
 
 function BaselineImportDetails({ aiImport }: { aiImport: AiImportRecord }) {
+  const modelNameById = useModelDisplayNameMap()
   const metadata = parseBaselineCommit(aiImport.baseline_commit)
   const branchMismatch = Boolean(metadata && metadata.actual_branch !== aiImport.baseline_branch)
+  const currentModelName = aiImport.ai_model_config_id
+    ? modelNameById.get(aiImport.ai_model_config_id)
+    : null
 
   return (
     <div className="baseline-meta">
       <div className="baseline-meta__row">
         <BaselineMetaChip label="配置分支" value={aiImport.baseline_branch || '-'} />
         {metadata ? <BaselineMetaChip label="实际分支" value={metadata.actual_branch} tone={branchMismatch ? 'warning' : undefined} /> : null}
-        <BaselineMetaChip label="模型" value={aiImport.ai_model || '-'} />
+        <BaselineMetaChip label="模型" value={currentModelName ?? aiImport.ai_model ?? '-'} />
         <BaselineMetaChip label="分析时间" value={aiImport.analyzed_at ? new Date(aiImport.analyzed_at).toLocaleString() : '-'} />
       </div>
       {metadata ? (

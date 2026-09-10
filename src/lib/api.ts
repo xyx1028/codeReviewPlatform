@@ -7,12 +7,12 @@ import type {
   AiEvidenceInput,
   AiImportRecord,
   AiModelConfigSummary,
+  AiModelDisplayName,
   AiReviewResult,
   AnalysisJob,
   AnalysisRepositorySnapshot,
   AnalysisStoryTaskWithStory,
-  AnalysisWorkerStatus,
-  ModelConcurrencyStatus,
+  AnalysisWorkerOverview,
   BatchOperationLog,
   BatchOperationLogWithBatch,
   BatchWorkspace,
@@ -55,8 +55,77 @@ function unwrap<T>({ data, error }: { data: T | null; error: { message: string }
   return data as T
 }
 
+export const wechatLoginEnabled = import.meta.env.VITE_WECHAT_LOGIN_ENABLED === 'true'
+
+let pendingWechatAuthError: string | null = null
+
+function clearWechatLoginFragment(): void {
+  if (typeof window === 'undefined') return
+  const params = new URLSearchParams(window.location.hash.slice(1))
+  params.delete('wechat_handoff')
+  params.delete('wechat_error')
+  const hash = params.toString()
+  window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${hash ? `#${hash}` : ''}`)
+}
+
+async function completeWechatLogin(): Promise<void> {
+  if (typeof window === 'undefined') return
+  const params = new URLSearchParams(window.location.hash.slice(1))
+  const handoff = params.get('wechat_handoff')
+  const callbackError = params.get('wechat_error')
+  if (!handoff && !callbackError) return
+
+  const clientNonce = window.sessionStorage.getItem('wechat_login_nonce')
+  window.sessionStorage.removeItem('wechat_login_nonce')
+  clearWechatLoginFragment()
+  if (callbackError) throw new Error(callbackError)
+  if (!clientNonce) throw new Error('微信登录状态已丢失，请重试')
+
+  const result = await invokeWechatAuth<{ token_hash: string }>({
+    action: 'exchange_login',
+    ticket: handoff,
+    client_nonce: clientNonce,
+  })
+  const client = requireSupabase()
+  const { error } = await client.auth.verifyOtp({ token_hash: result.token_hash, type: 'email' })
+  if (error) throw error
+}
+
+export function consumeWechatAuthError(): string | null {
+  const error = pendingWechatAuthError
+  pendingWechatAuthError = null
+  return error
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+export async function startWechatSignIn(): Promise<void> {
+  if (!wechatLoginEnabled) throw new Error('微信登录未启用')
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined
+  if (!supabaseUrl || typeof window === 'undefined') throw new Error('Supabase 未配置')
+
+  const randomBytes = crypto.getRandomValues(new Uint8Array(32))
+  const clientNonce = Array.from(randomBytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  window.sessionStorage.setItem('wechat_login_nonce', clientNonce)
+
+  const redirectTo = new URL(window.location.href)
+  redirectTo.hash = ''
+  const endpoint = new URL('/functions/v1/wechat-auth/start', supabaseUrl)
+  endpoint.searchParams.set('redirect_to', redirectTo.toString())
+  endpoint.searchParams.set('client_nonce_hash', await sha256Hex(clientNonce))
+  window.location.assign(endpoint.toString())
+}
+
 export async function getSession() {
   const client = requireSupabase()
+  try {
+    await completeWechatLogin()
+  } catch (error) {
+    pendingWechatAuthError = error instanceof Error ? error.message : '微信登录失败，请重试'
+  }
   const { data, error } = await client.auth.getSession()
   if (error) throw error
   return data.session
@@ -83,6 +152,57 @@ export async function signOut() {
   const client = requireSupabase()
   const { error } = await client.auth.signOut()
   if (error) throw error
+}
+
+export interface WechatBindingStatus {
+  configured: boolean
+  bound: boolean
+  nickname: string | null
+  avatar_url: string | null
+  can_unbind: boolean
+}
+
+async function invokeWechatAuth<T>(body: Record<string, unknown>): Promise<T> {
+  const client = requireSupabase()
+  const { data, error } = await client.functions.invoke('wechat-auth', { body })
+  if (error) {
+    const context = (error as { context?: unknown }).context
+    let message: string | undefined
+    if (context instanceof Response) {
+      try {
+        const responseBody = await context.clone().json() as { error?: string }
+        message = responseBody.error
+      } catch {
+        // 非 JSON 错误响应使用 SDK 默认错误信息。
+      }
+    }
+    throw new Error(message ?? error.message)
+  }
+  const result = data as T & { error?: string }
+  if (result?.error) throw new Error(result.error)
+  return result
+}
+
+export function getWechatBindingStatus() {
+  return invokeWechatAuth<WechatBindingStatus>({ action: 'status' })
+}
+
+export async function startWechatBinding(): Promise<void> {
+  if (typeof window === 'undefined') return
+  const redirectTo = new URL('/profile', window.location.origin)
+  const result = await invokeWechatAuth<{ authorization_url: string }>({
+    action: 'begin_binding',
+    redirect_to: redirectTo.toString(),
+  })
+  window.location.assign(result.authorization_url)
+}
+
+export async function confirmWechatBinding(ticket: string): Promise<void> {
+  await invokeWechatAuth<{ ok: boolean }>({ action: 'confirm_binding', ticket })
+}
+
+export async function unbindWechat(password: string): Promise<void> {
+  await invokeWechatAuth<{ ok: boolean }>({ action: 'unbind', password })
 }
 
 export async function getMyProfile() {
@@ -415,6 +535,13 @@ async function invokeAdminModelConfig<T>(action: string, payload: Record<string,
   return result as T
 }
 
+/** 登录用户：读取全部模型（含停用模型）的当前展示名称，不返回任何密钥或连接信息。 */
+export async function listModelDisplayNames() {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('list_model_display_names')
+  return unwrap<AiModelDisplayName[]>({ data, error })
+}
+
 /** 供有创建批次权限的用户读取：仅返回已启用且已配置密钥的模型（无密钥字段）。 */
 export async function listEnabledModelConfigs() {
   const client = requireSupabase()
@@ -507,20 +634,11 @@ export async function listAnalysisStoryTasks(jobId: string) {
   return unwrap<AnalysisStoryTaskWithStory[]>({ data, error })
 }
 
-/** 只读：近 15 秒在线 Worker 汇总（在线数 / 处理中数 / 总槽位）。 */
-export async function getActiveAnalysisWorkers() {
+/** 管理员只读：当前在线 Worker、容量及其正在处理的评审批次。 */
+export async function adminListAnalysisWorkers() {
   const client = requireSupabase()
-  const { data, error } = await client.rpc('list_active_analysis_workers')
-  return unwrap<AnalysisWorkerStatus>({ data, error })
-}
-
-/** 只读：某模型配置当前并发状态（最大并发 / 活跃 / 空闲槽位）。 */
-export async function getModelConcurrencyStatus(modelConfigId: string) {
-  const client = requireSupabase()
-  const { data, error } = await client.rpc('get_model_concurrency_status', {
-    p_model_config_id: modelConfigId,
-  })
-  return unwrap<ModelConcurrencyStatus>({ data, error })
+  const { data, error } = await client.rpc('admin_list_analysis_workers')
+  return unwrap<AnalysisWorkerOverview>({ data, error })
 }
 
 /** 批次管理者：只允许 FAILED 任务按原快照重试（复用原 Commit SHA）。返回 job id。 */

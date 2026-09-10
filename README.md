@@ -57,3 +57,9 @@ docker compose -f docker-compose.worker.yml up -d --scale worker=4
 
 See `worker/OPERATIONS.md` for the full Secret checklist, deployment,
 connectivity verification, logging/audit rules, and the weekly runbook.
+
+## 微信扫码登录与账号绑定
+
+登录页支持微信开放平台网站应用扫码登录，邮箱老用户可在“个人中心”绑定微信并继续使用原账号。部署前需要应用 `0013_wechat_identity.sql`、配置微信服务端 Secrets，并以公开回调模式部署 Edge Function。
+
+完整配置与安全说明见 [`supabase/functions/wechat-auth/README.md`](supabase/functions/wechat-auth/README.md)。

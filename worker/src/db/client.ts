@@ -14,8 +14,12 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import type { WorkerConfig } from '../config.js'
 
+export interface RpcOptions {
+  signal?: AbortSignal
+}
+
 export interface DbClient {
-  rpc<T = unknown>(fn: string, params: Record<string, unknown>): Promise<T>
+  rpc<T = unknown>(fn: string, params: Record<string, unknown>, options?: RpcOptions): Promise<T>
 }
 
 /** Known domain error markers raised by the analysis RPCs. */
@@ -58,8 +62,9 @@ export class SupabaseDbClient implements DbClient {
     })
   }
 
-  async rpc<T = unknown>(fn: string, params: Record<string, unknown>): Promise<T> {
-    const { data, error } = await this.client.rpc(fn, params)
+  async rpc<T = unknown>(fn: string, params: Record<string, unknown>, options?: RpcOptions): Promise<T> {
+    const request = this.client.rpc(fn, params)
+    const { data, error } = await (options?.signal ? request.abortSignal(options.signal) : request)
     if (error) {
       const code = normalizeDbErrorCode(error.message, error.code)
       throw new DbError(`rpc ${fn} failed: ${error.message}`, code)

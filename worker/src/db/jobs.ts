@@ -82,6 +82,10 @@ export interface StoryFields {
 export interface StoryTask {
   id: string
   job_id: string
+  /** Worker and attempt counters captured atomically by the claim RPC. */
+  worker_id: string
+  retrieval_attempt: number
+  analysis_attempt: number
   retrieval_status: string
   analysis_status: string
   lease_expires_at: string | null
@@ -148,6 +152,9 @@ function toStoryTask(raw: Record<string, unknown>): StoryTask {
   return {
     id: String(raw.id),
     job_id: String(raw.job_id ?? (raw.job as JobContext | undefined)?.id ?? ''),
+    worker_id: String(raw.worker_id ?? ''),
+    retrieval_attempt: Number(raw.retrieval_attempt ?? 0),
+    analysis_attempt: Number(raw.analysis_attempt ?? 0),
     retrieval_status: String(raw.retrieval_status ?? 'PENDING'),
     analysis_status: String(raw.analysis_status ?? 'PENDING'),
     lease_expires_at: (raw.lease_expires_at as string | null) ?? null,
@@ -258,18 +265,19 @@ export class JobsDb {
 
   /**
    * Report this worker's slot utilization to the coordination table so the
-   * dashboard/scheduler can see live capacity. Called once per poll cycle.
+   * management page can see live capacity. Called by an independent timer.
    */
   heartbeatAnalysisWorker(
     workerId: string,
     slots: number,
     current: number,
+    signal?: AbortSignal,
   ): Promise<void> {
     return this.db.rpc<void>('heartbeat_analysis_worker', {
       p_worker_id: workerId,
       p_slots: slots,
       p_current: current,
-    })
+    }, { signal })
   }
 
   /** Persist stage-one retrieval result and progress. */

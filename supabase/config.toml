@@ -1,0 +1,4 @@
+project_id = "codeReviewPlatform"
+
+[functions.wechat-auth]
+verify_jwt = false

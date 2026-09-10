@@ -75,6 +75,12 @@ export interface AiModelConfigSummary {
   updated_at: string
 }
 
+/** 模型当前展示名称：历史页面只读取这两个非敏感字段。 */
+export interface AiModelDisplayName {
+  id: string
+  display_name: string
+}
+
 /** 批次/任务保存的模型快照，不含密钥。 */
 export interface AiModelSnapshot {
   model_config_id: string
@@ -158,19 +164,44 @@ export interface AnalysisStoryTaskWithStory extends AnalysisStoryTask {
   review_story: { story_code: string; story_name: string } | null
 }
 
-/** 近 15 秒在线 Worker 汇总。 */
-export interface AnalysisWorkerStatus {
-  online: number
-  processing: number
-  slots: number
+export type AnalysisWorkerPhase = 'PREPARING' | 'RETRIEVAL' | 'ANALYSIS' | 'FINALIZING'
+
+export interface AnalysisWorkerAssignment {
+  phase: AnalysisWorkerPhase
+  batch_id: string
+  batch_name: string
+  week_code: string
+  batch_status: BatchStatus
+  job_id: string
+  job_status: AnalysisJobStatus
+  requested_branch: DefaultBranch
+  job_started_at: string | null
+  task_id: string | null
+  story_id: string | null
+  story_code: string | null
+  story_name: string | null
+  heartbeat_at: string | null
+  lease_expires_at: string | null
 }
 
-/** 模型级并发状态。 */
-export interface ModelConcurrencyStatus {
-  model_config_id: string
-  max_parallel_tasks: number
-  active_tasks: number
-  available_slots: number
+export interface AnalysisWorkerDetail {
+  worker_id: string
+  slots: number
+  reported_current_tasks: number
+  last_seen_at: string
+  online: boolean
+  working: boolean
+  assignments: AnalysisWorkerAssignment[]
+}
+
+export interface AnalysisWorkerOverview {
+  generated_at: string
+  online_count: number
+  working_count: number
+  idle_count: number
+  total_slots: number
+  reported_current_tasks: number
+  workers: AnalysisWorkerDetail[]
 }
 
 export interface ReviewStory {
@@ -214,6 +245,7 @@ export interface AiImportRecord {
   baseline_branch: string | null
   baseline_commit: string | null
   ai_model: string | null
+  ai_model_config_id: string | null
   analyzed_at: string | null
   imported_by: string | null
   is_active: boolean
@@ -264,15 +296,19 @@ export interface HumanReview {
   updated_at: string
 }
 
-export type BatchOperationAction = 'COMPLETE' | 'REOPEN'
+export type BatchOperationAction = 'COMPLETE' | 'REOPEN' | 'MODEL_DISPLAY_NAME_UPDATED'
 
 export interface BatchOperationLog {
   id: string
-  batch_id: string
+  batch_id: string | null
   action: BatchOperationAction
   pending_count: number | null
   forced: boolean
   performed_by: string | null
+  performed_by_display_name: string | null
+  model_config_id: string | null
+  old_model_display_name: string | null
+  new_model_display_name: string | null
   created_at: string
 }
 

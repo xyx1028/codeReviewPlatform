@@ -18,7 +18,9 @@
  *
  * The worker holds no long-lived per-job state; harnesses are built on demand
  * and released when a job is no longer being processed. On restart it recovers
- * from the DB and prepared cache, and cleans orphaned job workspaces.
+ * from the DB and prepared cache. Claim-owned task workspaces are cleaned only
+ * by the claim that created them, so replicas sharing WORKSPACE_ROOT cannot
+ * recursively delete each other's active files.
  */
 
 import { loadConfig, type WorkerConfig } from './config.js'
@@ -39,7 +41,6 @@ import { finalizeJob } from './pipeline/finalize-job.js'
 import { prepareRepositoryAtSnapshot } from './git/prepare.js'
 import type { BranchName, RepositoryName } from './git/repositories.js'
 import { SlotPool } from './coordination/concurrency.js'
-import { cleanupOrphanedJobDirs } from './security/cleanup.js'
 import { rootLogger, type Logger } from './logger.js'
 import { redactError } from './security/redaction.js'
 
@@ -126,6 +127,7 @@ export async function runStoryTask(
       jobsDb,
       {
         workerId: config.workerId,
+        workspaceRoot: config.workspaceRoot,
         branch: task.job.requested_branch as BranchName,
         modelName: task.model.model_name,
         heartbeatIntervalMs: config.heartbeatIntervalMs,
@@ -168,10 +170,6 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
   const jobsDb = new JobsDb(dbClient)
 
   let stopped = false
-  const cleaned = cleanupOrphanedJobDirs(config.workspaceRoot)
-  if (cleaned.length > 0) {
-    logger.info('cleaned_orphan_dirs', { event: 'cleaned_orphan_dirs', count: cleaned.length })
-  }
 
   const pool = new SlotPool(config.workerStoryConcurrency)
   const inFlight = new Set<Promise<void>>()
@@ -230,24 +228,40 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
     }
   }
 
+  let availabilityHeartbeatInFlight = false
+  const reportAvailability = async () => {
+    if (stopped || availabilityHeartbeatInFlight) return
+    availabilityHeartbeatInFlight = true
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 10000)
+    try {
+      await jobsDb.heartbeatAnalysisWorker(
+        config.workerId,
+        config.workerStoryConcurrency,
+        pool.activeCount,
+        controller.signal,
+      )
+    } catch {
+      // 心跳失败或超时不应中断任务处理，下一个周期继续上报。
+    } finally {
+      clearTimeout(timeout)
+      availabilityHeartbeatInFlight = false
+    }
+  }
+  void reportAvailability()
+  const availabilityHeartbeat = setInterval(() => {
+    void reportAvailability()
+  }, 5000)
+
   const loop = async (): Promise<void> => {
     logger.info('worker_started', { event: 'worker_started' })
     let first = true
     while (!stopped) {
       try {
-        // 1. Report live capacity.
-        await jobsDb
-          .heartbeatAnalysisWorker(
-            config.workerId,
-            config.workerStoryConcurrency,
-            pool.activeCount,
-          )
-          .catch(() => undefined)
-
-        // 2. Opportunistically prepare a QUEUED job.
+        // 1. Opportunistically prepare a QUEUED job.
         await tryPrepareOneJob()
 
-        // 3. Fill free slots with globally-claimed story tasks.
+        // 2. Fill free slots with globally-claimed story tasks.
         let claimedAny = false
         while (!stopped && pool.availableSlots > 0) {
           const task = await jobsDb.claimNextStoryTask(
@@ -309,6 +323,7 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
   return {
     stop() {
       stopped = true
+      clearInterval(availabilityHeartbeat)
     },
     ranOnce,
   }
