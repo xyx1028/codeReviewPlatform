@@ -116,7 +116,6 @@ import './App.css'
 const { Header, Content, Sider } = Layout
 const { Title, Text, Paragraph } = Typography
 
-type AuthMode = 'sign-in' | 'sign-up'
 type AiResultMode = 'auto' | 'manual'
 
 const defaultBranchOptions: { value: DefaultBranch; label: DefaultBranch }[] = [
@@ -146,6 +145,13 @@ function hasErrors(issues: ValidationIssue[]) {
   return issues.some((issue) => issue.level === 'error')
 }
 
+function getUserDisplayName(displayName: string | null | undefined, email: string | null | undefined) {
+  const normalizedName = displayName?.trim()
+  if (normalizedName) return normalizedName
+  if (email?.endsWith('@wechat.invalid')) return '微信用户'
+  return email?.split('@')[0] || '用户'
+}
+
 async function downloadStorageFile(storagePath: string) {
   const url = await getFileDownloadUrl(storagePath)
   window.open(url, '_blank', 'noopener,noreferrer')
@@ -159,10 +165,11 @@ function useBatchWorkspace(batchId: string | undefined) {
   })
 }
 
-function useModelDisplayNameMap() {
+function useModelDisplayNameMap(enabled = true) {
   const modelNamesQuery = useQuery({
     queryKey: ['model-display-names'],
     queryFn: listModelDisplayNames,
+    enabled,
   })
   return useMemo(() => {
     const map = new Map<string, string>()
@@ -187,54 +194,140 @@ function SetupPage() {
   )
 }
 
+function AuthPageLayout({
+  title,
+  description,
+  children,
+}: {
+  title: string
+  description: string
+  children: ReactNode
+}) {
+  return (
+    <main className="center-page auth-page">
+      <Card className="auth-card" bordered={false}>
+        <div className="auth-brand">
+          <span className="auth-brand-mark">AI</span>
+          <div>
+            <Text strong>AI 需求—代码一致性评审平台</Text>
+            <div className="auth-brand-caption">需求与代码的一致性质量门户</div>
+          </div>
+        </div>
+        <div className="auth-heading">
+          <Title level={2}>{title}</Title>
+          <Paragraph type="secondary">{description}</Paragraph>
+        </div>
+        {children}
+      </Card>
+    </main>
+  )
+}
+
 function LoginPage() {
-  const [mode, setMode] = useState<AuthMode>('sign-in')
   const [wechatError] = useState(consumeWechatAuthError)
   const { message } = AntApp.useApp()
   const mutation = useMutation({
-    mutationFn: async (values: { email: string; password: string }) => {
-      if (mode === 'sign-in') await signIn(values.email, values.password)
-      else await signUp(values.email, values.password)
-    },
-    onSuccess: () => message.success(mode === 'sign-in' ? '登录成功' : '注册成功，请按 Supabase 邮件策略完成验证'),
+    mutationFn: (values: { email: string; password: string }) => signIn(values.email, values.password),
+    onSuccess: () => message.success('登录成功'),
     onError: (error) => message.error(error.message),
   })
 
   return (
-    <main className="center-page">
-      <Card className="login-card">
-        <Title level={2}>AI 需求—代码一致性评审平台</Title>
-        <Paragraph type="secondary">登录后管理每周评审批次、AI Excel 和人工确认。</Paragraph>
-        {wechatError ? <Alert type="error" showIcon title={wechatError} /> : null}
-        <Form layout="vertical" onFinish={(values) => mutation.mutate(values)}>
-          <Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email', message: '请输入邮箱' }]}>
-            <Input autoComplete="email" />
-          </Form.Item>
-          <Form.Item name="password" label="密码" rules={[{ required: true, message: '请输入密码' }]}>
-            <Input.Password autoComplete={mode === 'sign-in' ? 'current-password' : 'new-password'} />
-          </Form.Item>
-          <Space>
-            <Button type="primary" htmlType="submit" loading={mutation.isPending}>
-              {mode === 'sign-in' ? '登录' : '注册'}
-            </Button>
-            <Button type="link" onClick={() => setMode(mode === 'sign-in' ? 'sign-up' : 'sign-in')}>
-              {mode === 'sign-in' ? '没有账号？注册' : '已有账号？登录'}
-            </Button>
-          </Space>
-        </Form>
-        {wechatLoginEnabled ? (
-          <>
-            <Divider plain>其他登录方式</Divider>
-            <Button block onClick={() => startWechatSignIn().catch((error: Error) => message.error(error.message))}>
-              微信扫码登录
-            </Button>
-            <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
-              已有邮箱账号请先用邮箱登录，再到个人中心绑定微信，避免创建新账号。
-            </Paragraph>
-          </>
-        ) : null}
-      </Card>
-    </main>
+    <AuthPageLayout title="欢迎登录" description="使用你的邮箱账号进入评审工作台">
+      {wechatError ? <Alert className="auth-alert" type="error" showIcon title={wechatError} /> : null}
+      <Form layout="vertical" requiredMark={false} onFinish={(values) => mutation.mutate(values)}>
+        <Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email', message: '请输入有效邮箱' }]}>
+          <Input size="large" autoComplete="email" placeholder="name@example.com" />
+        </Form.Item>
+        <Form.Item name="password" label="密码" rules={[{ required: true, message: '请输入密码' }]}>
+          <Input.Password size="large" autoComplete="current-password" placeholder="请输入密码" />
+        </Form.Item>
+        <Button className="auth-submit" type="primary" size="large" block htmlType="submit" loading={mutation.isPending}>
+          登录
+        </Button>
+      </Form>
+      <div className="auth-switch">
+        <Text type="secondary">还没有账号？</Text>
+        <Link to="/register">立即注册</Link>
+      </div>
+      {wechatLoginEnabled ? (
+        <>
+          <Divider plain>其他登录方式</Divider>
+          <Button size="large" block onClick={() => startWechatSignIn().catch((error: Error) => message.error(error.message))}>
+            微信扫码登录
+          </Button>
+          <Paragraph className="auth-hint" type="secondary">
+            已有邮箱账号请先用邮箱登录，再到个人中心绑定微信，避免创建新账号。
+          </Paragraph>
+        </>
+      ) : null}
+    </AuthPageLayout>
+  )
+}
+
+function RegisterPage() {
+  const { message } = AntApp.useApp()
+  const navigate = useNavigate()
+  const mutation = useMutation({
+    mutationFn: (values: { email: string; password: string; confirmPassword: string }) => signUp(values.email, values.password),
+    onSuccess: () => {
+      message.success('注册成功，请按邮件提示完成验证后登录')
+      navigate('/login', { replace: true })
+    },
+    onError: (error) => message.error(error.message),
+  })
+
+  return (
+    <AuthPageLayout title="创建账号" description="注册邮箱账号，开始使用代码一致性评审平台">
+      <Form layout="vertical" requiredMark={false} onFinish={(values) => mutation.mutate(values)}>
+        <Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email', message: '请输入有效邮箱' }]}>
+          <Input size="large" autoComplete="email" placeholder="name@example.com" />
+        </Form.Item>
+        <Form.Item
+          name="password"
+          label="密码"
+          rules={[
+            { required: true, message: '请输入密码' },
+            { min: 6, message: '密码至少需要 6 个字符' },
+          ]}
+        >
+          <Input.Password size="large" autoComplete="new-password" placeholder="至少 6 个字符" />
+        </Form.Item>
+        <Form.Item
+          name="confirmPassword"
+          label="确认密码"
+          dependencies={['password']}
+          rules={[
+            { required: true, message: '请再次输入密码' },
+            ({ getFieldValue }) => ({
+              validator(_, value) {
+                if (!value || getFieldValue('password') === value) return Promise.resolve()
+                return Promise.reject(new Error('两次输入的密码不一致'))
+              },
+            }),
+          ]}
+        >
+          <Input.Password size="large" autoComplete="new-password" placeholder="再次输入密码" />
+        </Form.Item>
+        <Button className="auth-submit" type="primary" size="large" block htmlType="submit" loading={mutation.isPending}>
+          注册
+        </Button>
+      </Form>
+      <div className="auth-switch">
+        <Text type="secondary">已有账号？</Text>
+        <Link to="/login">返回登录</Link>
+      </div>
+    </AuthPageLayout>
+  )
+}
+
+function AuthRoutes() {
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/register" element={<RegisterPage />} />
+      <Route path="*" element={<Navigate to="/login" replace />} />
+    </Routes>
   )
 }
 
@@ -261,7 +354,7 @@ function Shell({ session }: { session: Session }) {
   const role = profileQuery.data?.role
   const isAdmin = role === 'ADMIN'
   const isWechatOnly = session.user.email?.endsWith('@wechat.invalid') ?? false
-  const accountLabel = isWechatOnly ? (profileQuery.data?.display_name || '微信用户') : session.user.email
+  const accountLabel = getUserDisplayName(profileQuery.data?.display_name, session.user.email)
   const canCreateBatch = role === 'ADMIN' || role === 'REVIEWER'
   const canManageBatch = (batch: ReviewBatch) => role === 'ADMIN' || (role === 'REVIEWER' && batch.created_by === session.user.id)
   const selectedKey = location.pathname.startsWith('/profile')
@@ -272,12 +365,21 @@ function Shell({ session }: { session: Session }) {
         ? '/workers'
         : location.pathname.startsWith('/models')
           ? '/models'
-          : location.pathname.startsWith('/operation-log')
-            ? '/operation-log'
-            : '/batches'
+          : location.pathname.startsWith('/model-operation-log')
+            ? '/model-operation-log'
+            : location.pathname.startsWith('/operation-log')
+              ? '/operation-log'
+              : '/batches'
   const menuItems = [
     { key: '/batches', label: <Link to="/batches">代码评审</Link> },
-    { key: '/operation-log', label: <Link to="/operation-log">操作日志</Link> },
+    {
+      key: '/operation-logs',
+      label: '操作日志',
+      children: [
+        { key: '/operation-log', label: <Link to="/operation-log">代码评审操作日志</Link> },
+        ...(isAdmin ? [{ key: '/model-operation-log', label: <Link to="/model-operation-log">模型操作日志</Link> }] : []),
+      ],
+    },
     { key: '/profile', label: <Link to="/profile">个人中心</Link> },
     ...(isAdmin ? [{ key: '/workers', label: <Link to="/workers">后台任务管理</Link> }] : []),
     ...(isAdmin ? [{ key: '/models', label: <Link to="/models">模型管理</Link> }] : []),
@@ -307,6 +409,7 @@ function Shell({ session }: { session: Session }) {
           <Menu
             mode="inline"
             selectedKeys={[selectedKey]}
+            defaultOpenKeys={['/operation-logs']}
             items={menuItems}
           />
         </Sider>
@@ -314,7 +417,8 @@ function Shell({ session }: { session: Session }) {
           <Routes>
             <Route path="/" element={<Navigate to="/batches" replace />} />
             <Route path="/batches" element={<BatchesPage canCreateBatch={canCreateBatch} canManageBatch={canManageBatch} />} />
-            <Route path="/operation-log" element={<OperationLogPage />} />
+            <Route path="/operation-log" element={<OperationLogPage scope="batch" />} />
+            <Route path="/model-operation-log" element={<OperationLogPage scope="model" isAdmin={isAdmin} />} />
             <Route
               path="/profile"
               element={(
@@ -395,6 +499,7 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
       message.success('模型状态已更新')
       queryClient.invalidateQueries({ queryKey: ['admin-model-configs'] })
       queryClient.invalidateQueries({ queryKey: ['enabled-model-configs'] })
+      queryClient.invalidateQueries({ queryKey: ['operation-log'] })
     },
     onError: (error) => message.error(error.message),
   })
@@ -569,7 +674,11 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
 
   const columns: ColumnsType<AdminUserListItem> = [
     { title: '邮箱', dataIndex: 'email' },
-    { title: '名称', dataIndex: 'display_name', render: (value) => value || '-' },
+    {
+      title: '用户名',
+      dataIndex: 'display_name',
+      render: (value: string | null, record) => getUserDisplayName(value, record.email),
+    },
     {
       title: '角色',
       dataIndex: 'role',
@@ -618,6 +727,7 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
       setOpen(false)
       form.resetFields()
       queryClient.invalidateQueries({ queryKey: ['batches'] })
+      queryClient.invalidateQueries({ queryKey: ['operation-log'] })
       navigate(`/batches/${batch.id}/import`)
     },
     onError: (error) => message.error(error.message),
@@ -627,12 +737,21 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
     onSuccess: () => {
       message.success('批次已删除')
       queryClient.invalidateQueries({ queryKey: ['batches'] })
+      queryClient.invalidateQueries({ queryKey: ['operation-log'] })
     },
     onError: (error) => message.error(error.message),
   })
 
   const columns: ColumnsType<ReviewBatch> = [
-    { title: '批次名称', dataIndex: 'name', render: (name, record) => <Link to={`/batches/${record.id}/dashboard`}>{name}</Link> },
+    {
+      title: '批次名称',
+      dataIndex: 'name',
+      width: 260,
+      ellipsis: { showTitle: false },
+      render: (name: string, record) => (
+        <Link to={`/batches/${record.id}/dashboard`} title={name}>{name}</Link>
+      ),
+    },
     { title: '周标识', dataIndex: 'week_code', width: 140 },
     { title: '状态', dataIndex: 'status', width: 150, render: (status: BatchStatus) => <Tag color={statusColor(status)}>{batchStatusLabels[status]}</Tag> },
     { title: '默认分支', dataIndex: 'default_branch', width: 140, render: (value) => value || '-' },
@@ -674,7 +793,13 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
   return (
     <Space direction="vertical" size="large" className="page-stack">
       <PageTitle title="评审列表" extra={canCreateBatch ? <Button type="primary" onClick={() => setOpen(true)}>创建代码评审</Button> : null} />
-      <Table rowKey="id" loading={batchesQuery.isLoading} columns={columns} dataSource={batchesQuery.data ?? []} />
+      <Table
+        rowKey="id"
+        loading={batchesQuery.isLoading}
+        columns={columns}
+        dataSource={batchesQuery.data ?? []}
+        tableLayout="fixed"
+      />
       <Modal title="创建每周评审批次" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={createMutation.isPending}>
         <Form form={form} layout="vertical" onFinish={(values) => createMutation.mutate(values)}>
           <Form.Item name="name" label="批次名称" rules={[{ required: true, message: '请输入批次名称' }]}>
@@ -2033,72 +2158,124 @@ function DashboardPage({ batchId, canManage }: { batchId: string; canManage: boo
   )
 }
 
-function OperationLogPage() {
-  const operationLogQuery = useQuery({ queryKey: ['operation-log'], queryFn: listOperationLogs })
-  const modelNameById = useModelDisplayNameMap()
+type OperationLogScope = 'batch' | 'model'
+
+const modelAuditFieldLabels: Record<string, string> = {
+  display_name: '模型名称',
+  provider: 'Provider',
+  base_url: 'Base URL',
+  model_name: 'Model',
+  max_parallel_tasks: '最大并发需求数',
+  request_timeout_ms: '请求超时',
+  retrieval_prompt_version: '检索提示词版本',
+  analysis_prompt_version: '分析提示词版本',
+  enabled: '启用状态',
+  api_key: 'API Key',
+}
+
+function formatModelAuditValue(field: string, value: unknown) {
+  if (value === null || value === undefined) return '-'
+  if (field === 'enabled' && typeof value === 'boolean') return value ? '启用' : '停用'
+  if (field === 'request_timeout_ms' && typeof value === 'number') return `${Math.round(value / 1000)} 秒`
+  return String(value)
+}
+
+function OperationLogPage({ scope, isAdmin = false }: { scope: OperationLogScope; isAdmin?: boolean }) {
+  const canRead = scope === 'batch' || isAdmin
+  const operationLogQuery = useQuery({
+    queryKey: ['operation-log', scope],
+    queryFn: listOperationLogs,
+    enabled: canRead,
+  })
+  const modelNameById = useModelDisplayNameMap(scope === 'model' && isAdmin)
+
+  if (!canRead) {
+    return <Alert type="warning" showIcon title="无权限访问" description="只有管理员可以查看模型操作日志。" />
+  }
+
   const logs = operationLogQuery.data ?? []
-  const getObjectLabel = (record: BatchOperationLogWithBatch) => {
-    if (record.action === 'MODEL_DISPLAY_NAME_UPDATED') {
-      const currentName = record.model_config_id ? modelNameById.get(record.model_config_id) : null
-      return `模型：${currentName ?? record.new_model_display_name ?? '未知模型'}`
-    }
-    return record.review_batch?.name ?? '批次已删除'
+  const sourceLogs = logs.filter((record) => scope === 'model'
+    ? ['MODEL_DISPLAY_NAME_UPDATED', 'MODEL_CONFIG_CREATED', 'MODEL_CONFIG_UPDATED'].some((action) => action === record.action)
+    : ['BATCH_CREATED', 'BATCH_DELETED', 'COMPLETE', 'REOPEN'].some((action) => action === record.action))
+  const getBatchObjectLabel = (record: BatchOperationLogWithBatch) =>
+    record.review_batch?.name ?? record.batch_name_snapshot ?? '批次已删除'
+  const getBatchWeekCode = (record: BatchOperationLogWithBatch) =>
+    record.review_batch?.week_code ?? record.batch_week_code_snapshot ?? '-'
+  const getModelLabel = (record: BatchOperationLogWithBatch) => {
+    const currentName = record.model_config_id ? modelNameById.get(record.model_config_id) : null
+    return record.model_display_name_snapshot
+      ?? currentName
+      ?? record.new_model_display_name
+      ?? record.old_model_display_name
+      ?? '未知模型'
   }
   const getActionLabel = (record: BatchOperationLogWithBatch) => {
+    if (record.action === 'BATCH_CREATED') return '创建代码评审'
+    if (record.action === 'BATCH_DELETED') return '删除代码评审'
     if (record.action === 'COMPLETE') return '完成批次'
     if (record.action === 'REOPEN') return '重新打开'
+    if (record.action === 'MODEL_CONFIG_CREATED') return '创建模型'
+    if (record.action === 'MODEL_CONFIG_UPDATED') return '修改模型配置'
     return '修改模型名称'
+  }
+  const getActionColor = (record: BatchOperationLogWithBatch) => {
+    if (record.action === 'BATCH_CREATED') return 'blue'
+    if (record.action === 'BATCH_DELETED') return 'red'
+    if (record.action === 'COMPLETE') return 'green'
+    if (record.action === 'REOPEN') return 'gold'
+    if (record.action === 'MODEL_CONFIG_CREATED') return 'cyan'
+    if (record.action === 'MODEL_CONFIG_UPDATED') return 'purple'
+    return 'geekblue'
   }
   const getOperatorLabel = (record: BatchOperationLogWithBatch) =>
     record.performed_by_display_name ?? record.performed_by ?? '-'
   const getOperationDate = (record: BatchOperationLogWithBatch) =>
     new Date(record.created_at).toLocaleDateString()
+  const getModelChangeDescription = (record: BatchOperationLogWithBatch) => {
+    const changedFields = record.changed_fields ?? []
+    if (!changedFields.length) return '模型配置已更新'
+    return changedFields.map((field) => {
+      const label = modelAuditFieldLabels[field] ?? field
+      if (field === 'api_key') {
+        return record.action === 'MODEL_CONFIG_CREATED' ? `${label}：已配置` : `${label}：已轮换`
+      }
+      if (field === 'base_url') {
+        return record.action === 'MODEL_CONFIG_CREATED' ? `${label}：已配置` : `${label}：已修改`
+      }
+      const nextValue = formatModelAuditValue(field, record.new_values?.[field])
+      if (record.action === 'MODEL_CONFIG_CREATED') return `${label}：${nextValue}`
+      const previousValue = formatModelAuditValue(field, record.old_values?.[field])
+      return `${label}：${previousValue} → ${nextValue}`
+    }).join('；')
+  }
   const getDescription = (record: BatchOperationLogWithBatch) => {
+    if (record.action === 'BATCH_CREATED') return '已创建代码评审批次'
+    if (record.action === 'BATCH_DELETED') return '已删除代码评审批次及其关联数据'
     if (record.action === 'COMPLETE') {
       return record.forced ? `强制完成，当时仍有 ${record.pending_count ?? 0} 条未确认` : '正常完成'
     }
     if (record.action === 'REOPEN') return '批次已重新打开'
-    return `模型名称：${record.old_model_display_name ?? '-'} → ${record.new_model_display_name ?? '-'}`
+    if (record.action === 'MODEL_DISPLAY_NAME_UPDATED') {
+      return `模型名称：${record.old_model_display_name ?? '-'} → ${record.new_model_display_name ?? '-'}`
+    }
+    return getModelChangeDescription(record)
   }
   const toColumnFilters = (values: string[]) =>
     [...new Set(values)].sort((a, b) => a.localeCompare(b, 'zh-CN')).map((value) => ({ text: value, value }))
-  const columns: ColumnsType<BatchOperationLogWithBatch> = [
-    {
-      title: '操作对象',
-      width: 260,
-      filters: toColumnFilters(logs.map(getObjectLabel)),
-      filterSearch: true,
-      onFilter: (value, record) => getObjectLabel(record) === String(value),
-      render: (_value, record) => {
-        if (record.action === 'MODEL_DISPLAY_NAME_UPDATED') return <Text>{getObjectLabel(record)}</Text>
-        return record.review_batch
-          ? <Link to={`/batches/${record.review_batch.id}/dashboard`}>{record.review_batch.name}</Link>
-          : <Text type="secondary">批次已删除</Text>
-      },
-    },
-    {
-      title: '周标识',
-      width: 140,
-      filters: toColumnFilters(logs.map((record) => record.review_batch?.week_code ?? '-')),
-      filterSearch: true,
-      onFilter: (value, record) => (record.review_batch?.week_code ?? '-') === String(value),
-      render: (_value, record) => record.review_batch?.week_code ?? '-',
-    },
+  const createCommonColumns = (
+    source: BatchOperationLogWithBatch[],
+  ): ColumnsType<BatchOperationLogWithBatch> => [
     {
       title: '操作',
-      width: 150,
-      filters: toColumnFilters(logs.map(getActionLabel)),
+      width: 160,
+      filters: toColumnFilters(source.map(getActionLabel)),
       onFilter: (value, record) => getActionLabel(record) === String(value),
-      render: (_value, record) => {
-        if (record.action === 'COMPLETE') return <Tag color="green">完成批次</Tag>
-        if (record.action === 'REOPEN') return <Tag color="gold">重新打开</Tag>
-        return <Tag color="blue">修改模型名称</Tag>
-      },
+      render: (_value, record) => <Tag color={getActionColor(record)}>{getActionLabel(record)}</Tag>,
     },
     {
       title: '操作人',
       width: 180,
-      filters: toColumnFilters(logs.map(getOperatorLabel)),
+      filters: toColumnFilters(source.map(getOperatorLabel)),
       filterSearch: true,
       onFilter: (value, record) => getOperatorLabel(record) === String(value),
       render: (_value, record) => getOperatorLabel(record),
@@ -2107,29 +2284,79 @@ function OperationLogPage() {
       title: '操作时间',
       dataIndex: 'created_at',
       width: 200,
-      filters: toColumnFilters(logs.map(getOperationDate)),
+      filters: toColumnFilters(source.map(getOperationDate)),
       onFilter: (value, record) => getOperationDate(record) === String(value),
       render: (value) => new Date(value).toLocaleString(),
     },
     {
       title: '说明',
-      filters: toColumnFilters(logs.map(getDescription)),
+      minWidth: 320,
+      filters: toColumnFilters(source.map(getDescription)),
       filterSearch: true,
       onFilter: (value, record) => getDescription(record) === String(value),
       render: (_value, record) => <Text type="secondary">{getDescription(record)}</Text>,
     },
   ]
+  const batchColumns: ColumnsType<BatchOperationLogWithBatch> = [
+    {
+      title: '操作对象',
+      width: 260,
+      filters: toColumnFilters(sourceLogs.map(getBatchObjectLabel)),
+      filterSearch: true,
+      onFilter: (value, record) => getBatchObjectLabel(record) === String(value),
+      render: (_value, record) => record.review_batch
+        ? <Link to={`/batches/${record.review_batch.id}/dashboard`}>{record.review_batch.name}</Link>
+        : (
+          <Space size={6}>
+            <Text>{record.batch_name_snapshot ?? '批次已删除'}</Text>
+            <Tag color="red">已删除</Tag>
+          </Space>
+        ),
+    },
+    {
+      title: '周标识',
+      width: 140,
+      filters: toColumnFilters(sourceLogs.map(getBatchWeekCode)),
+      filterSearch: true,
+      onFilter: (value, record) => getBatchWeekCode(record) === String(value),
+      render: (_value, record) => getBatchWeekCode(record),
+    },
+    ...createCommonColumns(sourceLogs),
+  ]
+  const modelColumns: ColumnsType<BatchOperationLogWithBatch> = [
+    {
+      title: '模型',
+      width: 260,
+      filters: toColumnFilters(sourceLogs.map(getModelLabel)),
+      filterSearch: true,
+      onFilter: (value, record) => getModelLabel(record) === String(value),
+      render: (_value, record) => <Text>{getModelLabel(record)}</Text>,
+    },
+    ...createCommonColumns(sourceLogs),
+  ]
+  const pagination = {
+    pageSize: 10,
+    showSizeChanger: false,
+    showTotal: (total: number) => `共 ${total} 条`,
+  }
+
+  const isModelScope = scope === 'model'
+  const columns = isModelScope ? modelColumns : batchColumns
+  const pageTitle = isModelScope ? '模型操作日志' : '代码评审操作日志'
+  const emptyText = isModelScope ? '暂无模型配置操作日志' : '暂无代码评审操作日志'
 
   return (
     <Space direction="vertical" size="large" className="page-stack">
-      <PageTitle title="操作日志" />
+      <PageTitle title={pageTitle} />
       <Card className="dashboard-card dashboard-log-card">
         <Table
           rowKey="id"
           loading={operationLogQuery.isLoading}
           columns={columns}
-          dataSource={logs}
-          pagination={{ pageSize: 10, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
+          dataSource={sourceLogs}
+          locale={{ emptyText }}
+          pagination={pagination}
+          scroll={{ x: isModelScope ? 1200 : 1150 }}
         />
       </Card>
     </Space>
@@ -2507,6 +2734,6 @@ export default function App() {
 
   if (!supabaseConfigured) return <SetupPage />
   if (session === undefined) return <main className="center-page"><Spin size="large" /></main>
-  if (!session) return <LoginPage />
+  if (!session) return <AuthRoutes />
   return <Shell session={session} />
 }

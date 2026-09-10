@@ -19,15 +19,131 @@ a {
 
 .center-page {
   min-height: 100vh;
+  min-height: 100dvh;
   display: grid;
   place-items: center;
+  box-sizing: border-box;
   padding: 32px;
 }
 
-.login-card,
 .setup-card {
   width: 480px;
   max-width: 100%;
+}
+
+.auth-page {
+  background:
+    radial-gradient(circle at 15% 18%, rgba(22, 119, 255, 0.12), transparent 32%),
+    radial-gradient(circle at 86% 82%, rgba(99, 102, 241, 0.1), transparent 30%),
+    linear-gradient(145deg, #f8fbff 0%, #f4f6fb 52%, #f8f7ff 100%);
+}
+
+.auth-card {
+  width: 440px;
+  max-width: 100%;
+  border: 1px solid rgba(226, 232, 240, 0.88);
+  border-radius: 18px;
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.12);
+}
+
+.auth-card .ant-card-body {
+  padding: 36px 40px 32px;
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid #eef2f7;
+}
+
+.auth-brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  border-radius: 12px;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  background: linear-gradient(135deg, #1677ff, #6366f1);
+  box-shadow: 0 8px 20px rgba(22, 119, 255, 0.24);
+}
+
+.auth-brand-caption {
+  margin-top: 2px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.auth-heading {
+  margin: 28px 0 24px;
+}
+
+.auth-heading h2 {
+  margin: 0 0 6px;
+  font-size: 26px;
+}
+
+.auth-heading .ant-typography {
+  margin-bottom: 0;
+}
+
+.auth-card .ant-form-item {
+  margin-bottom: 18px;
+}
+
+.auth-card .ant-form-item-label > label {
+  color: #334155;
+  font-weight: 600;
+}
+
+.auth-alert {
+  margin-bottom: 20px;
+}
+
+.auth-submit {
+  margin-top: 4px;
+  font-weight: 600;
+  box-shadow: 0 8px 18px rgba(22, 119, 255, 0.2);
+}
+
+.auth-switch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 22px;
+}
+
+.auth-switch a {
+  color: #1677ff;
+  font-weight: 600;
+}
+
+.auth-hint {
+  margin: 10px 0 0 !important;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+@media (max-width: 520px) {
+  .center-page {
+    align-items: start;
+    padding: 20px 16px;
+  }
+
+  .auth-card .ant-card-body {
+    padding: 28px 24px 24px;
+  }
+
+  .auth-heading {
+    margin: 24px 0 20px;
+  }
 }
 
 .app-shell {

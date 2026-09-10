@@ -296,7 +296,14 @@ export interface HumanReview {
   updated_at: string
 }
 
-export type BatchOperationAction = 'COMPLETE' | 'REOPEN' | 'MODEL_DISPLAY_NAME_UPDATED'
+export type BatchOperationAction =
+  | 'BATCH_CREATED'
+  | 'BATCH_DELETED'
+  | 'COMPLETE'
+  | 'REOPEN'
+  | 'MODEL_DISPLAY_NAME_UPDATED'
+  | 'MODEL_CONFIG_CREATED'
+  | 'MODEL_CONFIG_UPDATED'
 
 export interface BatchOperationLog {
   id: string
@@ -306,9 +313,16 @@ export interface BatchOperationLog {
   forced: boolean
   performed_by: string | null
   performed_by_display_name: string | null
+  batch_name_snapshot: string | null
+  batch_week_code_snapshot: string | null
   model_config_id: string | null
+  model_display_name_snapshot: string | null
   old_model_display_name: string | null
   new_model_display_name: string | null
+  changed_fields: string[] | null
+  old_values: Record<string, unknown> | null
+  new_values: Record<string, unknown> | null
+  api_key_changed: boolean
   created_at: string
 }
 

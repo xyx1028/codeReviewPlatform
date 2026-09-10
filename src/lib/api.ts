@@ -212,9 +212,21 @@ export async function getMyProfile() {
   const user = sessionData.user
   if (!user) return null
 
-  const { data, error } = await client.from('user_profile').select('*').eq('id', user.id).maybeSingle()
+  const { data, error } = await client
+    .from('user_profile')
+    .select('id, display_name, role')
+    .eq('id', user.id)
+    .maybeSingle()
   if (error) throw error
   return data as UserProfile | null
+}
+
+export async function updateMyDisplayName(displayName: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('update_my_display_name', {
+    p_display_name: displayName,
+  })
+  return unwrap<UserProfile>({ data, error })
 }
 
 export async function claimInitialAdmin() {
