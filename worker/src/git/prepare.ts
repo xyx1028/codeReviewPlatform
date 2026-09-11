@@ -23,12 +23,12 @@ import {
 } from './repositories.js'
 import {
   GitError,
+  isValidSha,
   readCommitSubject,
   resolveRemoteHead,
   revParseHead,
   shaBelongsToBranch,
 } from './verify.js'
-import { isValidSha } from '../ai/schemas.js'
 import { runCommand, SpawnError } from './run.js'
 
 export interface PrepareOptions {

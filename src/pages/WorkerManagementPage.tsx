@@ -3,23 +3,29 @@ import type { ColumnsType } from 'antd/es/table'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { adminListAnalysisWorkers } from '../lib/api'
-import type { AnalysisWorkerAssignment, AnalysisWorkerDetail, AnalysisWorkerPhase } from '../types'
+import type {
+  AnalysisWorkerAssignment,
+  AnalysisWorkerDetail,
+  AnalysisWorkerPhase,
+} from '../types'
 
 const { Title, Text } = Typography
 
 const phaseMeta: Record<AnalysisWorkerPhase, { label: string; color: string }> = {
   PREPARING: { label: '代码准备', color: 'cyan' },
-  RETRIEVAL: { label: 'AI 检索', color: 'blue' },
-  ANALYSIS: { label: 'AI 分析', color: 'purple' },
+  AGENT: { label: 'Agent 审核', color: 'magenta' },
   FINALIZING: { label: '结果汇总', color: 'geekblue' },
 }
+
+const UNKNOWN_PHASE = { label: '未知阶段', color: 'default' }
 
 function shortId(value: string) {
   return value.slice(0, 8)
 }
 
 function WorkerAssignmentView({ assignment }: { assignment: AnalysisWorkerAssignment }) {
-  const phase = phaseMeta[assignment.phase]
+  // 未知阶段来自更新的后端；显示占位而不是崩溃。
+  const phase = phaseMeta[assignment.phase] ?? UNKNOWN_PHASE
   return (
     <div>
       <Space wrap size={[6, 4]}>
@@ -110,7 +116,7 @@ export function WorkerManagementPage({ isAdmin }: { isAdmin: boolean }) {
   return (
     <Space direction="vertical" size="large" className="page-stack">
       <div className="page-title">
-        <Title level={2}>后台任务管理</Title>
+        <Title level={2}>后台任务监控</Title>
         <Tag color="blue">每 5 秒刷新</Tag>
       </div>
 
@@ -118,7 +124,7 @@ export function WorkerManagementPage({ isAdmin }: { isAdmin: boolean }) {
         type="info"
         showIcon
         title="Worker 负责执行自动 AI 分析"
-        description="这里展示当前在线 Worker、工作状态以及正在处理的代码评审批次。Worker 超过 20 秒没有心跳后将不再计入在线数量。"
+        description="这里展示当前在线 Worker、工作状态以及正在处理的代码评审批次。所有 Worker 均执行统一的 DeepSeek Harness Agent 链路；数据库按槽位、任务租约和模型并发限制分配任务。Worker 超过 20 秒没有心跳后将不再计入在线数量。"
       />
 
       <Row gutter={[16, 16]}>

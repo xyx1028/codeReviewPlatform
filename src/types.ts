@@ -53,23 +53,32 @@ export interface ReviewBatch {
   updated_at: string
 }
 
+export interface ReviewBatchListItem extends ReviewBatch {
+  creator_name: string | null
+}
+
 // ---------------------------------------------------------------------------
 // AI 自动化 MVP：模型配置与分析任务（前端仅使用无密钥类型）
 // ---------------------------------------------------------------------------
-
-export type ModelProvider = 'openai-compatible' | 'deepseek-harness'
 
 /** 模型配置摘要：前端唯一可见的模型信息，绝不包含 API Key 或 secret UUID。 */
 export interface AiModelConfigSummary {
   id: string
   display_name: string
-  provider: string
   base_url: string
   model_name: string
   enabled: boolean
   has_api_key: boolean
   max_parallel_tasks: number
   request_timeout_ms: number
+  /** 仅 admin_list_model_configs 返回。 */
+  context_window?: number
+  max_output_tokens?: number
+  agent_max_model_requests?: number
+  agent_max_retry_requests?: number
+  agent_max_compaction_requests?: number
+  /** 仅 admin_list_model_configs 返回；true 表示已被批次或分析任务引用。 */
+  is_referenced?: boolean
   created_by?: string | null
   created_at: string
   updated_at: string
@@ -85,13 +94,15 @@ export interface AiModelDisplayName {
 export interface AiModelSnapshot {
   model_config_id: string
   display_name: string
-  provider: string
   base_url: string
   model_name: string
   max_parallel_tasks?: number
   request_timeout_ms?: number
-  retrieval_prompt_version?: string
-  analysis_prompt_version?: string
+  context_window?: number
+  max_output_tokens?: number
+  agent_max_model_requests?: number
+  agent_max_retry_requests?: number
+  agent_max_compaction_requests?: number
 }
 
 export type AnalysisJobStatus =
@@ -109,12 +120,13 @@ export interface AnalysisJob {
   model_snapshot: AiModelSnapshot | null
   requested_branch: DefaultBranch
   status: AnalysisJobStatus
+  /** 仅用于读取历史任务来源；新任务恒为 deepseek-harness-acp。 */
+  execution_engine: 'legacy-openai' | 'deepseek-harness-acp'
   requested_by: string
   worker_id: string | null
+  finalizer_worker_id?: string | null
   attempt: number
   total_stories: number
-  retrieved_stories: number
-  analyzed_stories: number
   error_code: string | null
   error_message: string | null
   locked_at: string | null
@@ -140,17 +152,13 @@ export interface AnalysisStoryTask {
   id: string
   job_id: string
   story_id: string
-  retrieval_status: StoryTaskStatus
-  analysis_status: StoryTaskStatus
+  agent_status: StoryTaskStatus
+  agent_attempt: number
+  agent_model: string | null
+  agent_prompt_version: string | null
   worker_id: string | null
   lease_expires_at: string | null
   heartbeat_at: string | null
-  retrieval_model: string | null
-  analysis_model: string | null
-  retrieval_prompt_version: string | null
-  analysis_prompt_version: string | null
-  retrieval_attempt: number
-  analysis_attempt: number
   error_code: string | null
   error_message: string | null
   started_at: string | null
@@ -164,7 +172,7 @@ export interface AnalysisStoryTaskWithStory extends AnalysisStoryTask {
   review_story: { story_code: string; story_name: string } | null
 }
 
-export type AnalysisWorkerPhase = 'PREPARING' | 'RETRIEVAL' | 'ANALYSIS' | 'FINALIZING'
+export type AnalysisWorkerPhase = 'PREPARING' | 'AGENT' | 'FINALIZING'
 
 export interface AnalysisWorkerAssignment {
   phase: AnalysisWorkerPhase
@@ -304,6 +312,7 @@ export type BatchOperationAction =
   | 'MODEL_DISPLAY_NAME_UPDATED'
   | 'MODEL_CONFIG_CREATED'
   | 'MODEL_CONFIG_UPDATED'
+  | 'MODEL_CONFIG_DELETED'
 
 export interface BatchOperationLog {
   id: string

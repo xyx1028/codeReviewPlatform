@@ -1,24 +1,6 @@
-/**
- * finalize-job: aggregate all story results and write the single AI version via
- * complete_analysis_job. (Plan §7.7, §13.3, §13.4)
- *
- * Finalization is claimed via `claim_job_for_finalization`: any idle replica may
- * win it once every task is fully analyzed. The DB row lock + unique constraint
- * guarantee only one worker finalizes. Because idle workers also try to claim
- * finalization, the last worker standing can always finish a job even if the
- * worker that prepared it crashed.
- *
- * aggregateResults maps the camelCase AI structures saved per story into the
- * snake_case shape the DB RPC expects (story_code, implemented_content,
- * file_path, commit_sha, ...). It does NOT pass a model label — the DB derives
- * that from the frozen job snapshot.
- */
+/** Aggregate committed Agent reviews and persist one batch AI result version. */
 
-import type {
-  JobsDb,
-  StoryTaskSummary,
-  FinalizationClaim,
-} from '../db/jobs.js'
+import type { CompletedStoryTask, FinalizationClaim, JobsDb } from '../db/jobs.js'
 import { rootLogger, type Logger } from '../logger.js'
 import { redactError } from '../security/redaction.js'
 
@@ -29,18 +11,13 @@ export interface FinalizeResult {
 
 export class EmptyAnalysisError extends Error {
   code = 'ANALYSIS_OUTPUT_EMPTY'
-  constructor(message = 'no analysis output to finalize') {
+
+  constructor(message = 'no Agent output to finalize') {
     super(message)
     this.name = 'EmptyAnalysisError'
   }
 }
 
-/**
- * Attempt to finalize a job that was claimed for finalization. Aggregates the
- * saved per-story analysis outputs and calls complete_analysis_job with the
- * worker id. An empty analysis output set fails the job rather than writing an
- * empty version.
- */
 export async function finalizeJob(
   jobsDb: JobsDb,
   claim: FinalizationClaim,
@@ -51,12 +28,9 @@ export async function finalizeJob(
   const log = logger.child({ job_id: jobId, worker_id: workerId, stage: 'FINALIZING' })
 
   try {
-    const tasks = await jobsDb.listStoryTasks(jobId)
-    const { results, evidence } = aggregateResults(tasks)
-
-    if (results.length === 0) {
-      throw new EmptyAnalysisError()
-    }
+    const tasks = await jobsDb.listCompletedStoryTasks(jobId)
+    const { results, evidence } = aggregateCompletedResults(tasks)
+    if (results.length === 0) throw new EmptyAnalysisError()
 
     await jobsDb.completeAnalysisJob({ jobId, workerId, results, evidence })
     log.info('job_finalized', {
@@ -74,18 +48,7 @@ export async function finalizeJob(
   }
 }
 
-interface CamelEvidence {
-  repository?: string
-  filePath?: string
-  symbolName?: string
-  startLine?: number
-  endLine?: number
-  evidenceType?: string
-  description?: string
-  commitSha?: string
-}
-
-interface CamelAnalysis {
+interface AgentOutput {
   verdict?: string
   confidence?: number
   summary?: string
@@ -94,16 +57,13 @@ interface CamelAnalysis {
   risks?: string | null
   testPoints?: string | null
   aiRemark?: string | null
-  evidence?: CamelEvidence[]
 }
 
 /**
- * Build the snake_case results + evidence arrays the DB RPC expects from the
- * saved per-story camelCase analysis outputs. Tasks without an analysis_output
- * are skipped (they should not exist once finalization is claimed, but we guard
- * defensively).
+ * Verdict fields come from the committed Agent output. Evidence comes only from
+ * the platform-verified ledger; model-submitted unverified paths are never used.
  */
-export function aggregateResults(tasks: StoryTaskSummary[]): {
+export function aggregateCompletedResults(tasks: CompletedStoryTask[]): {
   results: unknown[]
   evidence: unknown[]
 } {
@@ -111,32 +71,32 @@ export function aggregateResults(tasks: StoryTaskSummary[]): {
   const evidence: unknown[] = []
 
   for (const task of tasks) {
-    const analysis = task.analysis_output as CamelAnalysis | null
-    if (!analysis) continue
+    const output = task.output as AgentOutput | null
+    if (!output) continue
 
     results.push({
       story_code: task.story_code,
-      verdict: analysis.verdict ?? null,
-      confidence: analysis.confidence ?? null,
-      summary: analysis.summary ?? null,
-      implemented_content: analysis.implementedContent ?? null,
-      missing_content: analysis.missingContent ?? null,
-      risks: analysis.risks ?? null,
-      test_points: analysis.testPoints ?? null,
-      ai_remark: analysis.aiRemark ?? null,
+      verdict: output.verdict ?? null,
+      confidence: output.confidence ?? null,
+      summary: output.summary ?? null,
+      implemented_content: output.implementedContent ?? null,
+      missing_content: output.missingContent ?? null,
+      risks: output.risks ?? null,
+      test_points: output.testPoints ?? null,
+      ai_remark: output.aiRemark ?? null,
     })
 
-    for (const e of analysis.evidence ?? []) {
+    for (const item of task.verified_evidence ?? []) {
       evidence.push({
         story_code: task.story_code,
-        repository_name: e.repository ?? null,
-        commit_sha: e.commitSha ?? null,
-        file_path: e.filePath ?? null,
-        symbol_name: e.symbolName ?? null,
-        start_line: e.startLine ?? null,
-        end_line: e.endLine ?? null,
-        evidence_type: e.evidenceType ?? null,
-        description: e.description ?? null,
+        repository_name: item.repository_name,
+        commit_sha: item.commit_sha,
+        file_path: item.file_path,
+        symbol_name: null,
+        start_line: item.start_line,
+        end_line: item.end_line,
+        evidence_type: item.evidence_type,
+        description: item.description,
       })
     }
   }

@@ -1,37 +1,50 @@
-import { describe, it, expect } from 'vitest'
-import { JobsDb, unwrapMaybeObject, unwrapArray } from '../db/jobs.js'
-import type { DbClient } from '../db/client.js'
-import { normalizeDbErrorCode } from '../db/client.js'
+import { describe, expect, it } from 'vitest'
+import {
+  KNOWN_DB_ERROR_CODES,
+  normalizeDbErrorCode,
+  type DbClient,
+  type RpcOptions,
+} from '../db/client.js'
+import { JobsDb, unwrapArray, unwrapMaybeObject } from '../db/jobs.js'
 
-/** Records every rpc(fn, params) call and returns a scripted response. */
+interface RpcCall {
+  fn: string
+  params: Record<string, unknown>
+  options?: RpcOptions
+}
+
+/** Records every RPC call and returns a response scripted by function name. */
 class RecordingDb implements DbClient {
-  calls: Array<{ fn: string; params: Record<string, unknown> }> = []
-  private responses: Record<string, unknown>
-  constructor(responses: Record<string, unknown> = {}) {
-    this.responses = responses
-  }
-  async rpc<T = unknown>(fn: string, params: Record<string, unknown>): Promise<T> {
-    this.calls.push({ fn, params })
+  readonly calls: RpcCall[] = []
+
+  constructor(private readonly responses: Record<string, unknown> = {}) {}
+
+  async rpc<T = unknown>(
+    fn: string,
+    params: Record<string, unknown>,
+    options?: RpcOptions,
+  ): Promise<T> {
+    this.calls.push({ fn, params, options })
     return (this.responses[fn] ?? null) as T
   }
-  last(): { fn: string; params: Record<string, unknown> } {
+
+  last(): RpcCall {
     return this.calls[this.calls.length - 1]
   }
 }
 
 const SHA = 'a'.repeat(40)
+const CLAIM_TOKEN = '11111111-2222-4333-8444-555555555555'
 
-function enrichedTask(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function claimedTask(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: 'task-1',
     job_id: 'job-1',
-    worker_id: 'w1',
-    retrieval_attempt: 2,
-    analysis_attempt: 1,
-    retrieval_status: 'PENDING',
-    analysis_status: 'PENDING',
-    lease_expires_at: null,
-    retrieval_output: null,
+    worker_id: 'worker-1',
+    lease_expires_at: '2026-01-01T00:15:00.000Z',
+    agent_status: 'RUNNING',
+    agent_attempt: 2,
+    claim_token: CLAIM_TOKEN,
     job: {
       id: 'job-1',
       batch_id: 'batch-1',
@@ -41,232 +54,472 @@ function enrichedTask(overrides: Record<string, unknown> = {}): Record<string, u
     },
     model: {
       model_config_id: 'model-1',
-      display_name: 'D',
-      provider: 'openai-compatible',
-      base_url: 'https://m/v1',
-      model_name: 'gpt',
-      retrieval_prompt_version: 'retrieval-v1',
-      analysis_prompt_version: 'analysis-v1',
+      display_name: 'Review model',
+      base_url: 'https://model.example.com/v1',
+      model_name: 'review-model',
       request_timeout_ms: 123456,
+      agent_max_model_requests: 20,
     },
     snapshots: [
-      { repository_name: 'kdmanage-backend', requested_branch: 'feature_dev', commit_sha: SHA, commit_subject: 's' },
+      {
+        repository_name: 'kdmanage-backend',
+        requested_branch: 'feature_dev',
+        commit_sha: SHA,
+        commit_subject: 'snapshot subject',
+      },
     ],
     story: {
       story_id: 'story-1',
       story_code: 'PRJ-001',
-      story_name: 'demo',
-      description: 'd',
-      acceptance_criteria: 'ac',
-      project_name: 'p',
-      application_name: 'app',
-      source_data: { a: 1 },
+      story_name: 'Demo story',
+      description: 'description',
+      acceptance_criteria: 'acceptance criteria',
+      project_name: 'Project',
+      application_name: 'Application',
+      source_data: { source: 'import' },
     },
     ...overrides,
   }
 }
 
-describe('unwrap helpers (jsonb object/array tolerant)', () => {
-  it('unwrapMaybeObject accepts object, single-element array, empty, null', () => {
-    expect(unwrapMaybeObject<{ x: number }>({ x: 1 })).toEqual({ x: 1 })
-    expect(unwrapMaybeObject<{ x: number }>([{ x: 2 }])).toEqual({ x: 2 })
+function reviewCommitInput() {
+  return {
+    taskId: 'task-1',
+    workerId: 'worker-1',
+    claimToken: CLAIM_TOKEN,
+    agentAttempt: 2,
+    result: { verdict: 'IMPLEMENTED' },
+    evidence: [{ evidence_id: 'ev-1' }],
+    usage: {
+      tool_calls: 9,
+      evidence_shown: 2,
+      searches_run: 4,
+      retry_requests: 1,
+      compaction_requests: 0,
+    },
+    configHash: 'config-hash',
+    promptVersion: 'agent-review-v1',
+    modelLabel: 'Review model / review-model',
+  }
+}
+
+describe('JSONB wrapper helpers', () => {
+  it('unwrapMaybeObject accepts an object or first array item and handles empty values', () => {
+    expect(unwrapMaybeObject<{ value: number }>({ value: 1 })).toEqual({ value: 1 })
+    expect(unwrapMaybeObject<{ value: number }>([{ value: 2 }])).toEqual({ value: 2 })
     expect(unwrapMaybeObject([])).toBeNull()
     expect(unwrapMaybeObject(null)).toBeNull()
+    expect(unwrapMaybeObject(undefined)).toBeNull()
   })
-  it('unwrapArray accepts array, single object, null', () => {
+
+  it('unwrapArray accepts arrays, single objects, and empty values', () => {
     expect(unwrapArray<number>([1, 2])).toEqual([1, 2])
-    expect(unwrapArray<{ x: number }>({ x: 1 })).toEqual([{ x: 1 }])
+    expect(unwrapArray<{ value: number }>({ value: 1 })).toEqual([{ value: 1 }])
     expect(unwrapArray(null)).toEqual([])
+    expect(unwrapArray(undefined)).toEqual([])
   })
 })
 
-describe('JobsDb RPC exact names and params', () => {
-  it('claim_next_story_task passes worker + lease and flattens enriched jsonb', async () => {
-    const db = new RecordingDb({ claim_next_story_task: enrichedTask() })
+describe('JobsDb canonical RPC contract', () => {
+  it('claims a job for preparation', async () => {
+    const response = {
+      job: {
+        id: 'job-1',
+        batch_id: 'batch-1',
+        model_config_id: 'model-1',
+        requested_branch: 'release',
+        total_stories: 1,
+      },
+      model: {
+        model_config_id: 'model-1',
+        display_name: 'Review model',
+        base_url: 'https://model.example.com/v1',
+        model_name: 'review-model',
+        request_timeout_ms: 5000,
+      },
+    }
+    const db = new RecordingDb({ claim_job_for_preparation: [response] })
     const jobs = new JobsDb(db)
-    const task = await jobs.claimNextStoryTask('w1', 900)
-    expect(db.last().fn).toBe('claim_next_story_task')
-    expect(db.last().params).toEqual({ p_worker_id: 'w1', p_lease_seconds: 900 })
-    expect(task?.story_code).toBe('PRJ-001')
+
+    await expect(jobs.claimJobForPreparation('worker-1')).resolves.toEqual(response)
+    expect(db.last()).toMatchObject({
+      fn: 'claim_job_for_preparation',
+      params: { p_worker_id: 'worker-1' },
+    })
+
+    const none = new JobsDb(new RecordingDb({ claim_job_for_preparation: [] }))
+    await expect(none.claimJobForPreparation('worker-1')).resolves.toBeNull()
+  })
+
+  it('saves repository snapshots with job ownership', async () => {
+    const snapshots = [
+      {
+        repository_name: 'kdmanage-backend' as const,
+        requested_branch: 'feature_dev' as const,
+        commit_sha: SHA,
+        commit_subject: null,
+      },
+    ]
+    const db = new RecordingDb()
+    const jobs = new JobsDb(db)
+
+    await jobs.saveRepositorySnapshots('job-1', 'worker-1', snapshots)
+
+    expect(db.last()).toMatchObject({
+      fn: 'save_repository_snapshots',
+      params: {
+        p_job_id: 'job-1',
+        p_worker_id: 'worker-1',
+        p_snapshots: snapshots,
+      },
+    })
+  })
+
+  it('claims a story task and exposes its required claim token and Agent fields', async () => {
+    const db = new RecordingDb({ claim_next_story_task: [claimedTask()] })
+    const jobs = new JobsDb(db)
+
+    const task = await jobs.claimNextStoryTask('worker-1', 900)
+
+    expect(db.last()).toMatchObject({
+      fn: 'claim_next_story_task',
+      params: { p_worker_id: 'worker-1', p_lease_seconds: 900 },
+    })
+    expect(task).toMatchObject({
+      id: 'task-1',
+      job_id: 'job-1',
+      worker_id: 'worker-1',
+      agent_status: 'RUNNING',
+      agent_attempt: 2,
+      claim_token: CLAIM_TOKEN,
+      story_id: 'story-1',
+      story_code: 'PRJ-001',
+      story_name: 'Demo story',
+      description: 'description',
+      acceptance_criteria: 'acceptance criteria',
+      project_name: 'Project',
+      application_name: 'Application',
+      source_data: { source: 'import' },
+    })
+    expect(task?.job.requested_branch).toBe('feature_dev')
     expect(task?.model.request_timeout_ms).toBe(123456)
     expect(task?.snapshots).toHaveLength(1)
-    expect(task?.job.requested_branch).toBe('feature_dev')
   })
 
-  it('claim_next_story_task tolerates a single-element array wrapper', async () => {
-    const db = new RecordingDb({ claim_next_story_task: [enrichedTask()] })
-    const jobs = new JobsDb(db)
-    const task = await jobs.claimNextStoryTask('w1', 900)
-    expect(task?.story_code).toBe('PRJ-001')
+  it('returns null when no story task is claimable', async () => {
+    const absent = new JobsDb(new RecordingDb({ claim_next_story_task: null }))
+    const missingId = new JobsDb(new RecordingDb({ claim_next_story_task: {} }))
+
+    await expect(absent.claimNextStoryTask('worker-1', 900)).resolves.toBeNull()
+    await expect(missingId.claimNextStoryTask('worker-1', 900)).resolves.toBeNull()
   })
 
-  it('claim_next_story_task returns null on empty/no id', async () => {
-    const jobs1 = new JobsDb(new RecordingDb({ claim_next_story_task: null }))
-    expect(await jobs1.claimNextStoryTask('w1', 900)).toBeNull()
-    const jobs2 = new JobsDb(new RecordingDb({ claim_next_story_task: {} }))
-    expect(await jobs2.claimNextStoryTask('w1', 900)).toBeNull()
+  it('rejects a claimed story task without a non-empty claim token', async () => {
+    for (const claimToken of [undefined, '']) {
+      const jobs = new JobsDb(
+        new RecordingDb({ claim_next_story_task: claimedTask({ claim_token: claimToken }) }),
+      )
+      await expect(jobs.claimNextStoryTask('worker-1', 900)).rejects.toThrow(
+        'claim_next_story_task returned no claim token',
+      )
+    }
   })
 
-  it('claim_job_for_preparation returns enriched job/model', async () => {
-    const db = new RecordingDb({
-      claim_job_for_preparation: {
-        job: { id: 'j', batch_id: 'b', model_config_id: 'm', requested_branch: 'release', total_stories: 1 },
-        model: { model_config_id: 'm', base_url: 'u', model_name: 'x', request_timeout_ms: 5000 },
+  it('claims a job for finalization and normalizes its snapshots', async () => {
+    const snapshot = {
+      repository_name: 'tmanage-backend',
+      requested_branch: 'feature_dev',
+      commit_sha: SHA,
+      commit_subject: null,
+    }
+    const response = {
+      job: {
+        id: 'job-1',
+        batch_id: 'batch-1',
+        model_config_id: 'model-1',
+        requested_branch: 'feature_dev',
+        total_stories: 2,
       },
-    })
+      model: { model_config_id: 'model-1' },
+      snapshots: snapshot,
+    }
+    const db = new RecordingDb({ claim_job_for_finalization: response })
     const jobs = new JobsDb(db)
-    const claim = await jobs.claimJobForPreparation('w1')
-    expect(db.last().params).toEqual({ p_worker_id: 'w1' })
-    expect(claim?.job.requested_branch).toBe('release')
-    expect(claim?.model.request_timeout_ms).toBe(5000)
-  })
 
-  it('claim_job_for_finalization returns job/model/snapshots or null', async () => {
-    const db = new RecordingDb({
-      claim_job_for_finalization: {
-        job: { id: 'j', batch_id: 'b', model_config_id: 'm', requested_branch: 'feature_dev', total_stories: 2 },
-        model: { model_config_id: 'm' },
-        snapshots: [{ repository_name: 'tmanage-backend', requested_branch: 'feature_dev', commit_sha: SHA, commit_subject: null }],
-      },
+    const claim = await jobs.claimJobForFinalization('worker-1')
+
+    expect(db.last()).toMatchObject({
+      fn: 'claim_job_for_finalization',
+      params: { p_worker_id: 'worker-1' },
     })
-    const jobs = new JobsDb(db)
-    const claim = await jobs.claimJobForFinalization('w1')
-    expect(db.last().fn).toBe('claim_job_for_finalization')
-    expect(claim?.snapshots).toHaveLength(1)
+    expect(claim).toEqual({ ...response, snapshots: [snapshot] })
+
     const none = new JobsDb(new RecordingDb({ claim_job_for_finalization: null }))
-    expect(await none.claimJobForFinalization('w1')).toBeNull()
+    await expect(none.claimJobForFinalization('worker-1')).resolves.toBeNull()
   })
 
-  it('save_repository_snapshots passes job/worker/snapshots', async () => {
-    const db = new RecordingDb()
-    const jobs = new JobsDb(db)
-    await jobs.saveRepositorySnapshots('j', 'w1', [
-      { repository_name: 'kdmanage-backend', requested_branch: 'feature_dev', commit_sha: SHA, commit_subject: null },
-    ])
-    expect(db.last().fn).toBe('save_repository_snapshots')
-    expect(db.last().params.p_job_id).toBe('j')
-    expect(db.last().params.p_worker_id).toBe('w1')
-    expect(Array.isArray(db.last().params.p_snapshots)).toBe(true)
-  })
-
-  it('heartbeat_story_task passes lease seconds and returns boolean', async () => {
+  it('heartbeats a claimed story task with its token and requires strict true', async () => {
     const db = new RecordingDb({ heartbeat_story_task: true })
     const jobs = new JobsDb(db)
-    const ok = await jobs.heartbeatStoryTask('t', 'w1', 900)
-    expect(db.last().params).toEqual({ p_task_id: 't', p_worker_id: 'w1', p_lease_seconds: 900 })
-    expect(ok).toBe(true)
-  })
 
-  it('heartbeat_analysis_worker reports slots and current', async () => {
-    const db = new RecordingDb()
-    const jobs = new JobsDb(db)
-    await jobs.heartbeatAnalysisWorker('w1', 4, 2)
-    expect(db.last().fn).toBe('heartbeat_analysis_worker')
-    expect(db.last().params).toEqual({ p_worker_id: 'w1', p_slots: 4, p_current: 2 })
-  })
-
-  it('save_retrieval_result passes explicit model + prompt columns', async () => {
-    const db = new RecordingDb()
-    const jobs = new JobsDb(db)
-    await jobs.saveRetrievalResult('t', 'w1', { storyCode: 'PRJ-001' } as never, 'gpt', 'retrieval-v1')
-    expect(db.last().fn).toBe('save_retrieval_result')
-    expect(db.last().params).toMatchObject({
-      p_task_id: 't',
-      p_worker_id: 'w1',
-      p_retrieval_model: 'gpt',
-      p_prompt_version: 'retrieval-v1',
+    await expect(
+      jobs.heartbeatStoryTask({
+        taskId: 'task-1',
+        workerId: 'worker-1',
+        claimToken: CLAIM_TOKEN,
+        leaseSeconds: 900,
+      }),
+    ).resolves.toBe(true)
+    expect(db.last()).toMatchObject({
+      fn: 'heartbeat_story_task',
+      params: {
+        p_task_id: 'task-1',
+        p_worker_id: 'worker-1',
+        p_claim_token: CLAIM_TOKEN,
+        p_lease_seconds: 900,
+      },
     })
-    expect(db.last().params.p_result).toBeDefined()
+
+    const nonBoolean = new JobsDb(new RecordingDb({ heartbeat_story_task: 'true' }))
+    await expect(
+      nonBoolean.heartbeatStoryTask({
+        taskId: 'task-1',
+        workerId: 'worker-1',
+        claimToken: CLAIM_TOKEN,
+        leaseSeconds: 900,
+      }),
+    ).resolves.toBe(false)
   })
 
-  it('save_analysis_result passes explicit model + prompt columns', async () => {
+  it('heartbeats worker capacity, capabilities, and cancellation signal', async () => {
+    const controller = new AbortController()
     const db = new RecordingDb()
     const jobs = new JobsDb(db)
-    await jobs.saveAnalysisResult('t', 'w1', { evidence: [] } as never, 'gpt', 'analysis-v1')
-    expect(db.last().fn).toBe('save_analysis_result')
-    expect(db.last().params).toMatchObject({
-      p_analysis_model: 'gpt',
-      p_prompt_version: 'analysis-v1',
-    })
-  })
 
-  it('fail_story_task uses p_error_code / p_error_message + stage', async () => {
-    const db = new RecordingDb()
-    const jobs = new JobsDb(db)
-    await jobs.failStoryTask({ taskId: 't', workerId: 'w1', stage: 'analysis', code: 'X', message: 'boom' })
-    expect(db.last().fn).toBe('fail_story_task')
-    expect(db.last().params).toEqual({
-      p_task_id: 't',
-      p_worker_id: 'w1',
-      p_stage: 'analysis',
-      p_error_code: 'X',
-      p_error_message: 'boom',
+    await jobs.heartbeatAnalysisWorker({
+      workerId: 'worker-1',
+      slots: 4,
+      current: 2,
+      capabilities: { agent_profile: 'code-review-acp' },
+      signal: controller.signal,
     })
-  })
 
-  it('fail_claimed_analysis_job passes owner and displayable error', async () => {
-    const db = new RecordingDb()
-    const jobs = new JobsDb(db)
-    await jobs.failClaimedAnalysisJob({
-      jobId: 'j',
-      workerId: 'w1',
-      code: 'CODE',
-      message: 'msg',
-    })
-    expect(db.last().fn).toBe('fail_claimed_analysis_job')
-    expect(db.last().params).toEqual({
-      p_job_id: 'j',
-      p_worker_id: 'w1',
-      p_error_code: 'CODE',
-      p_error_message: 'msg',
+    expect(db.last()).toEqual({
+      fn: 'heartbeat_analysis_worker',
+      params: {
+        p_worker_id: 'worker-1',
+        p_slots: 4,
+        p_current: 2,
+        p_capabilities: { agent_profile: 'code-review-acp' },
+      },
+      options: { signal: controller.signal },
     })
   })
 
-  it('get_model_secret_for_job passes worker id', async () => {
-    const db = new RecordingDb({ get_model_secret_for_job: 'sk-secret' })
-    const jobs = new JobsDb(db)
-    const secret = await jobs.getModelSecretForJob('j', 'w1')
-    expect(db.last().params).toEqual({ p_job_id: 'j', p_worker_id: 'w1' })
-    expect(secret).toBe('sk-secret')
-  })
-
-  it('complete_analysis_job passes worker id and NOT p_model', async () => {
+  it('uses empty worker capabilities by default', async () => {
     const db = new RecordingDb()
     const jobs = new JobsDb(db)
-    await jobs.completeAnalysisJob({ jobId: 'j', workerId: 'w1', results: [{ story_code: 'x' }], evidence: [] })
-    expect(db.last().fn).toBe('complete_analysis_job')
-    expect(db.last().params).toEqual({
-      p_job_id: 'j',
-      p_worker_id: 'w1',
-      p_results: [{ story_code: 'x' }],
-      p_evidence: [],
-    })
-    expect('p_model' in db.last().params).toBe(false)
+
+    await jobs.heartbeatAnalysisWorker({ workerId: 'worker-1', slots: 2, current: 0 })
+
+    expect(db.last().params.p_capabilities).toEqual({})
   })
 
-  it('list_analysis_story_tasks_for_worker returns an array (object tolerant)', async () => {
-    const db = new RecordingDb({
-      list_analysis_story_tasks_for_worker: [
-        { id: 't1', job_id: 'j', story_id: 's', story_code: 'PRJ-001', retrieval_status: 'SUCCEEDED', analysis_status: 'SUCCEEDED', analysis_output: {} },
+  it('reads the model secret for a claimed story task', async () => {
+    const db = new RecordingDb({ get_model_secret_for_story_task: 'sk-secret' })
+    const jobs = new JobsDb(db)
+
+    await expect(
+      jobs.getModelSecretForStoryTask({
+        taskId: 'task-1',
+        workerId: 'worker-1',
+        claimToken: CLAIM_TOKEN,
+      }),
+    ).resolves.toBe('sk-secret')
+    expect(db.last()).toMatchObject({
+      fn: 'get_model_secret_for_story_task',
+      params: {
+        p_task_id: 'task-1',
+        p_worker_id: 'worker-1',
+        p_claim_token: CLAIM_TOKEN,
+      },
+    })
+  })
+
+  it('commits an Agent review and returns its receipt', async () => {
+    const receipt = { run_id: 'run-1', committed_at: '2026-01-01T00:00:00.000Z' }
+    const db = new RecordingDb({ save_agent_review_result: [receipt] })
+    const jobs = new JobsDb(db)
+    const input = reviewCommitInput()
+
+    await expect(jobs.saveAgentReviewResult(input)).resolves.toEqual(receipt)
+    expect(db.last()).toMatchObject({
+      fn: 'save_agent_review_result',
+      params: {
+        p_task_id: 'task-1',
+        p_worker_id: 'worker-1',
+        p_claim_token: CLAIM_TOKEN,
+        p_agent_attempt: 2,
+        p_result: { verdict: 'IMPLEMENTED' },
+        p_evidence: [{ evidence_id: 'ev-1' }],
+        p_usage: input.usage,
+        p_config_hash: 'config-hash',
+        p_prompt_version: 'agent-review-v1',
+        p_model_label: 'Review model / review-model',
+      },
+    })
+  })
+
+  it('rejects a commit response without a receipt', async () => {
+    for (const response of [null, {}, []]) {
+      const jobs = new JobsDb(new RecordingDb({ save_agent_review_result: response }))
+      await expect(jobs.saveAgentReviewResult(reviewCommitInput())).rejects.toThrow(
+        'save_agent_review_result returned no receipt',
+      )
+    }
+  })
+
+  it('records an Agent review failure with its claim token and business error code', async () => {
+    const db = new RecordingDb()
+    const jobs = new JobsDb(db)
+
+    await jobs.failAgentReview({
+      taskId: 'task-1',
+      workerId: 'worker-1',
+      claimToken: CLAIM_TOKEN,
+      code: 'AGENT_NO_SUBMISSION',
+      message: 'no review was submitted',
+    })
+
+    expect(db.last()).toMatchObject({
+      fn: 'fail_agent_review',
+      params: {
+        p_task_id: 'task-1',
+        p_worker_id: 'worker-1',
+        p_claim_token: CLAIM_TOKEN,
+        p_error_code: 'AGENT_NO_SUBMISSION',
+        p_error_message: 'no review was submitted',
+      },
+    })
+  })
+
+  it('lists completed story tasks with committed output and verified evidence', async () => {
+    const completedTask = {
+      id: 'task-1',
+      job_id: 'job-1',
+      story_id: 'story-1',
+      story_code: 'PRJ-001',
+      agent_status: 'SUCCEEDED',
+      output: { verdict: 'PARTIAL', summary: 'partially implemented' },
+      verified_evidence: [
+        {
+          evidence_id: 'ev-1',
+          repository_name: 'kdmanage-backend',
+          commit_sha: SHA,
+          file_path: 'src/OrderService.java',
+          start_line: 10,
+          end_line: 20,
+          evidence_type: 'existing implementation',
+          description: 'verified range',
+        },
       ],
-    })
+    }
+    const db = new RecordingDb({ list_completed_story_tasks: completedTask })
     const jobs = new JobsDb(db)
-    const tasks = await jobs.listStoryTasks('j')
-    expect(db.last().params).toEqual({ p_job_id: 'j' })
-    expect(tasks).toHaveLength(1)
+
+    await expect(jobs.listCompletedStoryTasks('job-1')).resolves.toEqual([completedTask])
+    expect(db.last()).toMatchObject({
+      fn: 'list_completed_story_tasks',
+      params: { p_job_id: 'job-1' },
+    })
+
+    const empty = new JobsDb(new RecordingDb({ list_completed_story_tasks: null }))
+    await expect(empty.listCompletedStoryTasks('job-1')).resolves.toEqual([])
+  })
+
+  it('completes an analysis job with aggregate results and evidence', async () => {
+    const results = [{ story_code: 'PRJ-001', verdict: 'IMPLEMENTED' }]
+    const evidence = [{ story_code: 'PRJ-001', evidence_id: 'ev-1' }]
+    const db = new RecordingDb()
+    const jobs = new JobsDb(db)
+
+    await jobs.completeAnalysisJob({
+      jobId: 'job-1',
+      workerId: 'worker-1',
+      results,
+      evidence,
+    })
+
+    expect(db.last()).toMatchObject({
+      fn: 'complete_analysis_job',
+      params: {
+        p_job_id: 'job-1',
+        p_worker_id: 'worker-1',
+        p_results: results,
+        p_evidence: evidence,
+      },
+    })
+  })
+
+  it('records a claimed job failure with its business error code', async () => {
+    const db = new RecordingDb()
+    const jobs = new JobsDb(db)
+
+    await jobs.failClaimedAnalysisJob({
+      jobId: 'job-1',
+      workerId: 'worker-1',
+      code: 'JOB_INTERNAL_ERROR',
+      message: 'repository preparation failed',
+    })
+
+    expect(db.last()).toMatchObject({
+      fn: 'fail_claimed_analysis_job',
+      params: {
+        p_job_id: 'job-1',
+        p_worker_id: 'worker-1',
+        p_error_code: 'JOB_INTERNAL_ERROR',
+        p_error_message: 'repository preparation failed',
+      },
+    })
   })
 })
 
-describe('normalizeDbErrorCode', () => {
-  it('extracts known domain markers from the message', () => {
-    expect(normalizeDbErrorCode('rpc save failed: TASK_LEASE_LOST')).toBe('TASK_LEASE_LOST')
-    expect(normalizeDbErrorCode('boom MODEL_SECRET_MISSING here')).toBe('MODEL_SECRET_MISSING')
-    expect(normalizeDbErrorCode('RESULT_ALREADY_EXISTS')).toBe('RESULT_ALREADY_EXISTS')
+describe('database error-code normalization', () => {
+  it('recognizes every public domain error marker', () => {
+    const expectedCodes = [
+      'TASK_LEASE_LOST',
+      'JOB_LEASE_LOST',
+      'MODEL_SECRET_MISSING',
+      'MODEL_CONFIG_DISABLED',
+      'RESULT_ALREADY_EXISTS',
+      'BATCH_BRANCH_CHANGED',
+      'EVIDENCE_PATH_INVALID',
+      'EVIDENCE_LINE_INVALID',
+      'LEGACY_ENGINE_RETIRED',
+      'AGENT_CLAIM_INVALID',
+      'AGENT_RESULT_ALREADY_COMMITTED',
+    ]
+
+    expect(KNOWN_DB_ERROR_CODES).toEqual(expectedCodes)
+    for (const code of expectedCodes) {
+      expect(normalizeDbErrorCode(`RPC failed: ${code}`)).toBe(code)
+    }
   })
-  it('falls back to SQLSTATE when no marker present', () => {
-    expect(normalizeDbErrorCode('some other error', 'P0001')).toBe('P0001')
+
+  it('prefers a domain marker in the message over SQLSTATE', () => {
+    expect(normalizeDbErrorCode('TASK_LEASE_LOST', 'P0001')).toBe('TASK_LEASE_LOST')
   })
-  it('returns undefined when nothing recognizable', () => {
+
+  it('does not match domain markers as substrings', () => {
+    expect(normalizeDbErrorCode('XTASK_LEASE_LOSTX', 'P0001')).toBe('P0001')
+  })
+
+  it('falls back to a non-empty SQLSTATE', () => {
+    expect(normalizeDbErrorCode('unrecognized database failure', 'P0001')).toBe('P0001')
+    expect(normalizeDbErrorCode('unrecognized database failure', '  ')).toBeUndefined()
+  })
+
+  it('returns undefined without a recognized marker or SQLSTATE', () => {
     expect(normalizeDbErrorCode('random failure')).toBeUndefined()
     expect(normalizeDbErrorCode(null)).toBeUndefined()
   })

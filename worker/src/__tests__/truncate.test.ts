@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest'
 import { truncateList, truncateText, clampLineRange } from '../tools/truncate.js'
-import { parseRgLine } from '../tools/search-code.js'
 
 describe('truncateList', () => {
   it('does not truncate when within limit', () => {
@@ -36,20 +35,5 @@ describe('clampLineRange', () => {
   it('keeps small ranges intact', () => {
     const r = clampLineRange(10, 20, 200)
     expect(r).toEqual({ startLine: 10, endLine: 20, truncated: false })
-  })
-})
-
-describe('parseRgLine', () => {
-  it('parses path:line:text form', () => {
-    const hit = parseRgLine('./src/App.java:42:public void x()', 'kdmanage-backend')
-    expect(hit).toEqual({
-      repository: 'kdmanage-backend',
-      filePath: 'src/App.java',
-      lineNumber: 42,
-      lineText: 'public void x()',
-    })
-  })
-  it('returns null for malformed lines', () => {
-    expect(parseRgLine('garbage', 'kdmanage-backend')).toBeNull()
   })
 })

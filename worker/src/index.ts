@@ -1,51 +1,38 @@
 /**
- * Worker entrypoint — global, multi-replica scheduler. (Plan §4, §13, §17)
+ * Worker entrypoint — global, multi-replica DeepSeek Harness scheduler.
  *
- * Every replica runs the same loop and cooperates on one batch:
- *
- *  1. Report capacity via heartbeat_analysis_worker (slots / current in use).
- *  2. Opportunistically prepare ONE QUEUED job (freeze 4 SHAs → PROCESSING).
- *     Preparation is decoupled from processing; a prepared job's stories are
- *     then claimable by ANY replica.
- *  3. While there is a free slot, globally claim the next processable story
- *     task from ANY job in PROCESSING (bounded by this worker's SlotPool and,
- *     server-side, by the model's max_parallel_tasks). Each claim is enriched
- *     with the job/model/snapshots/story, so a replica can process a task it
- *     never prepared. Repos are prepared locally at the frozen SHAs.
- *  4. When no task is claimable, try to claim a job for finalization. Idle
- *     workers polling for finalization means the LAST worker standing can
- *     always finish a job whose original owner crashed.
- *
- * The worker holds no long-lived per-job state; harnesses are built on demand
- * and released when a job is no longer being processed. On restart it recovers
- * from the DB and prepared cache. Claim-owned task workspaces are cleaned only
- * by the claim that created them, so replicas sharing WORKSPACE_ROOT cannot
- * recursively delete each other's active files.
+ * Every replica reports capacity, prepares queued jobs, claims individual Agent
+ * tasks at frozen repository SHAs, and finalizes completed jobs. Database
+ * leases, claim tokens and advisory locks coordinate replicas; the worker keeps
+ * no long-lived per-job state.
  */
 
+import { ACP_PROFILE_NAME } from './ai/acp/profile-materializer.js'
+import type { CommitReviewInput } from './ai/control/attempt-control-broker.js'
+import { AGENT_REVIEW_PROMPT_VERSION } from './ai/prompts/agent-review-v1.js'
+import type { ReviewRunner } from './ai/runtime/contracts.js'
+import { buildDeepSeekHarnessReview } from './ai/runtime/factory.js'
 import { loadConfig, type WorkerConfig } from './config.js'
-import { SupabaseDbClient } from './db/client.js'
-import {
-  JobsDb,
-  type StoryTask,
-  type ModelSnapshot,
-} from './db/jobs.js'
-import { OpenAICompatibleClient } from './ai/openai-compatible.js'
-import { OpenAICompatibleHarness } from './ai/openai-compatible-harness.js'
-import { prepareJob } from './pipeline/prepare-job.js'
-import {
-  processStoryTask,
-  type PreparedRepoRef,
-} from './pipeline/process-story-task.js'
-import { finalizeJob } from './pipeline/finalize-job.js'
-import { prepareRepositoryAtSnapshot } from './git/prepare.js'
-import type { BranchName, RepositoryName } from './git/repositories.js'
 import { SlotPool } from './coordination/concurrency.js'
+import { Heartbeat } from './coordination/heartbeat.js'
+import {
+  acquireInstanceLock,
+  WorkerAlreadyRunningError,
+} from './coordination/instance-lock.js'
+import { SupabaseDbClient } from './db/client.js'
+import { JobsDb, type StoryTask } from './db/jobs.js'
+import {
+  prepareRepositoryAtSnapshot,
+  type PreparedRepository,
+} from './git/prepare.js'
+import type { BranchName, RepositoryName } from './git/repositories.js'
 import { rootLogger, type Logger } from './logger.js'
+import { finalizeJob } from './pipeline/finalize-job.js'
+import { prepareJob } from './pipeline/prepare-job.js'
 import { redactError } from './security/redaction.js'
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms))
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 export interface WorkerRuntime {
@@ -53,133 +40,193 @@ export interface WorkerRuntime {
   ranOnce: Promise<void>
 }
 
-/**
- * Build a ReviewHarness for a job by reading its Vault-stored API key into
- * worker memory. The key is scoped to processing this task and is not logged.
- * The per-model request timeout comes from the model snapshot.
- */
-export async function buildHarnessForJob(
-  jobsDb: JobsDb,
-  jobId: string,
-  workerId: string,
-  model: ModelSnapshot,
-): Promise<OpenAICompatibleHarness> {
-  const apiKey = await jobsDb.getModelSecretForJob(jobId, workerId)
-  const client = new OpenAICompatibleClient({
-    baseUrl: model.base_url,
-    modelName: model.model_name,
-    apiKey,
-    timeoutMs: model.request_timeout_ms ?? 180000,
-  })
-  return new OpenAICompatibleHarness({ client })
-}
-
-/**
- * Prepare the four repositories for a claimed task at their frozen SHAs. Never
- * resolves the latest branch head; uses the exact snapshot SHAs.
- */
+/** Prepare all repositories at the exact SHAs frozen on the claimed job. */
 export async function prepareTaskRepositories(
   task: StoryTask,
   config: WorkerConfig,
-): Promise<PreparedRepoRef[]> {
+): Promise<PreparedRepository[]> {
   const branch = task.job.requested_branch as BranchName
   const timeoutMs = task.model.request_timeout_ms
-  const refs: PreparedRepoRef[] = []
-  for (const snap of task.snapshots) {
-    const prepared = await prepareRepositoryAtSnapshot(
-      snap.repository_name as RepositoryName,
-      branch,
-      snap.commit_sha,
-      {
-        cacheRoot: config.codeCacheRoot,
-        authMode: config.gitAuthMode,
-        gitlabBaseUrl: config.gitlabBaseUrl,
-        deployUser: config.gitlabDeployUser,
-        deployToken: config.gitlabDeployToken,
-        timeoutMs,
-      },
+  const repositories: PreparedRepository[] = []
+
+  for (const snapshot of task.snapshots) {
+    repositories.push(
+      await prepareRepositoryAtSnapshot(
+        snapshot.repository_name as RepositoryName,
+        branch,
+        snapshot.commit_sha,
+        {
+          cacheRoot: config.codeCacheRoot,
+          authMode: config.gitAuthMode,
+          gitlabBaseUrl: config.gitlabBaseUrl,
+          deployUser: config.gitlabDeployUser,
+          deployToken: config.gitlabDeployToken,
+          timeoutMs,
+        },
+      ),
     )
-    refs.push({ name: prepared.repository, commitSha: prepared.commitSha, path: prepared.path })
   }
-  return refs
+  return repositories
 }
 
-/**
- * Process a single enriched task: prepare repos at frozen SHAs, build a harness,
- * run the two stages, then release memory references. Failures are persisted by
- * processStoryTask; unexpected errors here are recorded on the task too.
- */
+/** Run one claimed story as one DeepSeek Harness ACP attempt. */
 export async function runStoryTask(
   config: WorkerConfig,
   jobsDb: JobsDb,
   task: StoryTask,
   logger: Logger,
 ): Promise<void> {
-  const log = logger.child({ job_id: task.job_id, story_code: task.story_code })
-  let repos: PreparedRepoRef[] | null = null
-  let harness: OpenAICompatibleHarness | null = null
-  try {
-    repos = await prepareTaskRepositories(task, config)
-    harness = await buildHarnessForJob(jobsDb, task.job_id, config.workerId, task.model)
-
-    await processStoryTask(
-      harness,
-      jobsDb,
-      {
-        workerId: config.workerId,
-        workspaceRoot: config.workspaceRoot,
-        branch: task.job.requested_branch as BranchName,
-        modelName: task.model.model_name,
-        heartbeatIntervalMs: config.heartbeatIntervalMs,
+  const log = logger.child({
+    job_id: task.job_id,
+    story_code: task.story_code,
+    engine: 'deepseek-harness-acp',
+  })
+  let repositories: PreparedRepository[] | null = null
+  let runner: ReviewRunner | null = null
+  const attempt = new AbortController()
+  const lease = new Heartbeat({
+    taskId: task.id,
+    workerId: config.workerId,
+    intervalMs: config.heartbeatIntervalMs,
+    send: (taskId, workerId) =>
+      jobsDb.heartbeatStoryTask({
+        taskId,
+        workerId,
+        claimToken: task.claim_token,
         leaseSeconds: config.storyTaskLeaseSeconds,
-        repositories: repos,
-      },
+      }),
+    logger: log,
+  })
+
+  try {
+    repositories = await prepareTaskRepositories(task, config)
+    lease.start()
+
+    runner = await buildDeepSeekHarnessReview({
+      jobsDb,
       task,
-      log,
-    )
-  } catch (err) {
-    const code = (err as { code?: string })?.code ?? 'JOB_INTERNAL_ERROR'
-    const message = redactError(err)
+      workerId: config.workerId,
+      branch: task.job.requested_branch as BranchName,
+      repositories,
+      agentAttemptsRoot: config.agentAttemptsRoot,
+      logger: log,
+      isLeaseValid: () => lease.leaseHeld(),
+      commitReview: (input) =>
+        jobsDb
+          .saveAgentReviewResult({
+            taskId: task.id,
+            workerId: config.workerId,
+            claimToken: task.claim_token,
+            agentAttempt: task.agent_attempt,
+            result: toAgentResultRow(input),
+            evidence: input.evidence.map((item) => ({
+              evidence_id: item.evidenceId ?? null,
+              repository_name: item.repository,
+              commit_sha: item.commitSha,
+              file_path: item.filePath,
+              blob_sha: item.blobSha,
+              start_line: item.startLine,
+              end_line: item.endLine,
+              content_hash: item.contentHash,
+              evidence_type: item.evidenceType,
+              description: item.description,
+            })),
+            usage: {
+              tool_calls: input.usage.toolCalls,
+              evidence_shown: input.usage.evidenceShown,
+              searches_run: input.usage.searchesRun,
+              retry_requests: input.usage.retryRequests,
+              compaction_requests: input.usage.compactionRequests,
+            },
+            configHash: input.configHash ?? null,
+            promptVersion: AGENT_REVIEW_PROMPT_VERSION,
+            modelLabel: `${task.model.display_name} / ${task.model.model_name}`,
+          })
+          .then((receipt) => ({
+            runId: receipt.run_id,
+            committedAt: receipt.committed_at,
+          })),
+    })
+
+    const outcome = await runner.runReview({ signal: attempt.signal, logger: log })
+    if (!outcome.ok) {
+      await jobsDb
+        .failAgentReview({
+          taskId: task.id,
+          workerId: config.workerId,
+          claimToken: task.claim_token,
+          code: outcome.errorCode ?? 'AGENT_ATTEMPT_FAILED',
+          message: outcome.errorMessage ?? 'agent attempt failed',
+        })
+        .catch((failError) =>
+          log.error('fail_agent_review_error', {
+            event: 'fail_agent_review_error',
+            error_message: redactError(failError),
+          }),
+        )
+    }
+  } catch (error) {
+    const code = (error as { code?: string })?.code ?? 'JOB_INTERNAL_ERROR'
+    const message = redactError(error)
     log.error('story_task_setup_failed', {
       event: 'story_task_setup_failed',
       error_code: code,
       error_message: message,
     })
-    // Setup failure (repo prep / secret / harness) — record it on the task.
-    await jobsDb
-      .failStoryTask({
-        taskId: task.id,
-        workerId: config.workerId,
-        stage: task.retrieval_status === 'SUCCEEDED' ? 'analysis' : 'retrieval',
-        code,
-        message,
-      })
-      .catch(() => undefined)
+    await recordSetupFailure(jobsDb, config, task, code, message).catch(() => undefined)
   } finally {
-    // Release memory references so a long-lived replica does not accumulate
-    // prepared trees / API keys across tasks.
-    repos = null
-    harness = null
+    attempt.abort()
+    lease.stop()
+    repositories = null
+    runner = null
   }
 }
 
-/** Start the polling worker. Returns a handle to stop it. */
+/** Map a verified broker submission onto the Agent output stored by the DB. */
+export function toAgentResultRow(input: CommitReviewInput): Record<string, unknown> {
+  const submission = input.submission
+  return {
+    verdict: submission.verdict,
+    confidence: submission.confidence,
+    summary: submission.summary,
+    implementedContent: submission.implementedContent ?? null,
+    missingContent: submission.missingContent ?? null,
+    risks: submission.risks ?? null,
+    testPoints: submission.testPoints ?? null,
+    aiRemark: submission.aiRemark ?? null,
+  }
+}
+
+/** Persist repository/secret/runner setup failures on the claimed Agent task. */
+export function recordSetupFailure(
+  jobsDb: JobsDb,
+  config: WorkerConfig,
+  task: StoryTask,
+  code: string,
+  message: string,
+): Promise<void> {
+  return jobsDb.failAgentReview({
+    taskId: task.id,
+    workerId: config.workerId,
+    claimToken: task.claim_token,
+    code,
+    message,
+  })
+}
+
+/** Start the polling worker. */
 export function startWorker(config: WorkerConfig): WorkerRuntime {
   const logger = rootLogger.child({ worker_id: config.workerId })
-  const dbClient = new SupabaseDbClient(config)
-  const jobsDb = new JobsDb(dbClient)
-
+  const jobsDb = new JobsDb(new SupabaseDbClient(config))
   let stopped = false
 
   const pool = new SlotPool(config.workerStoryConcurrency)
   const inFlight = new Set<Promise<void>>()
-
   let resolveRanOnce: () => void
-  const ranOnce = new Promise<void>((r) => {
-    resolveRanOnce = r
+  const ranOnce = new Promise<void>((resolve) => {
+    resolveRanOnce = resolve
   })
 
-  /** Try to prepare one QUEUED job. Non-fatal; logged and continues. */
   const tryPrepareOneJob = async (): Promise<void> => {
     try {
       const claim = await jobsDb.claimJobForPreparation(config.workerId)
@@ -190,15 +237,14 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
         batch_id: claim.job.batch_id,
       })
       await prepareJob(jobsDb, config, claim, logger)
-    } catch (err) {
+    } catch (error) {
       logger.error('prepare_job_error', {
         event: 'prepare_job_error',
-        error_message: redactError(err),
+        error_message: redactError(error),
       })
     }
   }
 
-  /** Try to claim and run a job finalization. Returns true if it did work. */
   const tryFinalize = async (): Promise<boolean> => {
     try {
       const claim = await jobsDb.claimJobForFinalization(config.workerId)
@@ -207,47 +253,52 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
         event: 'job_claimed_for_finalization',
         job_id: claim.job.id,
       })
-      await finalizeJob(jobsDb, claim, config.workerId, logger).catch(async (err) => {
-        const code = (err as { code?: string })?.code ?? 'JOB_INTERNAL_ERROR'
+      await finalizeJob(jobsDb, claim, config.workerId, logger).catch(async (error) => {
+        const code = (error as { code?: string })?.code ?? 'JOB_INTERNAL_ERROR'
         await jobsDb
           .failClaimedAnalysisJob({
             jobId: claim.job.id,
             workerId: config.workerId,
             code,
-            message: redactError(err),
+            message: redactError(error),
           })
           .catch(() => undefined)
       })
       return true
-    } catch (err) {
+    } catch (error) {
       logger.error('finalize_claim_error', {
         event: 'finalize_claim_error',
-        error_message: redactError(err),
+        error_message: redactError(error),
       })
       return false
     }
   }
 
   let availabilityHeartbeatInFlight = false
-  const reportAvailability = async () => {
+  const reportAvailability = async (): Promise<void> => {
     if (stopped || availabilityHeartbeatInFlight) return
     availabilityHeartbeatInFlight = true
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 10000)
     try {
-      await jobsDb.heartbeatAnalysisWorker(
-        config.workerId,
-        config.workerStoryConcurrency,
-        pool.activeCount,
-        controller.signal,
-      )
+      await jobsDb.heartbeatAnalysisWorker({
+        workerId: config.workerId,
+        slots: config.workerStoryConcurrency,
+        current: pool.activeCount,
+        capabilities: {
+          worker_story_concurrency: config.workerStoryConcurrency,
+          agent_profile: ACP_PROFILE_NAME,
+        },
+        signal: controller.signal,
+      })
     } catch {
-      // 心跳失败或超时不应中断任务处理，下一个周期继续上报。
+      // Availability heartbeat failure is non-fatal; the next interval retries.
     } finally {
       clearTimeout(timeout)
       availabilityHeartbeatInFlight = false
     }
   }
+
   void reportAvailability()
   const availabilityHeartbeat = setInterval(() => {
     void reportAvailability()
@@ -258,10 +309,8 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
     let first = true
     while (!stopped) {
       try {
-        // 1. Opportunistically prepare a QUEUED job.
         await tryPrepareOneJob()
 
-        // 2. Fill free slots with globally-claimed story tasks.
         let claimedAny = false
         while (!stopped && pool.availableSlots > 0) {
           const task = await jobsDb.claimNextStoryTask(
@@ -270,13 +319,12 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
           )
           if (!task) break
           claimedAny = true
-          // Acquire a slot synchronously, then run in the background.
           const release = await pool.acquire()
           const run = runStoryTask(config, jobsDb, task, logger)
-            .catch((err) =>
+            .catch((error) =>
               logger.error('slot_run_error', {
                 event: 'slot_run_error',
-                error_message: redactError(err),
+                error_message: redactError(error),
               }),
             )
             .finally(() => {
@@ -286,11 +334,9 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
           inFlight.add(run)
         }
 
-        // 4. If nothing to claim, try finalization (any idle replica can win).
         if (!claimedAny) {
           const finalized = await tryFinalize()
           if (!finalized) {
-            // Nothing to do — wait, but yield if tasks are still in flight.
             if (inFlight.size > 0) {
               await Promise.race([...inFlight, sleep(config.pollIntervalMs)])
             } else {
@@ -298,22 +344,22 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
             }
           }
         } else if (pool.availableSlots <= 0 && inFlight.size > 0) {
-          // Saturated: wait for a slot to free before the next claim round.
           await Promise.race([...inFlight])
         }
-      } catch (err) {
+      } catch (error) {
         logger.error('poll_loop_error', {
           event: 'poll_loop_error',
-          error_message: redactError(err),
+          error_message: redactError(error),
         })
         await sleep(config.pollIntervalMs)
       }
+
       if (first) {
         first = false
         resolveRanOnce()
       }
     }
-    // Drain in-flight tasks before declaring stopped.
+
     await Promise.allSettled([...inFlight])
     logger.info('worker_stopped', { event: 'worker_stopped' })
   }
@@ -329,7 +375,6 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
   }
 }
 
-// Bootstrap when executed directly.
 const isMain = (() => {
   try {
     return process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`
@@ -341,6 +386,11 @@ const isMain = (() => {
 if (isMain) {
   try {
     const config = loadConfig()
+    const instanceLock = acquireInstanceLock({
+      workerId: config.workerId,
+      lockDir: config.workspaceRoot,
+    })
+    process.on('exit', () => instanceLock.release())
     const runtime = startWorker(config)
     const shutdown = () => {
       runtime.stop()
@@ -348,8 +398,20 @@ if (isMain) {
     }
     process.on('SIGTERM', shutdown)
     process.on('SIGINT', shutdown)
-  } catch (err) {
-    rootLogger.error('worker_boot_failed', { event: 'worker_boot_failed', error_message: redactError(err) })
+  } catch (error) {
+    if (error instanceof WorkerAlreadyRunningError) {
+      rootLogger.error('worker_already_running', {
+        event: 'worker_already_running',
+        worker_id: error.workerId,
+        holder_pid: error.holderPid,
+        error_message: error.message,
+      })
+      process.exit(1)
+    }
+    rootLogger.error('worker_boot_failed', {
+      event: 'worker_boot_failed',
+      error_message: redactError(error),
+    })
     process.exit(1)
   }
 }

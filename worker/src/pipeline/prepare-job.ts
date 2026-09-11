@@ -79,9 +79,6 @@ export async function prepareJob(
       error_message: message,
     })
 
-    // Persist preparation failures instead of leaving the job indefinitely in
-    // PREPARING_CODE. The RPC verifies this worker still owns the claim, so a
-    // late failure cannot overwrite a job already taken over by another worker.
     await jobsDb
       .failClaimedAnalysisJob({
         jobId,

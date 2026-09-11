@@ -22,6 +22,7 @@ import type {
   ImportFileRecord,
   ImportFileType,
   ReviewBatch,
+  ReviewBatchListItem,
   ReviewStory,
   SourceStoryInput,
   UserProfile,
@@ -272,8 +273,8 @@ export async function setBatchDefaultBranch(batchId: string, defaultBranch: Defa
 
 export async function listBatches() {
   const client = requireSupabase()
-  const { data, error } = await client.from('review_batch').select('*').order('created_at', { ascending: false })
-  return unwrap<ReviewBatch[]>({ data, error })
+  const { data, error } = await client.rpc('list_review_batches_with_creator')
+  return unwrap<ReviewBatchListItem[]>({ data, error })
 }
 
 export async function getBatch(batchId: string) {
@@ -512,11 +513,16 @@ export async function listOperationLogs() {
 /** 模型元数据写入输入（不含密钥）。API Key 单独字段传入 Edge Function。 */
 export interface ModelConfigInput {
   display_name: string
-  provider: string
   base_url: string
   model_name: string
   max_parallel_tasks: number
   request_timeout_ms: number
+  /** DeepSeek Harness Agent 的上下文与请求预算。 */
+  context_window?: number
+  max_output_tokens?: number
+  agent_max_model_requests?: number
+  agent_max_retry_requests?: number
+  agent_max_compaction_requests?: number
   /** 明文 API Key。仅在新增或轮换时提供；留空表示不修改现有密钥。 */
   api_key?: string | null
 }
@@ -528,14 +534,20 @@ async function invokeAdminModelConfig<T>(action: string, payload: Record<string,
     body: { action, ...payload },
   })
   if (error) {
-    // Edge Function 返回的业务错误信息尽量透传给前端
-    const context = (error as { context?: { body?: unknown } }).context
-    const bodyMessage =
-      context && typeof context.body === 'object' && context.body
-        ? (context.body as { message?: string; error?: string }).message ??
-          (context.body as { message?: string; error?: string }).error
-        : undefined
-    throw new Error(bodyMessage ?? error.message)
+    // Edge Function 的业务错误信息必须透传：supabase-js 的 FunctionsHttpError
+    // 只带一句通用的 non-2xx 文案，真正的原因在响应体里。context 是 Response，
+    // 不是已解析对象，必须显式读取（与 invokeWechatAuth 保持一致）。
+    const context = (error as { context?: unknown }).context
+    let message: string | undefined
+    if (context instanceof Response) {
+      try {
+        const responseBody = await context.clone().json() as { error?: string; message?: string }
+        message = responseBody.error ?? responseBody.message
+      } catch {
+        // 非 JSON 错误响应使用 SDK 默认错误信息。
+      }
+    }
+    throw new Error(message ?? error.message)
   }
   const result = data as { data?: T; error?: string } | T
   if (result && typeof result === 'object' && 'error' in result && (result as { error?: string }).error) {
@@ -571,6 +583,11 @@ export async function adminListModelConfigs() {
 /** ADMIN：创建模型配置，密钥写入 Vault，经 Edge Function 完成。返回新建配置 id。 */
 export async function adminCreateModelConfig(input: ModelConfigInput) {
   return invokeAdminModelConfig<{ id: string }>('create', { input })
+}
+
+/** ADMIN：删除未被批次或分析任务引用的模型，并清理其 Vault 密钥。 */
+export async function adminDeleteModelConfig(id: string) {
+  return invokeAdminModelConfig<{ id: string }>('delete', { id })
 }
 
 /** ADMIN：更新模型配置。api_key 留空时保留原密钥，绝不回显旧值。返回配置 id。 */

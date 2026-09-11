@@ -1,0 +1,170 @@
+# The code-review ACP profile's own patch layer.
+#
+# This layer is an allowlist over the shipped base bundle, and it operates at
+# the TOOL surface: every model-facing capability the attempt does not need is
+# removed, and the three plugins the platform owns are inserted. Per-attempt
+# values (model route, broker socket, claim token, budgets) are NOT here — they
+# arrive through the launcher's `--patch <attempt-route.patch.yml>` overlay so
+# nothing secret or attempt-specific is written into the profile directory.
+#
+# Why capability SERVICES stay mounted while their TOOLS are removed:
+# several base plugins are structural dependencies of the agent plane. Removing
+# `subprocess`, `sandbox`, `sandbox-policy`, `bash-sandbox`, `shell-env`,
+# `jobs`, `subagent`, `workflow-worker-thread` or
+# `deepseek-llm-api-extensions` tears down the agent fiber mid-turn, which the
+# runtime reports as `cannot create effect on inactive context` or a closed
+# session handle. Each of those was verified individually against a real
+# `dsh` process. So the boundary this profile enforces is: the model is offered
+# no shell, filesystem, web, skill, subagent, workflow or todo tool at all, and
+# repository content reaches it only through the snapshot MCP server. The
+# services behind those tools remain mounted but unreachable by the model.
+#
+# Anything added to the base bundle by a future Harness release arrives
+# ENABLED. Boot therefore verifies the resolved tool surface against an
+# allowlist in the worker; an unknown tool fails the attempt closed rather
+# than silently exposing itself to the model.
+
+# ---------------------------------------------------------------------------
+# 1. No command execution reachable by the model.
+#    `subprocess`, `sandbox`, `sandbox-policy`, `bash-sandbox` and `shell-env`
+#    must stay mounted (verified: disabling any of them breaks the turn).
+# ---------------------------------------------------------------------------
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: pwsh-sandbox
+  disabled: true
+- id: tool-jobs
+  disabled: true
+
+# ---------------------------------------------------------------------------
+# 2. No ambient filesystem. Repository content arrives only through the
+#    snapshot MCP server, which reads exact commit objects.
+# ---------------------------------------------------------------------------
+- id: fs-observation-policy
+  disabled: true
+- id: fs-sandbox
+  disabled: true
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+
+# ---------------------------------------------------------------------------
+# 3. No network egress of the agent's own choosing.
+# ---------------------------------------------------------------------------
+- id: web
+  disabled: true
+- id: web-search-deepseek
+  disabled: true
+- id: web-fetch-http
+  disabled: true
+- id: tool-web
+  disabled: true
+
+# ---------------------------------------------------------------------------
+# 4. No repository-authored instructions or skills: snapshot content is
+#    untrusted data, never instructions.
+# ---------------------------------------------------------------------------
+- id: agent-instructions
+  disabled: true
+- id: skill
+  disabled: true
+- id: skill-filesystem
+  disabled: true
+- id: skill-badge
+  disabled: true
+- id: tool-skill
+  disabled: true
+
+# ---------------------------------------------------------------------------
+# 5. One agent per attempt: the model cannot spawn subagents, forks or
+#    workflows. The `subagent` and `workflow-worker-thread` services stay
+#    mounted (verified: removing them breaks the turn); only their tools go.
+# ---------------------------------------------------------------------------
+- id: subagent-spawn-in-process
+  disabled: true
+- id: subagent-fork-in-process
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-workflow
+  disabled: true
+
+# ---------------------------------------------------------------------------
+# 6. No interactive surfaces, slash commands, or planning modes.
+# ---------------------------------------------------------------------------
+- id: commands
+  disabled: true
+- id: command-feedback
+  disabled: true
+- id: command-compact
+  disabled: true
+- id: command-goal
+  disabled: true
+- id: goal
+  disabled: true
+- id: goal-round-driver
+  disabled: true
+- id: plan-mode
+  disabled: true
+- id: tool-todo
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-ralph
+  disabled: true
+
+# ---------------------------------------------------------------------------
+# 7. No telemetry and no session content on disk. Tool results carry real
+#    source code, so the JSONL backend is replaced by a volatile one.
+# ---------------------------------------------------------------------------
+- id: session-telemetry-otel
+  disabled: true
+- id: session-persistence-jsonl
+  disabled: true
+
+# ---------------------------------------------------------------------------
+# 8. The model route is supplied per attempt through llm-pi-ai only. The
+#    first-party DeepSeek adapter is disabled so no ambient DeepSeek
+#    credential can be used. `deepseek-llm-api-extensions` must stay mounted
+#    (verified: it is a structural dependency, not a credential source).
+# ---------------------------------------------------------------------------
+- id: llm-deepseek
+  disabled: true
+
+# ---------------------------------------------------------------------------
+# 9. The platform's own plugins.
+# ---------------------------------------------------------------------------
+- insert:
+    - id: session-persistence-memory
+      name: '@codereview/harness-volatile-session-persistence'
+    # 预算故意不给占位值：真实值只能来自 attempt patch。
+    #
+    # 曾经这里写着 maxTotalRequests/maxLoopRequests = 1。一旦 attempt patch 因为
+    # 键名写错等原因没有覆盖到，agent 就会在第一次模型请求被拒时销毁 fiber，
+    # 表现为 turn 直接 cancelled、stderr 全空、零个 update —— 完全无法诊断。
+    # 留空则 schema 校验会在启动时明确报缺字段，属于响亮的失败。
+    - id: model-budget-governor
+      name: '@codereview/harness-model-budget-governor'
+    - id: snapshot-tools
+      name: '@codereview/harness-snapshot-tools'
+      config:
+        socketPath: /nonexistent/attempt-patch-required.sock
+        token: attempt-patch-required
+        taskId: attempt-patch-required
+        agentAttempt: 0
+    - id: review-control-tool
+      name: '@codereview/harness-review-control-tool'
+      config:
+        socketPath: /nonexistent/attempt-patch-required.sock
+        token: attempt-patch-required
+        taskId: attempt-patch-required
+        agentAttempt: 0

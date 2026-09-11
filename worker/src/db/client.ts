@@ -22,13 +22,25 @@ export interface DbClient {
   rpc<T = unknown>(fn: string, params: Record<string, unknown>, options?: RpcOptions): Promise<T>
 }
 
-/** Known domain error markers raised by the analysis RPCs. */
+/**
+ * Known domain error markers raised by the analysis RPCs.
+ *
+ * A marker only becomes actionable once it is listed here: normalizeDbErrorCode
+ * whole-word matches this list, so a marker the database raises but this array
+ * omits degrades into a bare SQLSTATE and the pipeline cannot react to it.
+ */
 export const KNOWN_DB_ERROR_CODES = [
   'TASK_LEASE_LOST',
+  'JOB_LEASE_LOST',
   'MODEL_SECRET_MISSING',
   'MODEL_CONFIG_DISABLED',
   'RESULT_ALREADY_EXISTS',
   'BATCH_BRANCH_CHANGED',
+  'EVIDENCE_PATH_INVALID',
+  'EVIDENCE_LINE_INVALID',
+  'LEGACY_ENGINE_RETIRED',
+  'AGENT_CLAIM_INVALID',
+  'AGENT_RESULT_ALREADY_COMMITTED',
 ] as const
 
 export type KnownDbErrorCode = (typeof KNOWN_DB_ERROR_CODES)[number]

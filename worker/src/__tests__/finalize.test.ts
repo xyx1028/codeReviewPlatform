@@ -1,118 +1,203 @@
-import { describe, it, expect } from 'vitest'
-import { aggregateResults, finalizeJob, EmptyAnalysisError } from '../pipeline/finalize-job.js'
-import type { StoryTaskSummary, FinalizationClaim } from '../db/jobs.js'
-import { JobsDb } from '../db/jobs.js'
+import { describe, expect, it } from 'vitest'
 import type { DbClient } from '../db/client.js'
+import { JobsDb, type CompletedStoryTask, type FinalizationClaim } from '../db/jobs.js'
 import { Logger } from '../logger.js'
+import {
+  aggregateCompletedResults,
+  EmptyAnalysisError,
+  finalizeJob,
+} from '../pipeline/finalize-job.js'
 
 const SHA = 'a'.repeat(40)
 
 function silentLogger(): Logger {
-  return new Logger({ sink: () => {}, minLevel: 'error' })
+  return new Logger({ sink: () => undefined, minLevel: 'error' })
 }
 
-function task(overrides: Partial<StoryTaskSummary> = {}): StoryTaskSummary {
+function completedTask(overrides: Partial<CompletedStoryTask> = {}): CompletedStoryTask {
   return {
-    id: 't1',
-    job_id: 'j',
-    story_id: 's',
+    id: 'task-1',
+    job_id: 'job-1',
+    story_id: 'story-1',
     story_code: 'PRJ-001',
-    retrieval_status: 'SUCCEEDED',
-    analysis_status: 'SUCCEEDED',
-    analysis_output: {
+    agent_status: 'SUCCEEDED',
+    output: {
       verdict: 'IMPLEMENTED',
       confidence: 88,
-      summary: 'done',
-      implementedContent: 'impl',
+      summary: 'implemented',
+      implementedContent: 'implementation details',
       missingContent: null,
-      risks: null,
-      testPoints: 'tp',
-      aiRemark: null,
+      risks: 'low risk',
+      testPoints: 'exercise the endpoint',
+      aiRemark: 'reviewed',
       evidence: [
         {
-          repository: 'kdmanage-backend',
-          filePath: 'src/A.java',
-          symbolName: 'foo',
+          repository: 'unverified-repository',
+          filePath: 'unverified/path.ts',
           startLine: 1,
-          endLine: 10,
-          evidenceType: '现有实现',
-          description: 'here',
-          commitSha: SHA,
+          endLine: 2,
         },
       ],
     },
+    verified_evidence: [
+      {
+        evidence_id: 'evidence-1',
+        repository_name: 'kdmanage-backend',
+        commit_sha: SHA,
+        file_path: 'src/OrderService.java',
+        start_line: 10,
+        end_line: 20,
+        evidence_type: 'existing implementation',
+        description: 'verified by the platform',
+      },
+    ],
     ...overrides,
   }
 }
 
-describe('aggregateResults camelCase -> snake_case mapping', () => {
-  it('maps result and evidence keys to DB snake_case', () => {
-    const { results, evidence } = aggregateResults([task()])
-    expect(results).toHaveLength(1)
-    expect(results[0]).toEqual({
-      story_code: 'PRJ-001',
-      verdict: 'IMPLEMENTED',
-      confidence: 88,
-      summary: 'done',
-      implemented_content: 'impl',
-      missing_content: null,
-      risks: null,
-      test_points: 'tp',
-      ai_remark: null,
-    })
-    expect(evidence).toHaveLength(1)
-    expect(evidence[0]).toEqual({
-      story_code: 'PRJ-001',
-      repository_name: 'kdmanage-backend',
-      commit_sha: SHA,
-      file_path: 'src/A.java',
-      symbol_name: 'foo',
-      start_line: 1,
-      end_line: 10,
-      evidence_type: '现有实现',
-      description: 'here',
-    })
+describe('aggregateCompletedResults', () => {
+  it('maps committed output and platform-verified evidence to database fields', () => {
+    const { results, evidence } = aggregateCompletedResults([completedTask()])
+
+    expect(results).toEqual([
+      {
+        story_code: 'PRJ-001',
+        verdict: 'IMPLEMENTED',
+        confidence: 88,
+        summary: 'implemented',
+        implemented_content: 'implementation details',
+        missing_content: null,
+        risks: 'low risk',
+        test_points: 'exercise the endpoint',
+        ai_remark: 'reviewed',
+      },
+    ])
+    expect(evidence).toEqual([
+      {
+        story_code: 'PRJ-001',
+        repository_name: 'kdmanage-backend',
+        commit_sha: SHA,
+        file_path: 'src/OrderService.java',
+        symbol_name: null,
+        start_line: 10,
+        end_line: 20,
+        evidence_type: 'existing implementation',
+        description: 'verified by the platform',
+      },
+    ])
   })
 
-  it('skips tasks without analysis_output', () => {
-    const { results } = aggregateResults([task({ analysis_output: null })])
-    expect(results).toHaveLength(0)
+  it('never promotes model-authored evidence when the verified ledger is empty', () => {
+    const { results, evidence } = aggregateCompletedResults([
+      completedTask({ verified_evidence: [] }),
+    ])
+
+    expect(results).toHaveLength(1)
+    expect(evidence).toEqual([])
+  })
+
+  it('skips tasks without committed Agent output', () => {
+    const { results, evidence } = aggregateCompletedResults([completedTask({ output: null })])
+
+    expect(results).toEqual([])
+    expect(evidence).toEqual([])
   })
 })
 
+interface RpcCall {
+  fn: string
+  params: Record<string, unknown>
+}
+
 class FakeFinalizeDb implements DbClient {
-  calls: Array<{ fn: string; params: Record<string, unknown> }> = []
-  constructor(private tasks: StoryTaskSummary[]) {}
+  readonly calls: RpcCall[] = []
+
+  constructor(private readonly tasks: CompletedStoryTask[]) {}
+
   async rpc<T = unknown>(fn: string, params: Record<string, unknown>): Promise<T> {
     this.calls.push({ fn, params })
-    if (fn === 'list_analysis_story_tasks_for_worker') return this.tasks as unknown as T
-    return null as T
+    if (fn === 'list_completed_story_tasks') return this.tasks as T
+    return undefined as T
   }
 }
 
 const claim: FinalizationClaim = {
-  job: { id: 'j', batch_id: 'b', model_config_id: 'm', requested_branch: 'feature_dev', total_stories: 1 },
-  model: { model_config_id: 'm', display_name: 'D', provider: 'openai-compatible', base_url: 'u', model_name: 'x', retrieval_prompt_version: 'r', analysis_prompt_version: 'a' },
+  job: {
+    id: 'job-1',
+    batch_id: 'batch-1',
+    model_config_id: 'model-1',
+    requested_branch: 'feature_dev',
+    total_stories: 1,
+  },
+  model: {
+    model_config_id: 'model-1',
+    display_name: 'Review model',
+    base_url: 'https://model.example.com/v1',
+    model_name: 'review-model',
+  },
   snapshots: [],
 }
 
-describe('finalizeJob', () => {
-  it('completes with worker id and mapped results', async () => {
-    const db = new FakeFinalizeDb([task()])
+describe('finalizeJob single Harness workflow', () => {
+  it('loads completed tasks and commits their aggregate with worker ownership', async () => {
+    const task = completedTask()
+    const db = new FakeFinalizeDb([task])
     const jobs = new JobsDb(db)
-    const res = await finalizeJob(jobs, claim, 'w1', silentLogger())
-    expect(res.finalized).toBe(true)
-    const complete = db.calls.find((c) => c.fn === 'complete_analysis_job')
-    expect(complete?.params.p_worker_id).toBe('w1')
-    expect('p_model' in (complete?.params ?? {})).toBe(false)
+
+    await expect(finalizeJob(jobs, claim, 'worker-1', silentLogger())).resolves.toEqual({
+      finalized: true,
+    })
+
+    expect(db.calls[0]).toEqual({
+      fn: 'list_completed_story_tasks',
+      params: { p_job_id: 'job-1' },
+    })
+    expect(db.calls[1]).toEqual({
+      fn: 'complete_analysis_job',
+      params: {
+        p_job_id: 'job-1',
+        p_worker_id: 'worker-1',
+        p_results: [
+          {
+            story_code: 'PRJ-001',
+            verdict: 'IMPLEMENTED',
+            confidence: 88,
+            summary: 'implemented',
+            implemented_content: 'implementation details',
+            missing_content: null,
+            risks: 'low risk',
+            test_points: 'exercise the endpoint',
+            ai_remark: 'reviewed',
+          },
+        ],
+        p_evidence: [
+          {
+            story_code: 'PRJ-001',
+            repository_name: 'kdmanage-backend',
+            commit_sha: SHA,
+            file_path: 'src/OrderService.java',
+            symbol_name: null,
+            start_line: 10,
+            end_line: 20,
+            evidence_type: 'existing implementation',
+            description: 'verified by the platform',
+          },
+        ],
+      },
+    })
+    expect(db.calls).toHaveLength(2)
   })
 
-  it('fails (throws) when there is no analysis output', async () => {
-    const db = new FakeFinalizeDb([task({ analysis_output: null })])
+  it('throws when no completed task has committed output', async () => {
+    const db = new FakeFinalizeDb([completedTask({ output: null })])
     const jobs = new JobsDb(db)
-    await expect(finalizeJob(jobs, claim, 'w1', silentLogger())).rejects.toBeInstanceOf(
-      EmptyAnalysisError,
-    )
-    expect(db.calls.find((c) => c.fn === 'complete_analysis_job')).toBeUndefined()
+
+    await expect(finalizeJob(jobs, claim, 'worker-1', silentLogger())).rejects.toMatchObject({
+      name: 'EmptyAnalysisError',
+      code: 'ANALYSIS_OUTPUT_EMPTY',
+    } satisfies Partial<EmptyAnalysisError>)
+    expect(db.calls).toEqual([
+      { fn: 'list_completed_story_tasks', params: { p_job_id: 'job-1' } },
+    ])
   })
 })

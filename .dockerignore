@@ -3,6 +3,9 @@ node_modules
 dist
 dist-ssr
 dist-worker
+# Vendored Harness sources are an audit reference only; the worker consumes the
+# published @deepseek-ai packages from node_modules.
+deepseekharness
 .git
 .idea
 .vscode

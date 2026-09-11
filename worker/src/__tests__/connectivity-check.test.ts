@@ -40,7 +40,6 @@ function successfulSupabaseFetch(modelStatus = 200, modelBody = '{"ok":true}') {
       expect(headers.get('Authorization')).toBe(`Bearer ${SERVICE_KEY}`)
       return new Response(JSON.stringify([{
         id: MODEL_ID,
-        provider: 'openai-compatible',
         base_url: 'https://model.example.com/v1/',
         model_name: 'approved-model',
         enabled: true,

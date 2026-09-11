@@ -46,6 +46,10 @@ export const storyTaskStatusLabels: Record<string, string> = {
 
 /** 错误码 -> [可读说明, 是否可自动重试] */
 export const analysisErrorCodeMeta: Record<string, { message: string; retryable: boolean }> = {
+  LEGACY_ENGINE_RETIRED: {
+    message: '历史两阶段任务已退役，不能继续执行或重试；请新建 Harness 分析任务。',
+    retryable: false,
+  },
   GIT_AUTH_FAILED: { message: 'GitLab 鉴权失败，请更新 Worker 凭据后重试。', retryable: false },
   GIT_BRANCH_MISSING: { message: '某仓库缺少所选分支，任务失败且不会回退。请确认分支选择。', retryable: false },
   GIT_FETCH_FAILED: { message: 'Git 获取失败，可按原 Commit 重试。', retryable: true },
@@ -63,4 +67,42 @@ export const analysisErrorCodeMeta: Record<string, { message: string; retryable:
   RESULT_ALREADY_EXISTS: { message: '批次已有 AI 结果，无法重复分析。', retryable: false },
   TASK_LEASE_LOST: { message: 'Worker 已失去需求任务租约，将由其他 Worker 接管。', retryable: true },
   JOB_INTERNAL_ERROR: { message: '未分类内部错误，请人工判断后重试。', retryable: true },
+  // 历史任务错误码：仅用于读取既有失败记录，不代表仍存在多执行链路。
+  ENGINE_NOT_SUPPORTED: {
+    message: '历史任务的 Worker 能力不匹配；当前平台已统一为 Harness，请新建分析任务。',
+    retryable: false,
+  },
+  AGENT_CLAIM_INVALID: {
+    message: 'Agent 提交时的领取凭据已失效（任务已被其他 Worker 接管），本次结果被拒绝。',
+    retryable: true,
+  },
+  AGENT_RESULT_ALREADY_COMMITTED: {
+    message: '该需求的 Agent 结果已提交过一次，重复提交被拒绝。',
+    retryable: false,
+  },
+  AGENT_NO_SUBMISSION: {
+    message: 'Agent 结束了会话但没有提交结论，可按原 Commit 重试。',
+    retryable: true,
+  },
+  AGENT_TURN_INCOMPLETE: {
+    message: 'Agent 会话被中断且未提交结论，可按原 Commit 重试。',
+    retryable: true,
+  },
+  AGENT_ATTEMPT_FAILED: { message: 'Agent 执行失败，可按原 Commit 重试。', retryable: true },
+  MODEL_BUDGET_EXHAUSTED: {
+    message: 'Agent 已用尽本次尝试的模型请求预算，请提高预算或缩小需求范围后重试。',
+    retryable: true,
+  },
+  SNAPSHOT_COMMIT_MISSING: {
+    message: '本地快照缺少任务固定的提交，Worker 无法读取代码。',
+    retryable: true,
+  },
+  EXECUTION_ENGINE_UNSUPPORTED: {
+    message: '任务记录的执行引擎不被当前 Worker 识别，请升级 Worker 镜像。',
+    retryable: false,
+  },
+  EXECUTION_ENGINE_UNAVAILABLE: {
+    message: '该执行引擎在当前 Worker 上不可用（缺少运行所需配置）。',
+    retryable: false,
+  },
 }

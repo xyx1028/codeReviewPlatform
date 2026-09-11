@@ -4,9 +4,14 @@
  * All git invocations use spawn(command, args). No shell string interpolation.
  */
 
-import { isValidSha } from '../ai/schemas.js'
 import { assertBranch, type BranchName } from './repositories.js'
 import { runCommand, SpawnError } from './run.js'
+
+const SHA_REGEX = /^[0-9a-f]{40}$/i
+
+export function isValidSha(value: unknown): value is string {
+  return typeof value === 'string' && SHA_REGEX.test(value)
+}
 
 export class GitError extends Error {
   code: string

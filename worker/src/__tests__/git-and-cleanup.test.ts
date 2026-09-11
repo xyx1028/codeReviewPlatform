@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest'
 import { parseLsRemote, shaBelongsToBranch, GitError } from '../git/verify.js'
-import { parseGitLog } from '../tools/git-log.js'
 import { isJobDirName, cleanupJobDir } from '../security/cleanup.js'
 import { mkdtempSync, mkdirSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -24,17 +23,6 @@ describe('shaBelongsToBranch', () => {
     expect(shaBelongsToBranch(SHA, SHA.toUpperCase())).toBe(true)
     expect(shaBelongsToBranch(SHA, SHA2)).toBe(false)
     expect(shaBelongsToBranch('bad', SHA)).toBe(false)
-  })
-})
-
-describe('parseGitLog', () => {
-  it('parses record-separated commit output', () => {
-    const RS = '\x1e'
-    const FS = '\x1f'
-    const out = `${SHA}${FS}fix bug${FS}Alice${FS}2026-01-01T00:00:00Z${RS}${SHA2}${FS}add feature${FS}Bob${FS}2026-01-02T00:00:00Z${RS}`
-    const commits = parseGitLog(out)
-    expect(commits).toHaveLength(2)
-    expect(commits[0]).toMatchObject({ sha: SHA, subject: 'fix bug', author: 'Alice' })
   })
 })
 

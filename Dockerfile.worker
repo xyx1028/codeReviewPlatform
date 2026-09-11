@@ -13,7 +13,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
-# Build the worker.
+# Build the worker. `worker/harness` carries the checked-in Harness profile
+# template, which is materialized per attempt at runtime.
 COPY tsconfig.worker.json ./
 COPY worker ./worker
 RUN npm run worker:build
@@ -21,11 +22,14 @@ RUN npm run worker:build
 ENV NODE_ENV=production
 ENV WORKSPACE_ROOT=/workspace/jobs
 ENV CODE_CACHE_ROOT=/workspace/cache
+# Per-attempt Harness profile trees (DSH_HOME) live here, one 0700 directory
+# per attempt, removed when the attempt ends.
+ENV AGENT_ATTEMPTS_ROOT=/workspace/agent-attempts
 
 # Create the non-root user and the workspace it owns. (Plan §17.2)
 RUN groupadd --system worker \
   && useradd --system --gid worker --home-dir /workspace worker \
-  && mkdir -p /workspace/jobs /workspace/cache \
+  && mkdir -p /workspace/jobs /workspace/cache /workspace/agent-attempts \
   && chown -R worker:worker /workspace /app
 
 USER worker

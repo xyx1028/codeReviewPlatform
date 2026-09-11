@@ -34,10 +34,12 @@ See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rule
 ## AI Automation Worker
 
 The background analysis Worker lives under `worker/` and builds independently of
-the frontend. It polls Supabase, prepares the four whitelisted repositories at a
-frozen commit SHA, runs the two-stage `ReviewHarness` (retrieval → analysis) over
-read-only code tools, validates structured results, and writes AI results via
-service-role RPCs.
+the frontend. It polls Supabase, freezes the four whitelisted repositories at
+exact commit SHAs, and runs one DeepSeek Harness ACP Agent per claimed Story
+Task. The Agent searches and reads code through Broker-controlled, read-only
+snapshot tools, submits through the terminal `submit_review_result` tool, and
+commits verified results through canonical service-role RPCs. There is no
+fixed retrieval/analysis pipeline or alternate execution path.
 
 Scripts:
 

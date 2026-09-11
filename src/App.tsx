@@ -39,6 +39,7 @@ import {
   adminListUsers,
   adminUpdateUserRole,
   adminCreateModelConfig,
+  adminDeleteModelConfig,
   adminListModelConfigs,
   adminSetModelEnabled,
   adminTestModelConfig,
@@ -106,6 +107,7 @@ import type {
   DefaultBranch,
   HumanReviewResult,
   ReviewBatch,
+  ReviewBatchListItem,
   ReviewStory,
   SourceStoryInput,
   UserRole,
@@ -381,7 +383,7 @@ function Shell({ session }: { session: Session }) {
       ],
     },
     { key: '/profile', label: <Link to="/profile">个人中心</Link> },
-    ...(isAdmin ? [{ key: '/workers', label: <Link to="/workers">后台任务管理</Link> }] : []),
+    ...(isAdmin ? [{ key: '/workers', label: <Link to="/workers">后台任务监控</Link> }] : []),
     ...(isAdmin ? [{ key: '/models', label: <Link to="/models">模型管理</Link> }] : []),
     ...(isAdmin ? [{ key: '/users', label: <Link to="/users">用户管理</Link> }] : []),
   ]
@@ -391,7 +393,7 @@ function Shell({ session }: { session: Session }) {
       <Header className="app-header">
         <div>
           <Text className="brand">AI 需求—代码一致性评审平台</Text>
-          <Text className="subtitle">轻量 V1 闭环</Text>
+          <Text className="subtitle">DeepSeek Harness 闭环</Text>
         </div>
         <Space>
           <Tag color={profileQuery.data?.role === 'ADMIN' ? 'green' : 'blue'}>{profileQuery.data?.role ?? '未配置角色'}</Tag>
@@ -441,24 +443,23 @@ function Shell({ session }: { session: Session }) {
   )
 }
 
-const modelProviderOptions = [
-  { value: 'openai-compatible', label: 'openai-compatible' },
-  { value: 'deepseek-harness', label: 'deepseek-harness（后续）' },
-]
-
 interface ModelFormValues {
   display_name: string
-  provider: string
   base_url: string
   model_name: string
   max_parallel_tasks: number
   request_timeout_seconds: number
+  context_window: number
+  max_output_tokens: number
+  agent_max_model_requests: number
+  agent_max_retry_requests: number
+  agent_max_compaction_requests: number
   api_key?: string
 }
 
 function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
   const queryClient = useQueryClient()
-  const { message } = AntApp.useApp()
+  const { message, modal } = AntApp.useApp()
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<AiModelConfigSummary | null>(null)
   const [form] = Form.useForm<ModelFormValues>()
@@ -469,11 +470,15 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
     mutationFn: async (values: ModelFormValues) => {
       const payload: ModelConfigInput = {
         display_name: values.display_name.trim(),
-        provider: values.provider,
         base_url: values.base_url.trim(),
         model_name: values.model_name.trim(),
         max_parallel_tasks: values.max_parallel_tasks,
         request_timeout_ms: Math.round(values.request_timeout_seconds * 1000),
+        context_window: values.context_window,
+        max_output_tokens: values.max_output_tokens,
+        agent_max_model_requests: values.agent_max_model_requests,
+        agent_max_retry_requests: values.agent_max_retry_requests,
+        agent_max_compaction_requests: values.agent_max_compaction_requests,
         // 留空表示不轮换密钥；编辑时永不回显旧值
         api_key: values.api_key && values.api_key.length ? values.api_key : null,
       }
@@ -504,6 +509,18 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
     onError: (error) => message.error(error.message),
   })
 
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => adminDeleteModelConfig(id),
+    onSuccess: () => {
+      message.success('模型配置已删除')
+      queryClient.invalidateQueries({ queryKey: ['admin-model-configs'] })
+      queryClient.invalidateQueries({ queryKey: ['enabled-model-configs'] })
+      queryClient.invalidateQueries({ queryKey: ['model-display-names'] })
+      queryClient.invalidateQueries({ queryKey: ['operation-log'] })
+    },
+    onError: (error) => message.error(error.message),
+  })
+
   const testMutation = useMutation({
     mutationFn: (id: string) => adminTestModelConfig(id),
     onSuccess: (result) => {
@@ -523,7 +540,15 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
   const openCreate = () => {
     setEditing(null)
     form.resetFields()
-    form.setFieldsValue({ provider: 'openai-compatible', max_parallel_tasks: 4, request_timeout_seconds: 180 })
+    form.setFieldsValue({
+      max_parallel_tasks: 4,
+      request_timeout_seconds: 180,
+      context_window: 131072,
+      max_output_tokens: 8192,
+      agent_max_model_requests: 120,
+      agent_max_retry_requests: 6,
+      agent_max_compaction_requests: 4,
+    })
     setOpen(true)
   }
 
@@ -532,19 +557,33 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
     // API Key 编辑时永不回显，字段留空
     form.setFieldsValue({
       display_name: record.display_name,
-      provider: record.provider,
       base_url: record.base_url,
       model_name: record.model_name,
       max_parallel_tasks: record.max_parallel_tasks,
       request_timeout_seconds: Math.round(record.request_timeout_ms / 1000),
+      context_window: record.context_window ?? 131072,
+      max_output_tokens: record.max_output_tokens ?? 8192,
+      agent_max_model_requests: record.agent_max_model_requests ?? 120,
+      agent_max_retry_requests: record.agent_max_retry_requests ?? 6,
+      agent_max_compaction_requests: record.agent_max_compaction_requests ?? 4,
       api_key: '',
     })
     setOpen(true)
   }
 
+  const confirmDelete = (record: AiModelConfigSummary) => {
+    modal.confirm({
+      title: `删除模型“${record.display_name}”？`,
+      content: '删除后无法恢复，关联的 API Key 也会从 Vault 清理。',
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => deleteMutation.mutateAsync(record.id),
+    })
+  }
+
   const columns: ColumnsType<AiModelConfigSummary> = [
     { title: '模型名称', dataIndex: 'display_name' },
-    { title: 'Provider', dataIndex: 'provider', width: 160 },
     { title: 'Base URL', dataIndex: 'base_url', ellipsis: true },
     { title: 'Model', dataIndex: 'model_name', width: 160 },
     {
@@ -575,20 +614,41 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
     { title: '更新时间', dataIndex: 'updated_at', width: 180, render: (value: string) => new Date(value).toLocaleString() },
     {
       title: '操作',
-      width: 170,
-      render: (_value, record) => (
-        <Space>
-          <Button size="small" onClick={() => openEdit(record)}>编辑</Button>
-          <Button
-            size="small"
-            loading={testMutation.isPending && testMutation.variables === record.id}
-            disabled={!record.has_api_key}
-            onClick={() => testMutation.mutate(record.id)}
-          >
-            测试连接
-          </Button>
-        </Space>
-      ),
+      width: 240,
+      render: (_value, record) => {
+        const deleteDisabled = record.is_referenced !== false
+        const deleteTip = record.is_referenced
+          ? '请先删除已经选择了该模型的代码评审批次'
+          : deleteDisabled
+            ? '暂时无法确认模型引用状态，请刷新后重试'
+            : undefined
+        return (
+          <Space>
+            <Button size="small" onClick={() => openEdit(record)}>编辑</Button>
+            <Button
+              size="small"
+              loading={testMutation.isPending && testMutation.variables === record.id}
+              disabled={!record.has_api_key}
+              onClick={() => testMutation.mutate(record.id)}
+            >
+              测试连接
+            </Button>
+            <Tooltip title={deleteTip}>
+              <span>
+                <Button
+                  danger
+                  size="small"
+                  disabled={deleteDisabled}
+                  loading={deleteMutation.isPending && deleteMutation.variables === record.id}
+                  onClick={() => confirmDelete(record)}
+                >
+                  删除
+                </Button>
+              </span>
+            </Tooltip>
+          </Space>
+        )
+      },
     },
   ]
 
@@ -600,7 +660,7 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
           type="info"
           showIcon
           title="安全说明"
-          description="API Key 通过 admin-model-config Edge Function 加密写入 Supabase Vault，前端与数据库普通表都不返回密钥。编辑时不回显旧 Key，留空表示不轮换；已被历史批次引用的模型只可停用，不可删除。"
+          description="API Key 通过 admin-model-config Edge Function 加密写入 Supabase Vault，前端与数据库普通表都不返回密钥。编辑时不回显旧 Key，留空表示不轮换；未被批次或分析任务引用的模型可以删除，已引用模型需先删除选择了该模型的代码评审批次。"
         />
       </Card>
       <Table rowKey="id" loading={modelsQuery.isLoading} columns={columns} dataSource={modelsQuery.data ?? []} pagination={false} />
@@ -619,9 +679,13 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
           <Form.Item name="display_name" label="模型名称" rules={[{ required: true, message: '请输入用于识别的名称，例如 Qwen 主账号' }]}>
             <Input placeholder="Qwen 主账号" />
           </Form.Item>
-          <Form.Item name="provider" label="Provider" rules={[{ required: true, message: '请选择 Provider' }]}>
-            <Select options={modelProviderOptions} />
-          </Form.Item>
+          <Alert
+            className="mb-md"
+            type="info"
+            showIcon
+            title="DeepSeek Harness Agent"
+            description="所有自动分析统一由 Harness Agent 在一次会话内自主检索并分析，证据必须来自任务冻结的精确提交范围。"
+          />
           <Form.Item name="base_url" label="Base URL" rules={[{ required: true, message: '请输入模型兼容接口地址' }]}>
             <Input placeholder="https://.../v1" />
           </Form.Item>
@@ -641,6 +705,42 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
           </Form.Item>
           <Form.Item name="request_timeout_seconds" label="请求超时（10~600 秒）" rules={[{ required: true, message: '请输入请求超时秒数' }]}>
             <InputNumber min={10} max={600} className="full-width" />
+          </Form.Item>
+          <Form.Item
+            name="context_window"
+            label="上下文窗口（token）"
+            rules={[{ required: true, message: '请输入上下文窗口' }]}
+          >
+            <InputNumber min={8192} max={4194304} step={1024} className="full-width" />
+          </Form.Item>
+          <Form.Item
+            name="max_output_tokens"
+            label="单次最大输出（token）"
+            rules={[{ required: true, message: '请输入单次最大输出' }]}
+          >
+            <InputNumber min={256} max={262144} step={256} className="full-width" />
+          </Form.Item>
+          <Form.Item
+            name="agent_max_model_requests"
+            label="每次尝试的模型请求上限"
+            rules={[{ required: true, message: '请输入模型请求上限' }]}
+            extra="Agent 自主检索会多轮调用模型；超过上限时本次尝试会被拒绝并失败，不会静默继续。"
+          >
+            <InputNumber min={1} max={500} className="full-width" />
+          </Form.Item>
+          <Form.Item
+            name="agent_max_retry_requests"
+            label="重试请求上限"
+            rules={[{ required: true, message: '请输入重试请求上限' }]}
+          >
+            <InputNumber min={0} max={100} className="full-width" />
+          </Form.Item>
+          <Form.Item
+            name="agent_max_compaction_requests"
+            label="上下文压缩请求上限"
+            rules={[{ required: true, message: '请输入压缩请求上限' }]}
+          >
+            <InputNumber min={0} max={100} className="full-width" />
           </Form.Item>
         </Form>
       </Modal>
@@ -742,9 +842,9 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
     onError: (error) => message.error(error.message),
   })
 
-  const columns: ColumnsType<ReviewBatch> = [
+  const columns: ColumnsType<ReviewBatchListItem> = [
     {
-      title: '批次名称',
+      title: '评审描述',
       dataIndex: 'name',
       width: 260,
       ellipsis: { showTitle: false },
@@ -752,11 +852,11 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
         <Link to={`/batches/${record.id}/dashboard`} title={name}>{name}</Link>
       ),
     },
-    { title: '周标识', dataIndex: 'week_code', width: 140 },
+    { title: '发布周期', dataIndex: 'week_code', width: 140 },
     { title: '状态', dataIndex: 'status', width: 150, render: (status: BatchStatus) => <Tag color={statusColor(status)}>{batchStatusLabels[status]}</Tag> },
-    { title: '默认分支', dataIndex: 'default_branch', width: 140, render: (value) => value || '-' },
+    { title: '代码基线', dataIndex: 'default_branch', width: 140, render: (value) => value || '-' },
     {
-      title: '分析模型',
+      title: '模型',
       dataIndex: 'ai_model_config_id',
       width: 160,
       render: (_value, record) => {
@@ -765,6 +865,7 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
         return name ? <Tag color="geekblue">{name}</Tag> : <Tag color="orange">未选择</Tag>
       },
     },
+    { title: '创建人', dataIndex: 'creator_name', width: 140, render: (value: string | null) => value || '-' },
     { title: '创建时间', dataIndex: 'created_at', width: 180, render: (value) => new Date(value).toLocaleString() },
     {
       title: '操作',
@@ -802,32 +903,32 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
       />
       <Modal title="创建每周评审批次" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={createMutation.isPending}>
         <Form form={form} layout="vertical" onFinish={(values) => createMutation.mutate(values)}>
-          <Form.Item name="name" label="批次名称" rules={[{ required: true, message: '请输入批次名称' }]}>
+          <Form.Item name="name" label="评审描述" rules={[{ required: true, message: '请输入评审描述' }]}>
             <Input placeholder="2026 年第 36 周需求评审" />
           </Form.Item>
           <Form.Item
             name="week_code"
-            label="周标识"
+            label="发布周期"
             normalize={(value) => typeof value === 'string' ? value.trim() : value}
             rules={[
-              { required: true, message: '请输入周标识' },
+              { required: true, message: '请输入发布周期' },
               {
                 validator: async (_rule, value) => {
                   if (!value) return
-                  if (batchesQuery.data?.some((batch) => batch.week_code === value)) throw new Error('周标识已存在，请换一个')
+                  if (batchesQuery.data?.some((batch) => batch.week_code === value)) throw new Error('发布周期已存在，请换一个')
                 },
               },
             ]}
           >
             <Input placeholder="2026-W36" />
           </Form.Item>
-          <Form.Item name="default_branch" label="默认代码基线分支" rules={[{ required: true, message: '请选择默认代码基线分支' }]}>
-            <Select placeholder="选择代码基线分支" options={defaultBranchOptions} />
+          <Form.Item name="default_branch" label="代码基线" rules={[{ required: true, message: '请选择代码基线' }]}>
+            <Select placeholder="选择代码基线" options={defaultBranchOptions} />
           </Form.Item>
           <Form.Item
             name="ai_model_config_id"
-            label="本批次分析模型"
-            rules={[{ required: true, message: '请选择本批次使用的模型' }]}
+            label="模型"
+            rules={[{ required: true, message: '请选择模型' }]}
             extra={enabledModelsQuery.data && enabledModelsQuery.data.length === 0 ? '暂无已启用且已配置密钥的模型，请先在“模型管理”中配置。' : undefined}
           >
             <Select
@@ -1202,11 +1303,8 @@ function AutoAnalysisSection({
 
   const snapshots = snapshotsQuery.data ?? []
   const storyTasks = storyTasksQuery.data ?? []
-  const retrievedCount = storyTasks.filter((t) => t.retrieval_status === 'SUCCEEDED').length
-  const analyzedCount = storyTasks.filter((t) => t.analysis_status === 'SUCCEEDED').length
-  const processingStories = storyTasks.filter(
-    (t) => t.retrieval_status === 'RUNNING' || t.analysis_status === 'RUNNING',
-  )
+  const agentDoneCount = storyTasks.filter((task) => task.agent_status === 'SUCCEEDED').length
+  const processingStories = storyTasks.filter((task) => task.agent_status === 'RUNNING')
   const totalStories = job?.total_stories || storyTasks.length || storyCount
   const modelConfigId = batch.ai_model_config_id ?? job?.model_config_id ?? null
   const modelDisplay =
@@ -1217,7 +1315,10 @@ function AutoAnalysisSection({
   const modelName = batch.ai_model_snapshot?.model_name ?? job?.model_snapshot?.model_name ?? ''
 
   const errorMeta = job?.error_code ? analysisErrorCodeMeta[job.error_code] : undefined
-  const retryable = job?.status === 'FAILED'
+  const retryable =
+    job?.status === 'FAILED' &&
+    job.execution_engine === 'deepseek-harness-acp' &&
+    errorMeta?.retryable === true
 
   return (
     <Card title="自动 AI 分析" className="auto-analysis-card">
@@ -1306,20 +1407,19 @@ function AutoAnalysisSection({
         <>
           <Divider />
           <Row gutter={[16, 16]}>
-            <Col xs={24} md={8}>
+            <Col xs={24} md={12}>
               <Statistic
                 title="代码准备"
                 value={`${snapshots.length}/4 仓库`}
                 valueStyle={{ color: snapshots.length === 4 ? '#389e0d' : undefined }}
               />
             </Col>
-            <Col xs={24} md={8}>
-              <Statistic title="AI 检索" value={`${retrievedCount}/${totalStories}`} />
-              <Progress percent={totalStories ? Math.round((retrievedCount / totalStories) * 100) : 0} size="small" />
-            </Col>
-            <Col xs={24} md={8}>
-              <Statistic title="AI 分析" value={`${analyzedCount}/${totalStories}`} />
-              <Progress percent={totalStories ? Math.round((analyzedCount / totalStories) * 100) : 0} size="small" />
+            <Col xs={24} md={12}>
+              <Statistic title="Agent 审核完成" value={`${agentDoneCount}/${totalStories}`} />
+              <Progress
+                percent={totalStories ? Math.round((agentDoneCount / totalStories) * 100) : 0}
+                size="small"
+              />
             </Col>
           </Row>
 
@@ -1332,11 +1432,9 @@ function AutoAnalysisSection({
               <Text type="secondary">处理中需求：</Text>
               {processingStories.length ? (
                 <Space wrap size={[4, 4]}>
-                  {processingStories.map((t) => (
-                    <Tag key={t.id} color="blue">
-                      {taskStoryLabel(t)}
-                      {t.retrieval_status === 'RUNNING' ? `（${storyTaskStatusLabels.RUNNING}·检索）` : ''}
-                      {t.analysis_status === 'RUNNING' ? `（${storyTaskStatusLabels.RUNNING}·分析）` : ''}
+                  {processingStories.map((task) => (
+                    <Tag key={task.id} color="blue">
+                      {taskStoryLabel(task)}（{storyTaskStatusLabels.RUNNING}·Agent）
                     </Tag>
                   ))}
                 </Space>
@@ -2162,7 +2260,6 @@ type OperationLogScope = 'batch' | 'model'
 
 const modelAuditFieldLabels: Record<string, string> = {
   display_name: '模型名称',
-  provider: 'Provider',
   base_url: 'Base URL',
   model_name: 'Model',
   max_parallel_tasks: '最大并发需求数',
@@ -2195,7 +2292,7 @@ function OperationLogPage({ scope, isAdmin = false }: { scope: OperationLogScope
 
   const logs = operationLogQuery.data ?? []
   const sourceLogs = logs.filter((record) => scope === 'model'
-    ? ['MODEL_DISPLAY_NAME_UPDATED', 'MODEL_CONFIG_CREATED', 'MODEL_CONFIG_UPDATED'].some((action) => action === record.action)
+    ? ['MODEL_DISPLAY_NAME_UPDATED', 'MODEL_CONFIG_CREATED', 'MODEL_CONFIG_UPDATED', 'MODEL_CONFIG_DELETED'].some((action) => action === record.action)
     : ['BATCH_CREATED', 'BATCH_DELETED', 'COMPLETE', 'REOPEN'].some((action) => action === record.action))
   const getBatchObjectLabel = (record: BatchOperationLogWithBatch) =>
     record.review_batch?.name ?? record.batch_name_snapshot ?? '批次已删除'
@@ -2216,6 +2313,7 @@ function OperationLogPage({ scope, isAdmin = false }: { scope: OperationLogScope
     if (record.action === 'REOPEN') return '重新打开'
     if (record.action === 'MODEL_CONFIG_CREATED') return '创建模型'
     if (record.action === 'MODEL_CONFIG_UPDATED') return '修改模型配置'
+    if (record.action === 'MODEL_CONFIG_DELETED') return '删除模型'
     return '修改模型名称'
   }
   const getActionColor = (record: BatchOperationLogWithBatch) => {
@@ -2225,6 +2323,7 @@ function OperationLogPage({ scope, isAdmin = false }: { scope: OperationLogScope
     if (record.action === 'REOPEN') return 'gold'
     if (record.action === 'MODEL_CONFIG_CREATED') return 'cyan'
     if (record.action === 'MODEL_CONFIG_UPDATED') return 'purple'
+    if (record.action === 'MODEL_CONFIG_DELETED') return 'red'
     return 'geekblue'
   }
   const getOperatorLabel = (record: BatchOperationLogWithBatch) =>
@@ -2255,6 +2354,7 @@ function OperationLogPage({ scope, isAdmin = false }: { scope: OperationLogScope
       return record.forced ? `强制完成，当时仍有 ${record.pending_count ?? 0} 条未确认` : '正常完成'
     }
     if (record.action === 'REOPEN') return '批次已重新打开'
+    if (record.action === 'MODEL_CONFIG_DELETED') return '模型配置已删除'
     if (record.action === 'MODEL_DISPLAY_NAME_UPDATED') {
       return `模型名称：${record.old_model_display_name ?? '-'} → ${record.new_model_display_name ?? '-'}`
     }
@@ -2299,7 +2399,7 @@ function OperationLogPage({ scope, isAdmin = false }: { scope: OperationLogScope
   ]
   const batchColumns: ColumnsType<BatchOperationLogWithBatch> = [
     {
-      title: '操作对象',
+      title: '评审描述',
       width: 260,
       filters: toColumnFilters(sourceLogs.map(getBatchObjectLabel)),
       filterSearch: true,
@@ -2314,7 +2414,7 @@ function OperationLogPage({ scope, isAdmin = false }: { scope: OperationLogScope
         ),
     },
     {
-      title: '周标识',
+      title: '发布周期',
       width: 140,
       filters: toColumnFilters(sourceLogs.map(getBatchWeekCode)),
       filterSearch: true,
@@ -2411,7 +2511,7 @@ function AiResultCard({ result, evidence, aiImport }: { result: AiReviewResult |
         </div>
         <div className="review-ai-confidence">
           <Text type="secondary">置信度</Text>
-          {result.confidence === null ? <Text type="secondary">未填写</Text> : <><Progress percent={result.confidence} size="small" strokeColor="#2563eb" /><Text>{result.confidence}%</Text></>}
+          {result.confidence === null ? <Text type="secondary">未填写</Text> : <><Progress percent={result.confidence} showInfo={false} size="small" strokeColor="#2563eb" /><Text>{result.confidence}%</Text></>}
         </div>
         {aiImport ? <div className="review-ai-baseline"><Text type="secondary">分析基线</Text><BaselineImportDetails aiImport={aiImport} /></div> : null}
       </div>
@@ -2421,13 +2521,29 @@ function AiResultCard({ result, evidence, aiImport }: { result: AiReviewResult |
         <Text>{result.summary || '暂无摘要'}</Text>
       </div>
 
-      <div className="review-ai-sections">
-        {sections.map((section) => (
-          <section key={section.title} className={`review-ai-section review-ai-section--${section.tone}`}>
-            <Text strong>{section.title}</Text>
-            <Text>{section.value}</Text>
-          </section>
-        ))}
+      <div className="review-ai-details">
+        <div className="review-ai-details__heading">
+          <Text strong>分析详情</Text>
+          <Text type="secondary">切换页签查看各项结论</Text>
+        </div>
+        <Tabs
+          className="review-ai-tabs"
+          size="small"
+          items={sections.map((section) => ({
+            key: section.title,
+            label: (
+              <span className="review-ai-tab-label">
+                <span className={`review-ai-tab-dot review-ai-tab-dot--${section.tone}`} />
+                {section.title}
+              </span>
+            ),
+            children: (
+              <section className={`review-ai-tab-panel review-ai-tab-panel--${section.tone}`}>
+                <Text>{section.value}</Text>
+              </section>
+            ),
+          }))}
+        />
       </div>
 
       <Divider />

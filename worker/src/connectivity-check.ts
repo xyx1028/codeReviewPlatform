@@ -53,7 +53,6 @@ interface ConnectivityConfig {
 }
 
 interface ModelAccess {
-  provider: string
   baseUrl: string
   modelName: string
   timeoutMs: number
@@ -290,7 +289,7 @@ async function checkSupabaseAndVault(
   metadataUrl.searchParams.set('id', `eq.${modelConfigId}`)
   metadataUrl.searchParams.set(
     'select',
-    'id,provider,base_url,model_name,enabled,request_timeout_ms',
+    'id,base_url,model_name,enabled,request_timeout_ms',
   )
   metadataUrl.searchParams.set('limit', '1')
 
@@ -319,7 +318,6 @@ async function checkSupabaseAndVault(
     throw new ConnectivityProbeError('MODEL_CONFIG_DISABLED')
   }
   if (
-    typeof record.provider !== 'string' ||
     typeof record.base_url !== 'string' ||
     typeof record.model_name !== 'string'
   ) {
@@ -353,7 +351,6 @@ async function checkSupabaseAndVault(
     ? record.request_timeout_ms
     : config.timeoutMs
   return {
-    provider: record.provider,
     baseUrl: parseUrl(record.base_url, 'model base_url'),
     modelName: record.model_name,
     timeoutMs: Math.min(config.timeoutMs, Math.max(1000, configuredTimeout)),
@@ -361,13 +358,19 @@ async function checkSupabaseAndVault(
   }
 }
 
+/**
+ * Probe the model endpoint.
+ *
+ * Both engines ultimately speak the OpenAI-compatible completions API — the
+ * agent engine reaches it through the Harness pi-ai adapter — so the same
+ * minimal probe is meaningful for both. What the probe cannot tell us is
+ * whether the Harness runtime itself boots; that is covered by the ACP
+ * integration test, not by a network check.
+ */
 async function checkModel(
   access: ModelAccess,
   fetchImpl: FetchLike,
 ): Promise<number> {
-  if (access.provider !== 'openai-compatible') {
-    throw new ConnectivityProbeError('MODEL_PROVIDER_UNSUPPORTED')
-  }
   const response = await fetchWithTimeout(
     fetchImpl,
     `${access.baseUrl}/chat/completions`,
@@ -484,11 +487,12 @@ export async function runConnectivityCheck(
         error_code: 'MODEL_CHECK_BLOCKED_BY_SUPABASE',
       })
     } else {
+      const target = 'configured-model-minimal-ping'
       try {
         const statusCode = await checkModel(modelAccess, fetchImpl)
         emit({
           component: 'model',
-          target: 'configured-model-minimal-ping',
+          target,
           ok: true,
           duration_ms: Math.max(0, now() - started),
           status_code: statusCode,
@@ -496,7 +500,7 @@ export async function runConnectivityCheck(
       } catch (error) {
         emit({
           component: 'model',
-          target: 'configured-model-minimal-ping',
+          target,
           ok: false,
           duration_ms: Math.max(0, now() - started),
           error_code: safeErrorCode(error, 'MODEL_CHECK_FAILED'),

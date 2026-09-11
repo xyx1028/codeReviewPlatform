@@ -1,0 +1,16 @@
+{
+  // 测试文件的类型检查。
+  //
+  // tsconfig.worker.json 刻意排除 *.test.ts（它们不该被编译进 dist-worker），
+  // 后果是测试里的类型错误从来没人管：假的 JobsDb 可以和真接口静默漂移，
+  // WorkerConfig 字面量可以缺字段。曾因此漏掉一个真实故障（prepare-job 调用了
+  // 被 legacy fencing 挡住的 v1 RPC，导致 ACP Job 卡在 PREPARING_CODE）。
+  //
+  // 这份配置只做检查、不产出文件。
+  "extends": "./tsconfig.worker.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["worker/src/**/*.ts"],
+  "exclude": ["node_modules", "dist-worker"]
+}

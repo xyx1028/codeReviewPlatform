@@ -1,64 +1,78 @@
 # supabase/tests
 
-数据库层回归测试（纯 SQL，不依赖 pgTAP）。
+数据库最终态回归测试（纯 SQL，不依赖 pgTAP）。这些脚本面向按顺序应用迁移 `0001..0023` 后的 schema，而不是各迁移刚落地时的历史中间态。当前测试文件重点覆盖 `0010`、`0017..0020` 引入并由后续迁移保留的最终契约；`0021..0023` 必须先正常应用。
 
-## 0010_ai_automation_mvp_test.sql
+## 测试文件
 
-针对迁移 `0010_ai_automation_mvp.sql`（AI 自动化 MVP：模型配置 + Vault 密钥、
-批次模型选择与锁定、`analysis_job` / `analysis_repository_snapshot` /
-`analysis_story_task`、多 Worker 需求级并发与租约/心跳、检索/分析保存、
-原子 complete/fail/retry、权限收敛）的行为断言测试。
+- `0010_ai_automation_mvp_test.sql`：最终模型快照、ACP 建单、准备、四仓快照、canonical task claim、claim token 与密钥读取基础链路。
+- `0017_agent_execution_engine_test.sql`：claim-token/attempt fencing，Agent commit、fail、retry、finalize 及正式结果落库。
+- `0018_execution_engine_admin_actor_test.sql`：删除执行方式切换入口后，`admin_get_model_secret_id` 的显式 actor、无 JWT service-role 调用和角色权限。
+- `0019_single_harness_execution_test.sql`：唯一无版本 Worker RPC；旧固定阶段、带版本后缀 RPC 和引擎协商入口不存在；新 Job 固定 ACP、历史 insert/retry fencing、历史来源字段与 Worker overview 三阶段。
+- `0020_remove_model_provider_test.sql`：最终模型表无 provider/engine/prompt，provider-free create/update 签名、显式 actor 权限、快照字段和默认请求预算 `120`。
 
-覆盖内容：
+测试文件名沿用对应迁移编号，属于迁移历史标识，不表示当前存在多种执行方式。
 
-- 模型快照不含 `api_key_secret_id`；新批次必须先选模型；分支唯一复制到 job；
-  20 条 story 拆成 20 个 task。
-- `claim_job_for_preparation` / `claim_next_story_task` 返回 JSON 信封；保存 4 个
-  仓库快照；`max_parallel_tasks=4` 时第 5 次领取为 `null`（另有一个配置为 8 的模型
-  说明可扩展）；task 唯一。
-- 心跳正确/错误 owner；租约过期后被其它 worker 接管；迟到写被拒 `TASK_LEASE_LOST`。
-- 保存检索/分析进度与 `attempt` 语义（领取才 +1，保存不重复自增）；
-  `fail_story_task` 令整个 job `FAILED`；`retry_analysis_job` 复用 4 个仓库快照并
-  保留已成功的检索结果。
-- finalizer 唯一 / 租约接管；失租 finalizer 的失败写入被拒；非法
-  `complete_analysis_job` 的事务回滚（用 `BEGIN...EXCEPTION` 子事务验证异常与
-  “无残留结果”）；合法 complete 一次写入正式结果、重复被拒；证据 `commit_sha`
-  强制取自快照。
-- `authenticated` 不能直接 `select ai_model_config` / Vault 解密视图，也不能执行
-  Worker / secret RPC；无密钥列表 RPC 返回列不含任何 secret id；`service_role`
-  授权存在。
-- 产生自动结果后，现有 `human_review` 仍可插入与查询。
+每个文件均满足：
 
-### 运行方式
+- `\set ON_ERROR_STOP on`，任一断言失败立即终止；
+- 单个 `BEGIN ... ROLLBACK`，正常结束不留下测试数据；
+- 使用独立固定 UUID/周次命名空间；
+- 通过 `pg_temp.assert*` 与异常子事务断言，不需要 pgTAP；
+- 输出一个唯一成功标记，便于 CI 判定。
 
-前置：目标库已按顺序应用 `0001..0010`，以库属主（通常 `postgres`）连接
-（脚本内部使用 `set local role` 切换 `authenticated` / `service_role` 做权限探针，
-因此执行角色需要具备这些角色的成员资格）。
+## 本地执行
+
+前置条件：本地 Supabase 已启动；使用库属主（通常 `postgres`）连接，因为测试会写 `auth.users`、检查 catalog，并用 `SET LOCAL ROLE` 探测 `authenticated` / `service_role` 权限。
+
+重建本地数据库：
 
 ```bash
-# 对已应用 0001-0010 的库执行（Supabase 本地或任意 PostgreSQL 均可）
-psql -v ON_ERROR_STOP=1 -U postgres -d <database> \
-  -f supabase/tests/0010_ai_automation_mvp_test.sql
+supabase db reset --no-seed
 ```
 
-- 脚本自带 `\set ON_ERROR_STOP on`。任一断言失败会 `RAISE EXCEPTION` 并使
-  `psql` 以非零码退出。
-- 全部通过时输出且仅输出成功标记：`ALL_AI_AUTOMATION_MVP_TESTS_PASSED`。
+预期迁移从 `0001` 顺序执行到 `0023`。不要对 linked/远端项目执行 reset、push 或测试脚本，也不要为了测试停止本地 Supabase。
 
-判定成功（CI 建议）：
+### 方式一：宿主机 `psql`
 
 ```bash
-psql -v ON_ERROR_STOP=1 -U postgres -d <database> \
-  -f supabase/tests/0010_ai_automation_mvp_test.sql \
-  | grep -q ALL_AI_AUTOMATION_MVP_TESTS_PASSED
+export TEST_DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:54322/postgres'
+
+for test in \
+  supabase/tests/0010_ai_automation_mvp_test.sql \
+  supabase/tests/0017_agent_execution_engine_test.sql \
+  supabase/tests/0018_execution_engine_admin_actor_test.sql \
+  supabase/tests/0019_single_harness_execution_test.sql \
+  supabase/tests/0020_remove_model_provider_test.sql
+do
+  psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$test" || exit 1
+done
 ```
 
-### 重要提醒：只在测试 / 事务环境执行
+若本地端口或密码不同，以 `supabase status` 显示的本地数据库连接信息为准。
 
-- 脚本整体包裹在单个 `BEGIN ... ROLLBACK` 中，正常执行结束**不留任何数据**。
-- 使用固定的高熵测试 UUID（`10……` 命名空间）与 `WK-10TEST-001` 周次编码，
-  避免与真实数据冲突；但仍应**只对测试库 / 可回滚事务环境执行**，不要在生产库上运行。
-- 兼容真实 Vault 与测试 Vault 桩：密钥写入统一走 `public.admin_vault_create_secret`
-  包装函数，两种环境下都存在，无需直接依赖 `vault.*`。
-- 不依赖 pgTAP：断言用临时函数 `pg_temp.assert*` + `RAISE EXCEPTION` 实现；
-  “某操作必须失败/回滚”的场景用 `BEGIN ... EXCEPTION` 子事务块验证。
+### 方式二：本地 Supabase 数据库容器
+
+macOS 未安装 `psql` 时可直接使用本地数据库容器：
+
+```bash
+for test in \
+  supabase/tests/0010_ai_automation_mvp_test.sql \
+  supabase/tests/0017_agent_execution_engine_test.sql \
+  supabase/tests/0018_execution_engine_admin_actor_test.sql \
+  supabase/tests/0019_single_harness_execution_test.sql \
+  supabase/tests/0020_remove_model_provider_test.sql
+do
+  docker exec -i supabase_db_codeReviewPlatform \
+    psql -v ON_ERROR_STOP=1 -U postgres -d postgres < "$test" || exit 1
+done
+```
+
+若项目目录名不同，先通过 `docker ps --format '{{.Names}}'` 确认实际 `supabase_db_*` 容器名。
+
+预期成功标记依次为：
+
+- `ALL_AI_AUTOMATION_MVP_TESTS_PASSED`
+- `ALL_AGENT_EXECUTION_ENGINE_TESTS_PASSED`
+- `ALL_EXECUTION_ENGINE_ACTOR_TESTS_PASSED`
+- `ALL_SINGLE_HARNESS_EXECUTION_TESTS_PASSED`
+- `ALL_REMOVE_MODEL_PROVIDER_TESTS_PASSED`

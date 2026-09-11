@@ -14,7 +14,11 @@ export interface HeartbeatOptions {
   intervalMs: number
   /** Sends a single heartbeat; resolves true if lease renewed, false if lost. */
   send: (taskId: string, workerId: string) => Promise<boolean>
-  onLeaseLost: () => void
+  /**
+   * Optional notification. Callers that gate work on the lease can poll
+   * {@link Heartbeat.leaseHeld} instead of reacting to an event.
+   */
+  onLeaseLost?: () => void
   logger?: Logger
   /** Injected for testing. */
   setIntervalImpl?: typeof setInterval
@@ -28,6 +32,7 @@ export class Heartbeat {
   private setIntervalImpl: typeof setInterval
   private clearIntervalImpl: typeof clearInterval
   private stopped = false
+  private lost = false
 
   constructor(opts: HeartbeatOptions) {
     this.opts = opts
@@ -53,16 +58,27 @@ export class Heartbeat {
     try {
       const ok = await this.opts.send(this.opts.taskId, this.opts.workerId)
       if (!ok) {
+        this.lost = true
         this.logger.warn('heartbeat_lease_lost', {
           event: 'heartbeat_lease_lost',
           job_id: undefined,
         })
         this.stop()
-        this.opts.onLeaseLost()
+        this.opts.onLeaseLost?.()
       }
     } catch (err) {
       this.logger.warn('heartbeat_error', { event: 'heartbeat_error', error: String((err as Error)?.message) })
     }
+  }
+
+  /**
+   * Whether the lease is still believed to be held. Only a heartbeat the
+   * database actively rejected flips this to false; a transport error leaves it
+   * true, exactly like the legacy path, because a failed renewal attempt is not
+   * proof that another worker took over.
+   */
+  leaseHeld(): boolean {
+    return !this.lost
   }
 
   stop(): void {
