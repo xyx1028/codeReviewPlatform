@@ -391,9 +391,12 @@ function Shell({ session }: { session: Session }) {
   return (
     <Layout className="app-shell">
       <Header className="app-header">
-        <div>
-          <Text className="brand">AI 需求—代码一致性评审平台</Text>
-          <Text className="subtitle">DeepSeek Harness 闭环</Text>
+        <div className="brand-lockup">
+          <span className="brand-mark" aria-hidden="true">AI</span>
+          <div className="brand-copy">
+            <Text className="brand">AI代码评审平台</Text>
+            <Text className="subtitle">需求与代码一致性 · 智能分析</Text>
+          </div>
         </div>
         <Space>
           <Tag color={profileQuery.data?.role === 'ADMIN' ? 'green' : 'blue'}>{profileQuery.data?.role ?? '未配置角色'}</Tag>

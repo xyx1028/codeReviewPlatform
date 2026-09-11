@@ -158,16 +158,54 @@ a {
   background: #101828;
 }
 
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  border: 1px solid rgba(191, 219, 254, 0.32);
+  border-radius: 11px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  background: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+  box-shadow: 0 7px 18px rgba(37, 99, 235, 0.28);
+}
+
+.brand-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .brand {
   color: #fff;
-  font-size: 18px;
-  font-weight: 700;
-  margin-right: 12px;
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  line-height: 1.15;
 }
 
 .subtitle,
 .header-email {
   color: rgba(255, 255, 255, 0.72);
+}
+
+.subtitle {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
 }
 
 .app-sider {
@@ -177,6 +215,20 @@ a {
 
 .app-content {
   padding: 24px;
+}
+
+@media (max-width: 720px) {
+  .app-header {
+    padding: 0 16px;
+  }
+
+  .brand {
+    font-size: 16px;
+  }
+
+  .subtitle {
+    display: none;
+  }
 }
 
 .page-stack {
