@@ -247,6 +247,19 @@ export class JobsDb {
     )
   }
 
+  async releaseStoryTaskClaim(input: {
+    taskId: string
+    workerId: string
+    claimToken: string
+  }): Promise<boolean> {
+    const released = await this.db.rpc<boolean>('release_story_task_claim', {
+      p_task_id: input.taskId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+    })
+    return released === true
+  }
+
   getModelSecretForStoryTask(input: {
     taskId: string
     workerId: string

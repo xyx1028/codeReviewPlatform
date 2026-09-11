@@ -10,6 +10,7 @@ import type {
   AiModelDisplayName,
   AiReviewResult,
   AnalysisJob,
+  AnalysisRecoveryLease,
   AnalysisRepositorySnapshot,
   AnalysisStoryTaskWithStory,
   AnalysisWorkerOverview,
@@ -668,6 +669,13 @@ export async function adminListAnalysisWorkers() {
   const client = requireSupabase()
   const { data, error } = await client.rpc('admin_list_analysis_workers')
   return unwrap<AnalysisWorkerOverview>({ data, error })
+}
+
+/** 管理员只读：仍被离线 Worker 持有、等待释放或到期回收的 Agent 租约。 */
+export async function adminListRecoveryStoryLeases() {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_list_recovery_story_leases')
+  return unwrap<AnalysisRecoveryLease[]>({ data, error })
 }
 
 /** 批次管理者：只允许 FAILED 任务按原快照重试（复用原 Commit SHA）。返回 job id。 */

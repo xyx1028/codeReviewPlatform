@@ -65,6 +65,7 @@ declare
     'public.save_repository_snapshots(uuid,text,jsonb)',
     'public.claim_next_story_task(text,integer)',
     'public.heartbeat_story_task(uuid,text,uuid,integer)',
+    'public.release_story_task_claim(uuid,text,uuid)',
     'public.get_model_secret_for_story_task(uuid,text,uuid)',
     'public.save_agent_review_result(uuid,text,uuid,integer,jsonb,jsonb,jsonb,text,text,text)',
     'public.fail_agent_review(uuid,text,uuid,text,text)',

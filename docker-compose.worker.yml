@@ -17,6 +17,8 @@ services:
       dockerfile: Dockerfile.worker
     image: codereviewplatform-worker:latest
     restart: unless-stopped
+    # Permit ACP cancellation and lease release before Docker sends SIGKILL.
+    stop_grace_period: 30s
     # No ports are published: the worker is outbound-only.
     # Defaults to the local ignored file. WORKER_ENV_FILE exists only for
     # validation or an intentional alternate local file.

@@ -291,6 +291,29 @@ describe('JobsDb canonical RPC contract', () => {
     ).resolves.toBe(false)
   })
 
+  it('releases only the current task claim during graceful Worker shutdown', async () => {
+    const db = new RecordingDb({ release_story_task_claim: true })
+    const jobs = new JobsDb(db)
+
+    await expect(
+      jobs.releaseStoryTaskClaim({
+        taskId: 'task-1',
+        workerId: 'worker-1',
+        claimToken: CLAIM_TOKEN,
+      }),
+    ).resolves.toBe(true)
+
+    expect(db.last()).toEqual({
+      fn: 'release_story_task_claim',
+      params: {
+        p_task_id: 'task-1',
+        p_worker_id: 'worker-1',
+        p_claim_token: CLAIM_TOKEN,
+      },
+      options: undefined,
+    })
+  })
+
   it('heartbeats worker capacity, capabilities, and cancellation signal', async () => {
     const controller = new AbortController()
     const db = new RecordingDb()

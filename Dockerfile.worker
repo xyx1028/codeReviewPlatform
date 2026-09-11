@@ -17,7 +17,15 @@ RUN npm ci
 # template, which is materialized per attempt at runtime.
 COPY tsconfig.worker.json ./
 COPY worker ./worker
-RUN npm run worker:build
+# The Harness loader resolves profile plugins from the application's own
+# node_modules tree, rather than the per-attempt profile directory. Link the
+# compiled platform-owned plugins there so Docker workers boot the same ACP
+# profile as the local worker process.
+RUN npm run worker:build \
+  && mkdir -p /app/node_modules/@codereview \
+  && for plugin in volatile-session-persistence model-budget-governor snapshot-tools review-control-tool; do \
+       ln -s "../../dist-worker/harness-plugins/$plugin" "/app/node_modules/@codereview/harness-$plugin"; \
+     done
 
 ENV NODE_ENV=production
 ENV WORKSPACE_ROOT=/workspace/jobs

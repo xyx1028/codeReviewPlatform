@@ -36,7 +36,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 export interface WorkerRuntime {
-  stop(): void
+  /** Stop claiming work, cancel active attempts, and release their leases. */
+  stop(): Promise<void>
   ranOnce: Promise<void>
 }
 
@@ -75,6 +76,7 @@ export async function runStoryTask(
   jobsDb: JobsDb,
   task: StoryTask,
   logger: Logger,
+  options: { signal?: AbortSignal } = {},
 ): Promise<void> {
   const log = logger.child({
     job_id: task.job_id,
@@ -84,6 +86,24 @@ export async function runStoryTask(
   let repositories: PreparedRepository[] | null = null
   let runner: ReviewRunner | null = null
   const attempt = new AbortController()
+  const abortAttempt = () => attempt.abort()
+  if (options.signal?.aborted) abortAttempt()
+  options.signal?.addEventListener('abort', abortAttempt, { once: true })
+  let releaseAttempted = false
+  const releaseForShutdown = async (): Promise<void> => {
+    if (releaseAttempted) return
+    releaseAttempted = true
+    const released = await jobsDb.releaseStoryTaskClaim({
+      taskId: task.id,
+      workerId: config.workerId,
+      claimToken: task.claim_token,
+    })
+    if (released) {
+      log.info('story_task_released_for_shutdown', {
+        event: 'story_task_released_for_shutdown',
+      })
+    }
+  }
   const lease = new Heartbeat({
     taskId: task.id,
     workerId: config.workerId,
@@ -100,6 +120,10 @@ export async function runStoryTask(
 
   try {
     repositories = await prepareTaskRepositories(task, config)
+    if (options.signal?.aborted) {
+      await releaseForShutdown()
+      return
+    }
     lease.start()
 
     runner = await buildDeepSeekHarnessReview({
@@ -149,6 +173,10 @@ export async function runStoryTask(
     })
 
     const outcome = await runner.runReview({ signal: attempt.signal, logger: log })
+    if (options.signal?.aborted) {
+      await releaseForShutdown()
+      return
+    }
     if (!outcome.ok) {
       await jobsDb
         .failAgentReview({
@@ -166,6 +194,15 @@ export async function runStoryTask(
         )
     }
   } catch (error) {
+    if (options.signal?.aborted) {
+      await releaseForShutdown().catch((releaseError) =>
+        log.error('story_task_release_for_shutdown_failed', {
+          event: 'story_task_release_for_shutdown_failed',
+          error_message: redactError(releaseError),
+        }),
+      )
+      return
+    }
     const code = (error as { code?: string })?.code ?? 'JOB_INTERNAL_ERROR'
     const message = redactError(error)
     log.error('story_task_setup_failed', {
@@ -175,6 +212,7 @@ export async function runStoryTask(
     })
     await recordSetupFailure(jobsDb, config, task, code, message).catch(() => undefined)
   } finally {
+    options.signal?.removeEventListener('abort', abortAttempt)
     attempt.abort()
     lease.stop()
     repositories = null
@@ -219,6 +257,8 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
   const logger = rootLogger.child({ worker_id: config.workerId })
   const jobsDb = new JobsDb(new SupabaseDbClient(config))
   let stopped = false
+  const shutdownController = new AbortController()
+  let stopPromise: Promise<void> | null = null
 
   const pool = new SlotPool(config.workerStoryConcurrency)
   const inFlight = new Set<Promise<void>>()
@@ -318,9 +358,19 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
             config.storyTaskLeaseSeconds,
           )
           if (!task) break
+          if (stopped) {
+            await jobsDb.releaseStoryTaskClaim({
+              taskId: task.id,
+              workerId: config.workerId,
+              claimToken: task.claim_token,
+            })
+            break
+          }
           claimedAny = true
           const release = await pool.acquire()
-          const run = runStoryTask(config, jobsDb, task, logger)
+          const run = runStoryTask(config, jobsDb, task, logger, {
+            signal: shutdownController.signal,
+          })
             .catch((error) =>
               logger.error('slot_run_error', {
                 event: 'slot_run_error',
@@ -367,9 +417,13 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
   void loop()
 
   return {
-    stop() {
+    stop(): Promise<void> {
+      if (stopPromise) return stopPromise
       stopped = true
       clearInterval(availabilityHeartbeat)
+      shutdownController.abort()
+      stopPromise = Promise.allSettled([...inFlight]).then(() => undefined)
+      return stopPromise
     },
     ranOnce,
   }
@@ -392,9 +446,24 @@ if (isMain) {
     })
     process.on('exit', () => instanceLock.release())
     const runtime = startWorker(config)
+    let stopping = false
     const shutdown = () => {
-      runtime.stop()
-      setTimeout(() => process.exit(0), 500)
+      if (stopping) return
+      stopping = true
+      rootLogger.info('worker_shutdown_requested', { event: 'worker_shutdown_requested' })
+      void runtime
+        .stop()
+        .catch((error) =>
+          rootLogger.error('worker_shutdown_failed', {
+            event: 'worker_shutdown_failed',
+            error_message: redactError(error),
+          }),
+        )
+        .finally(() => {
+          instanceLock.release()
+          rootLogger.info('worker_stopped', { event: 'worker_stopped' })
+          process.exitCode = 0
+        })
     }
     process.on('SIGTERM', shutdown)
     process.on('SIGINT', shutdown)

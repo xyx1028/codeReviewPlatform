@@ -192,6 +192,11 @@ export interface AnalysisWorkerAssignment {
   lease_expires_at: string | null
 }
 
+/** A valid task lease that belongs to a Worker without a current heartbeat. */
+export interface AnalysisRecoveryLease extends AnalysisWorkerAssignment {
+  worker_id: string
+}
+
 export interface AnalysisWorkerDetail {
   worker_id: string
   slots: number
