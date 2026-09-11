@@ -1312,7 +1312,14 @@ function AutoAnalysisSection({
     batch.ai_model_snapshot?.display_name ??
     job?.model_snapshot?.display_name ??
     (modelConfigId ? '已选择模型' : '未选择')
-  const modelName = batch.ai_model_snapshot?.model_name ?? job?.model_snapshot?.model_name ?? ''
+  const configuredModelName = modelConfigId
+    ? enabledModels.find((model) => model.id === modelConfigId)?.model_name
+    : undefined
+  const modelName =
+    batch.ai_model_snapshot?.model_name ??
+    job?.model_snapshot?.model_name ??
+    configuredModelName ??
+    ''
 
   const errorMeta = job?.error_code ? analysisErrorCodeMeta[job.error_code] : undefined
   const retryable =
