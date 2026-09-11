@@ -14,6 +14,9 @@ dist-worker
 coverage
 *.local
 
+# Local Docker Worker credentials. Keep the checked-in example only.
+.docker/worker.env
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

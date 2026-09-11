@@ -3,10 +3,12 @@
 # Default topology: 4 replicas x 2 story slots each = capacity of 8 concurrent
 # stories. The real ceiling is still the model configuration's max_parallel_tasks.
 #
-# Start (local or intranet):
+# First run: copy .docker/worker.env.example to .docker/worker.env and fill in
+# the local-only credentials. Start (local or intranet):
 #   docker compose -f docker-compose.worker.yml up -d --scale worker=4
 #
-# Secrets MUST be injected by the platform / a .env file that is NOT committed.
+# The default file is not committed and is read only when a container starts;
+# secrets are never baked into the image.
 
 services:
   worker:
@@ -16,24 +18,10 @@ services:
     image: codereviewplatform-worker:latest
     restart: unless-stopped
     # No ports are published: the worker is outbound-only.
-    environment:
-      SUPABASE_URL: ${SUPABASE_URL}
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
-      GIT_AUTH_MODE: ${GIT_AUTH_MODE:-token}
-      GITLAB_BASE_URL: ${GITLAB_BASE_URL:-https://git.kingdee.com}
-      GITLAB_DEPLOY_USER: ${GITLAB_DEPLOY_USER:-}
-      GITLAB_DEPLOY_TOKEN: ${GITLAB_DEPLOY_TOKEN:-}
-      # Each replica gets a unique WORKER_ID from its container hostname.
-      WORKER_ID: ${WORKER_ID:-worker-{{.Task.Slot}}}
-      WORKSPACE_ROOT: /workspace/jobs
-      CODE_CACHE_ROOT: /workspace/cache
-      AGENT_ATTEMPTS_ROOT: /workspace/agent-attempts
-      POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-5000}
-      STORY_TASK_LEASE_SECONDS: ${STORY_TASK_LEASE_SECONDS:-900}
-      HEARTBEAT_INTERVAL_MS: ${HEARTBEAT_INTERVAL_MS:-30000}
-      # 2 slots per replica -> 4 replicas x 2 = capacity 8.
-      WORKER_STORY_CONCURRENCY: ${WORKER_STORY_CONCURRENCY:-2}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
+    # Defaults to the local ignored file. WORKER_ENV_FILE exists only for
+    # validation or an intentional alternate local file.
+    env_file:
+      - ${WORKER_ENV_FILE:-.docker/worker.env}
     # Derive a stable, unique WORKER_ID from the container id at runtime.
     entrypoint:
       - /bin/sh

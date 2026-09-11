@@ -12,6 +12,7 @@ deepseekharness
 *.log
 .env
 .env.*
+.docker/worker.env
 !.env.example
 src
 public

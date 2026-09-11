@@ -108,6 +108,19 @@ npm run worker:start
 
 ## 5. 容器部署
 
+首次使用时，在项目目录准备本机专用配置。真实文件受 `.gitignore` 保护，
+只留在这台 Docker 主机；不要把它写入 `Dockerfile` 或提交 Git：
+
+```bash
+cp .docker/worker.env.example .docker/worker.env
+chmod 600 .docker/worker.env
+```
+
+在 `.docker/worker.env` 填入 Supabase service role 与只读 GitLab Deploy Token。
+不要直接复制 Mac 上的 Worker 配置文件：其中的 `WORKER_ID` 与运行目录属于
+宿主机，容器会使用自己的路径并自动生成每副本唯一 ID。
+之后 Compose 会自动加载该文件，无需在启动命令中传 `--env-file`。
+
 构建与启动：
 
 ```bash
