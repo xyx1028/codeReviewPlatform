@@ -175,6 +175,17 @@ describe('JobsDb canonical RPC contract', () => {
     })
   })
 
+  it('reclaims stale story task leases through the service RPC', async () => {
+    const db = new RecordingDb({ reclaim_stale_story_task_leases: 2 })
+    const jobs = new JobsDb(db)
+
+    await expect(jobs.reclaimStaleStoryTaskLeases()).resolves.toBe(2)
+    expect(db.last()).toMatchObject({
+      fn: 'reclaim_stale_story_task_leases',
+      params: {},
+    })
+  })
+
   it('claims a story task and exposes its required claim token and Agent fields', async () => {
     const db = new RecordingDb({ claim_next_story_task: [claimedTask()] })
     const jobs = new JobsDb(db)

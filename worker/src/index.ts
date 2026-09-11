@@ -351,6 +351,8 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
       try {
         await tryPrepareOneJob()
 
+        await jobsDb.reclaimStaleStoryTaskLeases()
+
         let claimedAny = false
         while (!stopped && pool.availableSlots > 0) {
           const task = await jobsDb.claimNextStoryTask(

@@ -190,6 +190,12 @@ export class JobsDb {
     })
   }
 
+  /** Requeue Agent leases whose owner has missed the Worker heartbeat window. */
+  async reclaimStaleStoryTaskLeases(): Promise<number> {
+    const data = await this.db.rpc<number>('reclaim_stale_story_task_leases', {})
+    return typeof data === 'number' ? data : 0
+  }
+
   async claimNextStoryTask(workerId: string, leaseSeconds: number): Promise<StoryTask | null> {
     const data = await this.db.rpc<unknown>('claim_next_story_task', {
       p_worker_id: workerId,
