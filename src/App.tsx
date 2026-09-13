@@ -409,7 +409,7 @@ function Shell({ session }: { session: Session }) {
           </div>
         </div>
         <Space>
-          <Text className="header-version">版本 V1.4</Text>
+          <Text className="header-version">版本 V1.5</Text>
           <Tag color={profileQuery.data?.role === 'ADMIN' ? 'green' : 'blue'}>{profileQuery.data?.role ?? '未配置角色'}</Tag>
           {role === 'REVIEWER' ? (
             <Button size="small" onClick={() => claimAdminMutation.mutate()} loading={claimAdminMutation.isPending}>
