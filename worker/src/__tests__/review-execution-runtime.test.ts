@@ -9,6 +9,12 @@ import {
   tailOf,
 } from '../ai/runtime/deepseek-harness-acp-engine.js'
 import { ReviewExecutionAbortedError } from '../ai/runtime/errors.js'
+import {
+  contractHash,
+  loadCapabilityContract,
+  policyHash,
+  V4_DEFAULT_POLICY,
+} from '../ai/policy/v4-capability-policy.js'
 import type { JobsDb, StoryTask } from '../db/jobs.js'
 import type { PreparedRepository } from '../git/prepare.js'
 import { Logger } from '../logger.js'
@@ -17,6 +23,9 @@ const SHA = 'a'.repeat(40)
 const JOB_ID = '11111111-2222-4333-8444-555555555555'
 const TASK_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 const CLAIM_TOKEN = '99999999-8888-4777-8666-555555555555'
+const MANIFEST = loadCapabilityContract()
+const MANIFEST_HASH = contractHash(MANIFEST)
+const DEFAULT_POLICY_HASH = policyHash(V4_DEFAULT_POLICY)
 
 function silentLogger(): Logger {
   return new Logger({ sink: () => {}, minLevel: 'error' })
@@ -31,6 +40,14 @@ function baseTask(overrides: Partial<StoryTask> = {}): StoryTask {
     agent_status: 'RUNNING',
     agent_attempt: 1,
     claim_token: CLAIM_TOKEN,
+    // V4：完整策略与 Harness manifest 身份由数据库在 enqueue 时冻结并随 claim 下发。
+    capability_policy: V4_DEFAULT_POLICY as unknown as Record<string, unknown>,
+    policy_version: 4,
+    policy_hash: DEFAULT_POLICY_HASH,
+    harness_version: MANIFEST.harnessVersion,
+    capability_contract_hash: MANIFEST_HASH,
+    agent_run_id: null,
+    session_revision: 1,
     job: {
       id: JOB_ID,
       batch_id: 'b',
@@ -110,6 +127,13 @@ function buildInput(jobsDb: JobsDb, task = baseTask(), repositories = [preparedR
     branch: 'feature_dev' as const,
     repositories,
     agentAttemptsRoot: '/tmp/review-attempts',
+    // V4：Session 持久卷、禁止 Workspace 触及的平台目录、以及要被 Web 出口屏蔽的基础设施地址。
+    sessionRoot: '/tmp/review-sessions',
+    forbiddenRoots: ['/tmp/cache', '/tmp/jobs'],
+    infrastructure: {
+      supabaseUrl: 'https://project.supabase.co',
+      gitlabBaseUrl: 'https://git.example.com',
+    },
     logger: silentLogger(),
     isLeaseValid: () => true,
     commitReview: async () => ({ runId: 'run-1', committedAt: '2026-01-01T00:00:00Z' }),

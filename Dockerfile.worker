@@ -3,8 +3,27 @@
 FROM node:24-bookworm-slim
 
 # git + ripgrep are required by the read-only code tools; ca-certificates for TLS.
+# procps provides `ps`, which acp-process-supervisor.ts uses as
+# `ps -o pid= -g <pgid>` to enumerate and confirm reaping of the child process
+# tree (build/test/lint processes started by Sandbox Shell and Jobs). The slim
+# base image does not ship it, and without it process-tree cleanup cannot verify
+# that descendants are gone.
+#
+# **刻意不装 bubblewrap。** `@deepseek-ai/dsh-sandbox-local` 会按 bwrap → Landlock 顺序做功能
+# 探测，bwrap 档的 `--tmpfs /tmp` 本来能把 Broker socket 挡在沙箱视野外，是一层不错的纵深。
+# 但实测在默认 Docker 容器里 bwrap 起不来：
+#
+#   bwrap: Creating new namespace failed: Operation not permitted
+#
+# 因为 Docker 默认 seccomp 拦住了非特权用户的 namespace 创建。要让它可用得上 `--privileged`
+# 或放开 seccomp —— 那是用更大的削弱换更小的加固，不做。装一个必然探测失败的包只是镜像膨胀
+# 和误导性注释，所以这里明确不装。
+#
+# 因此生产上生效的是 Landlock 档（`readOnly:["/"]` + readWrite `/tmp` 与 workspace）：它只限制
+# 写、不限制读。"凭据不落盘"这条边界因此**不能**依赖沙箱，只能依赖凭据走环境变量且变量名命中
+# Harness 的剥离规则 —— 见 harness-plugins/shared/credential-env.ts。
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git ripgrep ca-certificates \
+  && apt-get install -y --no-install-recommends git ripgrep ca-certificates procps \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -14,17 +33,33 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 # Build the worker. `worker/harness` carries the checked-in Harness profile
-# template, which is materialized per attempt at runtime.
+# template and the frozen V4 capability contract
+# (worker/harness/code-review-acp/v4-capability-contract.json), both required at
+# runtime: the profile is materialized per attempt, and the contract is the
+# authority the Worker validates the resolved tool inventory against.
 COPY tsconfig.worker.json ./
+COPY Dockerfile.worker ./
+COPY scripts ./scripts
+COPY supabase/migrations ./supabase/migrations
 COPY worker ./worker
+# Fail the build early if the frozen V4 capability contract did not make it into
+# the image; the Worker refuses to run without it.
+RUN test -f /app/worker/harness/code-review-acp/v4-capability-contract.json
 # The Harness loader resolves profile plugins from the application's own
 # node_modules tree, rather than the per-attempt profile directory. Link the
 # compiled platform-owned plugins there so Docker workers boot the same ACP
 # profile as the local worker process.
+#
+# 这份清单必须与 worker/harness/code-review-acp/package.json 的 dependencies 一致。
+# V4 用 agent-authority-policy / usage-reporter / platform-web 取代了 V3 的
+# volatile-session-persistence 与 model-budget-governor（前者被 JSONL 持久化替换，后者被
+# 跨 Agent 的分层预算取代）。链错的后果是容器里 profile 解析不到插件而启动失败，
+# 所以下面用 `test -d` 在构建期就把它挡住，而不是留到运行时。
 RUN npm run worker:build \
   && mkdir -p /app/node_modules/@codereview \
-  && for plugin in volatile-session-persistence model-budget-governor snapshot-tools review-control-tool; do \
-       ln -s "../../dist-worker/harness-plugins/$plugin" "/app/node_modules/@codereview/harness-$plugin"; \
+  && for plugin in agent-authority-policy usage-reporter platform-web snapshot-tools review-control-tool; do \
+       test -d "/app/dist-worker/harness-plugins/$plugin" \
+       && ln -s "../../dist-worker/harness-plugins/$plugin" "/app/node_modules/@codereview/harness-$plugin"; \
      done
 
 ENV NODE_ENV=production
@@ -33,12 +68,21 @@ ENV CODE_CACHE_ROOT=/workspace/cache
 # Per-attempt Harness profile trees (DSH_HOME) live here, one 0700 directory
 # per attempt, removed when the attempt ends.
 ENV AGENT_ATTEMPTS_ROOT=/workspace/agent-attempts
+# Session JSONL persistent root. This directory MUST be backed by a persistent
+# volume (see docker-compose.worker.yml): it holds the JSONL transcripts the
+# worker replays to resume an uncommitted session after a restart. The contents
+# include real source code, so the directory is created 0700 and owned by the
+# non-root worker user; the host volume should be encrypted at rest.
+ENV AGENT_SESSION_ROOT=/workspace/agent-sessions
 
 # Create the non-root user and the workspace it owns. (Plan §17.2)
+# All four runtime roots are pre-created 0700 so a freshly mounted empty volume
+# already has the right ownership and permissions before the worker starts.
 RUN groupadd --system worker \
   && useradd --system --gid worker --home-dir /workspace worker \
-  && mkdir -p /workspace/jobs /workspace/cache /workspace/agent-attempts \
-  && chown -R worker:worker /workspace /app
+  && mkdir -p /workspace/jobs /workspace/cache /workspace/agent-attempts /workspace/agent-sessions \
+  && chown -R worker:worker /workspace /app \
+  && chmod 700 /workspace/jobs /workspace/cache /workspace/agent-attempts /workspace/agent-sessions
 
 USER worker
 

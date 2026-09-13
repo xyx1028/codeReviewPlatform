@@ -88,11 +88,18 @@ export class SnapshotStore {
     }
   }
 
-  /** Repository/commit pairs this store exposes. */
-  pins(): Array<{ repository: RepositoryName; commitSha: string }> {
+  /**
+   * Repository/commit pairs this store exposes.
+   *
+   * `gitDir` 只给 Worker 侧用（把固定 Commit 物化成只读工作树），绝不进入模型上下文 ——
+   * `buildAttemptPatch` 传给 snapshot-tools 的只有仓库名。V4 之前这里不返回 gitDir，
+   * 于是 Workspace 无从知道去哪里检出，只读视图永远是空的。
+   */
+  pins(): Array<{ repository: RepositoryName; commitSha: string; gitDir: string }> {
     return [...this.repos.values()].map((ref) => ({
       repository: ref.name,
       commitSha: ref.commitSha,
+      gitDir: ref.gitDir,
     }))
   }
 

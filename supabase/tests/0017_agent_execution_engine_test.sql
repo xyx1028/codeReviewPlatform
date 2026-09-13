@@ -102,11 +102,23 @@ begin
 
   insert into public.analysis_job (
     id, batch_id, model_config_id, model_snapshot, requested_branch,
-    status, requested_by, total_stories, created_at
+    status, requested_by, total_stories, created_at,
+    -- 与 `enqueue_analysis_job` 冻结的字段完全对齐：V4 的 record_analysis_attempt_profile 会
+    -- 校验 `job.policy_hash` 与 Worker 上报的一致，Job 上缺这两个字段就必然 AGENT_IDENTITY_INVALID。
+    capability_policy_snapshot, policy_hash
   ) values (
     v_job, v_batch, v_model, v_snapshot, 'feature_dev',
-    'PROCESSING', v_admin, 2, '2000-01-01 00:00:00+00'
+    'PROCESSING', v_admin, 2, '2000-01-01 00:00:00+00',
+    public.build_v4_capability_policy(v_model),
+    encode(sha256((public.build_v4_capability_policy(v_model))::text::bytea), 'hex')
   );
+  -- policy_version 走默认值（迁移 0027 起是 4）：只有 V4 的 Job 能被
+  -- `claim_next_story_task` 领取，所以这套测试必须按 V4 语义跑。它覆盖的 claim-token
+  -- fencing、唯一提交、重试与 finalize 在 V4 下依然是有效契约，只是提交时多了 root 身份
+  -- 与 tree_digest 的校验 —— 下面 `commit_v4` 负责补齐这些。
+  --
+  -- 这个文件曾经在全新库上跑不过（`supabase db reset` 后复现即可）：0027 把默认值改成 4、
+  -- 并给 save_agent_review_result 加了 root-only 分支，但没有回过头跑这套老测试。
 
   insert into public.analysis_story_task (
     id, job_id, story_id, created_at
@@ -121,6 +133,24 @@ begin
     (v_job, 'kdmanage-frontend', 'feature_dev', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),
     (v_job, 'tmanage-backend', 'feature_dev', 'cccccccccccccccccccccccccccccccccccccccc'),
     (v_job, 'tmanage-frontend', 'feature_dev', 'dddddddddddddddddddddddddddddddddddddddd');
+
+  -- V4 的提交要求数据库里已经注册了 root Agent 节点，并且 p_usage 带上可信身份
+  -- （root_agent_id / root_session_id / tree_digest / session_revision / policy_hash）。
+  -- 这个辅助函数按当前 attempt 的真实状态拼出这份元数据，避免每处提交重复一遍。
+  create or replace function pg_temp.v4_identity(p_task uuid, p_attempt integer)
+  returns jsonb
+  language sql
+  as $fn$
+    select jsonb_build_object(
+      'root_agent_id', 'agent-root-17',
+      'root_session_id', 'session-root-17',
+      'tree_digest', public.analysis_agent_tree_digest(run.id),
+      'session_revision', run.session_revision,
+      'policy_hash', run.policy_hash
+    )
+    from public.analysis_agent_run run
+    where run.task_id = p_task and run.agent_attempt = p_attempt;
+  $fn$;
 
   -- First claim, lease expiry, then same-worker reclaim: the old token must lose.
   set local role service_role;
@@ -168,6 +198,27 @@ begin
   );
 
   set local role service_role;
+  -- V4 的真实顺序：先 record_analysis_attempt_profile 把可信 root 身份与 policy_hash 冻结到
+  -- run 上，再注册 root 节点，最后提交。少了第一步，register_analysis_agent_node 会以
+  -- AGENT_IDENTITY_INVALID 拒绝 —— run 上没有可信锚点时不允许任何 root 注册。
+  perform public.record_analysis_attempt_profile(
+    v_task_1, v_worker, v_token_2, 2,
+    '0.1.5-rc.1',
+    (select job.capability_contract_hash from public.analysis_job job
+      join public.analysis_story_task task on task.job_id = job.id where task.id = v_task_1),
+    'config-hash-17',
+    (select policy_hash from public.analysis_agent_run
+      where task_id = v_task_1 and agent_attempt = 2),
+    'agent-root-17', 'session-root-17',
+    -- 冻结时树里还没有节点，这里存的是空树摘要。提交时校验的是**实时重算**的摘要，
+    -- 不是这个冻结值，所以两者不同是正常的。
+    (select public.analysis_agent_tree_digest(id) from public.analysis_agent_run
+      where task_id = v_task_1 and agent_attempt = 2)
+  );
+  perform public.register_analysis_agent_node(
+    v_task_1, v_worker, v_token_2, 2,
+    'agent-root-17', 'session-root-17', null, 'root-reviewer', 'root', 'tool-policy-root-17'
+  );
   v_commit := public.save_agent_review_result(
     v_task_1,
     v_worker,
@@ -177,7 +228,8 @@ begin
       'verdict', 'IMPLEMENTED', 'confidence', 95, 'summary', 'done'
     ),
     '[]'::jsonb,
-    jsonb_build_object('tool_calls', 3, 'searches_run', 1),
+    jsonb_build_object('tool_calls', 3, 'searches_run', 1)
+      || pg_temp.v4_identity(v_task_1, 2),
     'config-hash-17',
     'agent-review-v1',
     'Model 17 final / model-17'
@@ -255,6 +307,24 @@ begin
   perform pg_temp.assert(v_token_3 <> v_token_2, 'retry claim uses a new token');
 
   set local role service_role;
+  perform public.record_analysis_attempt_profile(
+    v_task_2, v_worker, v_token_3, 2,
+    '0.1.5-rc.1',
+    (select job.capability_contract_hash from public.analysis_job job
+      join public.analysis_story_task task on task.job_id = job.id where task.id = v_task_2),
+    'config-hash-17',
+    (select policy_hash from public.analysis_agent_run
+      where task_id = v_task_2 and agent_attempt = 2),
+    'agent-root-17', 'session-root-17',
+    -- 冻结时树里还没有节点，这里存的是空树摘要。提交时校验的是**实时重算**的摘要，
+    -- 不是这个冻结值，所以两者不同是正常的。
+    (select public.analysis_agent_tree_digest(id) from public.analysis_agent_run
+      where task_id = v_task_2 and agent_attempt = 2)
+  );
+  perform public.register_analysis_agent_node(
+    v_task_2, v_worker, v_token_3, 2,
+    'agent-root-17', 'session-root-17', null, 'root-reviewer', 'root', 'tool-policy-root-17'
+  );
   perform public.save_agent_review_result(
     v_task_2,
     v_worker,
@@ -263,7 +333,8 @@ begin
     jsonb_build_object(
       'verdict', 'PARTIAL', 'confidence', 70, 'summary', 'partial'
     ),
-    '[]'::jsonb
+    '[]'::jsonb,
+    pg_temp.v4_identity(v_task_2, 2)
   );
   reset role;
 

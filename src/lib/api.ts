@@ -3,6 +3,7 @@ import { requireSupabase } from './supabase'
 import type { FieldMapping } from './excel'
 import type {
   AdminUserListItem,
+  AgentRunDetail,
   AiCodeEvidence,
   AiEvidenceInput,
   AiImportRecord,
@@ -28,6 +29,7 @@ import type {
   SourceStoryInput,
   UserProfile,
   UserRole,
+  V4CapabilityPolicy,
 } from '../types'
 
 export interface CreateBatchInput {
@@ -683,4 +685,43 @@ export async function retryAnalysisJob(jobId: string) {
   const client = requireSupabase()
   const { data, error } = await client.rpc('retry_analysis_job', { p_job_id: jobId })
   return unwrap<string>({ data, error })
+}
+
+// ---------------------------------------------------------------------------
+// V4 DeepSeek Harness：Agent 运行详情 / 取消 / 默认能力策略（见方案第 7.10 节）
+//
+// 安全约束：这三个 RPC 只返回安全元数据。get_analysis_agent_run_detail 与
+// request_analysis_attempt_cancel 授权给 authenticated，RPC 内部按批次权限校验
+// （VIEWER 取消会报 'batch management permission required'）；
+// admin_get_v4_capability_policy 仅 ADMIN。前端全程不接触源码正文、Session JSONL、
+// storage locator、API Key、claim/broker token。
+// ---------------------------------------------------------------------------
+
+/** 读取某 story task 最新一次 Agent 运行的安全详情；无运行记录时返回 null。 */
+export async function getAgentRunDetail(taskId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('get_analysis_agent_run_detail', { p_task_id: taskId })
+  if (error) throw new Error(error.message)
+  // RPC 返回 jsonb；无 run 时是 SQL NULL，这里统一成 null 让页面显示空态。
+  return (data ?? null) as AgentRunDetail | null
+}
+
+/**
+ * 请求取消某 story task 正在运行的 Agent 尝试。
+ * 需要批次管理权限；VIEWER 调用会抛出 'batch management permission required'。
+ */
+export async function requestAttemptCancel(taskId: string, reason = 'USER_CANCELLED') {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('request_analysis_attempt_cancel', {
+    p_task_id: taskId,
+    p_reason: reason,
+  })
+  return unwrap<boolean>({ data, error })
+}
+
+/** ADMIN 只读：读取平台统一的默认能力策略（普通启动流程不展示任何开关）。 */
+export async function adminGetV4CapabilityPolicy() {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_get_v4_capability_policy')
+  return unwrap<V4CapabilityPolicy>({ data, error })
 }

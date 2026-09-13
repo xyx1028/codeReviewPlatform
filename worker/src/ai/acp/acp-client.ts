@@ -32,13 +32,33 @@ export interface AcpSessionOptions {
    * 提交工具"恰恰是那种场景下最需要的信息。
    */
   onToolCall?: (toolName: string) => void
+  /** 每一次 permission 判定的观测点，用于审计与诊断。 */
+  onPermissionDecision?: (decision: {
+    toolName: string
+    allowed: boolean
+    outcome: string
+  }) => void
+  /**
+   * 复用一个已存在的 Session 而不是新建。
+   *
+   * V3 每次只 `session/new`，所以 Worker 重启后必然从零开始。给定 sessionId 时改走
+   * reopen/resume，Harness 从持久卷上的 JSONL 恢复历史。
+   */
+  resumeSessionId?: string
 }
 
 const DEFAULT_PERMITTED_TOOLS = ['submit_review_result']
 
-/** Names a permission request may carry for the tool being approved. */
-function permissionSubject(toolCall: { title?: string | null }): string {
-  return toolCall.title ?? ''
+/**
+ * Names a permission request may carry for the tool being approved.
+ *
+ * ACP 的 permission 请求可能带 `toolName`（工具的注册名）或只带 `title`（给人看的标题）。
+ * V3 只看 title，于是"固定五个工具"能对上；V4 的工具面来自角色策略，标题和注册名未必一致，
+ * 所以优先用 `toolName`，title 只作回退。看错字段的后果是静默拒绝一个本该允许的工具，
+ * 而那在 turn 里表现为无来由的 cancelled。
+ */
+function permissionSubject(toolCall: { title?: string | null; toolName?: string | null }): string {
+  return toolCall.toolName ?? toolCall.title ?? ''
 }
 
 export interface PermissionOptionLike {
@@ -120,6 +140,10 @@ export interface AcpTurnObservation {
    * 于是失败完全无法诊断。协议错误必须带出来。
    */
   promptError: string | null
+  /** 本次 turn 使用的 Session id。恢复场景下等于传入的 resumeSessionId。 */
+  sessionId: string
+  /** 是否走了 resume/load 而不是 session/new。 */
+  resumed: boolean
 }
 
 export interface AcpTurnResult extends AcpTurnObservation {
@@ -132,6 +156,10 @@ export interface AcpTurnResult extends AcpTurnObservation {
  * The returned promise settles when the turn stops. Cancellation via `signal`
  * sends `session/cancel` and then closes the session, matching the protocol's
  * requirement that late updates remain acceptable.
+ *
+ * V4 增加了 resume：给定 `resumeSessionId` 时先尝试 `session/resume`（不重放历史）或
+ * `session/load`（重放历史），只有 agent 声明了对应能力才走这条路。声明缺失时不静默降级到
+ * `session/new` —— 那会让 Worker 重启后"看起来恢复了"其实从零开始，比明确失败更糟。
  */
 export async function runSingleAcpTurn(
   options: AcpSessionOptions,
@@ -145,28 +173,68 @@ export async function runSingleAcpTurn(
   // real cancellation, so the decision is made here explicitly.
   const app = client({ name: options.clientName ?? 'code-review-worker' }).onRequest(
     methods.client.session.requestPermission,
-    ({ params }) => ({
-      outcome: decidePermission(
-        permissionSubject(params.toolCall),
-        params.options,
-        permitted,
-      ) as never,
-    }),
+    ({ params }) => {
+      const subject = permissionSubject(params.toolCall)
+      const decision = decidePermission(subject, params.options, permitted)
+      // 每一次判定都上报：默认 deny 的策略下，"为什么这个工具没被调用"是最常见的问题，
+      // 而没有这条记录就只能靠猜。工具名和判定结果都不含源码，可以安全记录。
+      options.onPermissionDecision?.({
+        toolName: subject,
+        allowed: permitted.has(subject),
+        outcome: decision.outcome,
+      })
+      return { outcome: decision as never }
+    },
   )
+
+  // 恢复路径要自己消费 `session/update`：它不走 SDK 的 buildSession，没人替它收通知。
+  // 只在恢复时注册，避免与 builder 内部的通知消费打架。
+  const resumeCollected = { updates: 0, toolNames: [] as string[] }
+  const appWithHandlers =
+    options.resumeSessionId === undefined
+      ? app
+      : app.onNotification(methods.client.session.update, ({ params }) => {
+          const notification = params as {
+            sessionId?: string
+            update?: { sessionUpdate?: string; title?: string; toolName?: string }
+          }
+          if (notification.sessionId !== options.resumeSessionId) return
+          resumeCollected.updates++
+          const update = notification.update ?? {}
+          if (update.sessionUpdate === 'tool_call') {
+            const name = update.toolName ?? update.title
+            if (name) {
+              options.onToolCall?.(name)
+              if (!resumeCollected.toolNames.includes(name)) resumeCollected.toolNames.push(name)
+            }
+          }
+        })
 
   const stream = ndJsonStream(
     Writable.toWeb(options.process.stdin) as WritableStream<Uint8Array>,
     Readable.toWeb(options.process.stdout) as ReadableStream<Uint8Array>,
   )
 
-  return app.connectWith(stream, async (ctx) => {
-    await ctx.request(methods.agent.initialize, {
+  return appWithHandlers.connectWith(stream, async (ctx) => {
+    const initialized = (await ctx.request(methods.agent.initialize, {
       protocolVersion: 1,
       clientCapabilities: {
-        // The agent gets no filesystem and no terminal from this client.
+        // The agent gets no filesystem and no terminal from this client: every
+        // file effect happens inside the agent's own sandboxed workspace.
         fs: { readTextFile: false, writeTextFile: false },
       },
-    })
+    })) as { agentCapabilities?: Record<string, unknown> }
+
+    if (options.resumeSessionId !== undefined) {
+      return runResumedTurn(
+        ctx as unknown as AcpLowLevelContext,
+        options,
+        prompt,
+        signal,
+        initialized.agentCapabilities ?? {},
+        resumeCollected,
+      )
+    }
 
     let builder = ctx.buildSession(options.cwd)
     for (const server of options.mcpServers ?? []) {
@@ -208,6 +276,8 @@ export async function runSingleAcpTurn(
               updates,
               toolNames,
               promptError,
+              sessionId: session.sessionId,
+              resumed: false,
             }
           }
           updates++
@@ -231,4 +301,124 @@ export async function runSingleAcpTurn(
       }
     })
   })
+}
+
+/**
+ * 在一个已存在的 Session 上继续。
+ *
+ * 用低层 `onNotification` + 原始 `session/prompt` 而不是 `buildSession`：builder 只会发
+ * `session/new`，而这里的整个目的就是不新建。
+ */
+async function runResumedTurn(
+  // 低层 ClientContext。这里刻意用结构类型而不是 SDK 的 ClientContext：resume 走的是
+  // 原始方法名，SDK 的重载签名对动态方法名不友好，而这三个能力就是我们全部需要的。
+  ctx: AcpLowLevelContext,
+  options: AcpSessionOptions,
+  prompt: string,
+  signal: AbortSignal,
+  agentCapabilities: Record<string, unknown>,
+  collected: { updates: number; toolNames: string[] },
+): Promise<AcpTurnResult> {
+  const sessionId = options.resumeSessionId!
+  // ACP 的能力约定是**键存在即支持**，值是该能力的选项对象。dsh 实际声明的是
+  // `sessionCapabilities: { close: {}, list: {}, resume: {} }` —— 三个都是空对象。
+  //
+  // 这里曾经写成 `?.resume === true`，于是 `{} === true` 恒为假，平台一直判定"agent 不支持
+  // resume"并抛 SessionResumeUnsupportedError。后果是**每一次 Worker 重启都恢复失败**：
+  // §7.7 的完成标准"重启后可继续同一未提交 Session"从未成立，整套 JSONL 持久卷、checkpoint、
+  // session_revision、fencing 机器从来没有真正恢复过任何会话。实测报错原文：
+  //
+  //   the agent advertises neither session/resume nor session/load
+  //
+  // 判定改为"键存在且不是 false/null"：既接受 `{}`（dsh 的写法），也接受 `true`（布尔写法），
+  // 而显式 `false` 仍然视为不支持。
+  const sessionCapabilities = agentCapabilities.sessionCapabilities as
+    | Record<string, unknown>
+    | undefined
+  const resumeCapability = sessionCapabilities?.resume
+  const supportsResume = resumeCapability !== undefined && resumeCapability !== null && resumeCapability !== false
+  // `loadSession` 在 ACP 规范里是布尔字段，保持严格判定。
+  const supportsLoad = agentCapabilities.loadSession === true
+  if (!supportsResume && !supportsLoad) {
+    // 明确失败，而不是悄悄新建一个 Session。
+    throw new SessionResumeUnsupportedError(
+      'the agent advertises neither session/resume nor session/load; this session cannot be continued',
+    )
+  }
+
+  // `session/update` 的订阅必须发生在 **app 层**、且在 connectWith 之前。
+  //
+  // 这里原本调的是 `ctx.onNotification(...)` —— 而 SDK 的 ClientContext 只有
+  // `buildSession / attachSession / request / notify`，没有 onNotification。恢复路径从来没有
+  // 真实跑过，所以这个 API 不存在的错误一直没被发现：实测报 `ctx.onNotification is not a
+  // function`。正常路径不受影响是因为它走 `buildSession().withSession()`，由 SDK 内部消费通知。
+  //
+  // 收集器由调用方在注册 handler 时创建并传进来，见 runSingleAcpTurn。
+  let stopReason: string | null = null
+  let resolveStop: () => void = () => undefined
+  const stopped = new Promise<void>((resolve) => {
+    resolveStop = resolve
+  })
+
+  const resumeParams = {
+    sessionId,
+    cwd: options.cwd,
+    ...(options.mcpServers ? { mcpServers: options.mcpServers } : {}),
+  }
+  // resume 优先：它不重放历史，因此不会重复触发已经发生过的副作用。
+  await ctx.request(
+    (supportsResume ? methods.agent.session.resume : methods.agent.session.load) as never,
+    resumeParams as never,
+  )
+
+  const onCancel = () => {
+    void ctx.notify(methods.agent.session.cancel as never, { sessionId } as never).catch(() => undefined)
+  }
+  if (signal.aborted) onCancel()
+  signal.addEventListener('abort', onCancel, { once: true })
+
+  let promptError: string | null = null
+  try {
+    const response = (await ctx.request(methods.agent.session.prompt as never, {
+      sessionId,
+      prompt: [{ type: 'text', text: prompt }],
+    } as never)) as { stopReason?: string }
+    stopReason = response.stopReason ?? 'end_turn'
+    resolveStop()
+  } catch (err) {
+    promptError = describeProtocolError(err)
+    stopReason = 'cancelled'
+    resolveStop()
+  } finally {
+    signal.removeEventListener('abort', onCancel)
+    await Promise.race([stopped, Promise.resolve()])
+    await ctx
+      .request(methods.agent.session.close as never, { sessionId } as never)
+      .catch(() => undefined)
+  }
+
+  return {
+    ok: stopReason === 'end_turn',
+    stopReason: stopReason ?? 'cancelled',
+    updates: collected.updates,
+    toolNames: collected.toolNames,
+    promptError,
+    sessionId,
+    resumed: true,
+  }
+}
+
+/** resume 路径需要的最小 ClientContext 能力面。 */
+interface AcpLowLevelContext {
+  request(method: never, params: never): Promise<unknown>
+  notify(method: never, params: never): Promise<unknown>
+}
+
+/** Agent 不支持继续既有 Session。映射到 SESSION_RECOVERY_FAILED。 */
+export class SessionResumeUnsupportedError extends Error {
+  readonly code = 'SESSION_RECOVERY_FAILED'
+  constructor(message: string) {
+    super(message)
+    this.name = 'SessionResumeUnsupportedError'
+  }
 }

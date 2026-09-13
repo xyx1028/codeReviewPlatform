@@ -1,4 +1,4 @@
-# Worker pool for the single DeepSeek Harness ACP review pipeline.
+# Worker pool for the multi-agent DeepSeek Harness ACP review pipeline (V4).
 #
 # Default topology: 4 replicas x 2 story slots each = capacity of 8 concurrent
 # stories. The real ceiling is still the model configuration's max_parallel_tasks.
@@ -17,6 +17,16 @@ services:
       dockerfile: Dockerfile.worker
     image: codereviewplatform-worker:latest
     restart: unless-stopped
+    # 必须有 init 进程（Docker 注入 tini 作为 PID 1）。
+    #
+    # V4 的 Agent 会通过 Sandbox Shell 和 Jobs 启动构建、测试和静态检查，这些进程是 dsh 的
+    # 孙辈。attempt 收敛时 Worker 对整个进程组发 SIGKILL，组内后代随即变成僵尸，等父进程
+    # wait 掉才从进程表消失 —— 而它们的父进程刚好也被同一次信号杀了，于是它们被重新挂到
+    # PID 1 上。没有 init 时 PID 1 就是 Worker 自己，而 libuv 只 wait 它亲手 spawn 的子进程，
+    # 这些继承来的孤儿会永久挂着：进程表被僵尸填满，最终撞上容器的 PID 上限。
+    #
+    # 实测（node:24-bookworm-slim）：不加 init 时组内留下 2 个 state=Z 的进程；加了之后组为空。
+    init: true
     # Permit ACP cancellation and lease release before Docker sends SIGKILL.
     stop_grace_period: 30s
     # No ports are published: the worker is outbound-only.
@@ -29,17 +39,87 @@ services:
       - /bin/sh
       - -c
       - 'export WORKER_ID="worker-$(hostname)"; exec npm run worker:start'
+    environment:
+      # ---- V4 运行目录 ---------------------------------------------------
+      # 与 Dockerfile.worker 的默认值保持一致，显式写出便于运维核对。
+      WORKSPACE_ROOT: /workspace/jobs
+      CODE_CACHE_ROOT: /workspace/cache
+      AGENT_ATTEMPTS_ROOT: /workspace/agent-attempts
+      # Session JSONL 的持久卷根目录。必须落在持久卷上，见下方 volumes 注释。
+      AGENT_SESSION_ROOT: /workspace/agent-sessions
+      # ---- V4 容量与孤儿回收（留空即用 config.ts 默认值）-----------------
+      # Session 卷容量上限（字节），默认 20GiB；超过即按最旧优先回收并告警。
+      # AGENT_SESSION_VOLUME_MAX_BYTES: "21474836480"
+      # 孤儿 Workspace 最大存活时长（毫秒），默认 6h。
+      # ORPHAN_WORKSPACE_MAX_AGE_MS: "21600000"
+      # ---- V4 运维紧急熔断开关（默认全部关闭 / 未设置）-------------------
+      # 这些不是面向用户的功能开关：用户配置仍保持 V4 默认全开语义。仅在事故期间
+      # 由运维置为 "1" 临时收窄某类能力，事故解除后删除该环境变量即恢复默认全开。
+      # 值为空 / "0" / "false" 一律视为未设置。
+      # V4_BREAKER_DISABLE_WEB: "1"          # 关闭 web_search / web_fetch
+      # V4_BREAKER_DISABLE_SHELL_WRITE: "1"  # 关闭 shell，沙箱回退 read-only
+      # V4_BREAKER_DISABLE_SUBAGENTS: "1"    # 关闭 subagent/fork/ralph，深度归零
+      # V4_BREAKER_DISABLE_WORKFLOW: "1"     # 关闭 workflow
     # Hardening.
     security_opt:
       - no-new-privileges:true
+    # ---- 资源上限 -------------------------------------------------------
+    #
+    # 这些不是容量规划参数，而是沙箱边界的一部分。
+    #
+    # policy 里的 sandbox.maxProcessesPerAttempt / maxWorkspaceBytes 是通过 rlimit 施加的
+    # （Worker 用 `sh -c 'ulimit …; exec dsh …'` 启动 Harness，rlimit 由所有后代继承），但
+    # rlimit 覆盖不到 **RSS**：Linux 的 RLIMIT_RSS 早已不生效，`ulimit -v` 会限制虚拟地址
+    # 空间而 Node 需要大量 VA，设了会直接起不来。所以"内存炸弹"这一项只能由容器内存上限
+    # 兜住，没有它，一个 Agent 在 Shell 里跑一条吃内存的构建就能把宿主拖垮。
+    #
+    # pids_limit 是 fork bomb 的**唯一**正确原语，不是"第二道"。曾经想用 `ulimit -u
+    # maxProcessesPerAttempt` 顶上，但 RLIMIT_NPROC 按 **UID 全局计数**而不是按进程树计数，
+    # 而容器默认共享宿主 user namespace —— 同一个 worker UID 的 4 个副本（以及宿主上同号 UID
+    # 的进程）会合并计到一个上限里，结果是正常构建随机报
+    # `fork: Resource temporarily unavailable`。cgroup 按容器计数，才是这里要的语义。
+    #
+    # 数值 = maxProcessesPerAttempt(64) × WORKER_STORY_CONCURRENCY(2) + Worker/init 开销，
+    # 再留一倍余量。调小到低于 64 × slot 数会让正常构建随机失败；压测后按 §15.9 调整。
+    pids_limit: 512
+    mem_limit: 6g
+    memswap_limit: 6g
+    ulimits:
+      # 句柄上限同时约束 Harness 与它起的所有构建进程。
+      nofile:
+        soft: 4096
+        hard: 8192
+      # core dump 可能包含内存里的凭据，一律不产生。
+      core: 0
     read_only: false
     tmpfs:
       - /tmp
     volumes:
-      # Anonymous volumes are allocated per container, so scaled replicas never
-      # share writable cache/profile directories on the same Docker host.
-      - /workspace
+      # Session JSONL 持久卷。**必须是持久 named volume，不能是匿名卷或 tmpfs**：
+      #   - Session JSONL 是 Worker 重启后恢复未提交 Session 的唯一依据；随容器消失
+      #     就等于每次重启都从零开始，"resumeOnWorkerRestart" 这句话不成立。
+      #   - 目录内容带真实源码，Dockerfile 已把它建成 0700 且属于非 root worker 用户；
+      #     宿主机上应对该卷所在磁盘启用静态加密，并遵守 OPERATIONS.md 的保留期。
+      # 多副本共享同一 named volume 是安全的：Session 目录按 task+attempt 派生并由
+      # 双层单写者锁保护（本地 O_EXCL 锁文件 + 数据库 session_revision fencing），
+      # 并发接管会以 SESSION_FENCED 拒绝，不会写出交错的 JSONL。
+      - worker-sessions:/workspace/agent-sessions
+      # Snapshot cache：四仓库精确 Commit 的只读物化。内容按 Commit 寻址，多副本
+      # 共享可复用已取的快照，重启后不必重新拉取。
+      - worker-cache:/workspace/cache
+      # 每 attempt 私有的 DSH_HOME 临时树，attempt 结束即删除。放在 named volume 上
+      # 便于 orphan 检查与滚动重启后回收，目录按 attempt 隔离不会互相干扰。
+      - worker-attempts:/workspace/agent-attempts
+      # Worker instance lock 目录。按 WORKER_ID 命名，每副本唯一。
+      - worker-jobs:/workspace/jobs
     deploy:
       replicas: 4
       restart_policy:
         condition: unless-stopped
+
+volumes:
+  # Session 卷单独声明，强调它是发布/回滚流程里必须提前创建并纳入备份/加密的持久依赖。
+  worker-sessions:
+  worker-cache:
+  worker-attempts:
+  worker-jobs:

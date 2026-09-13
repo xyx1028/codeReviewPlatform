@@ -25,6 +25,7 @@ import { join } from 'node:path'
 import { runSingleAcpTurn } from '../ai/acp/acp-client.js'
 import { startAcpProcess } from '../ai/acp/acp-process-supervisor.js'
 import { materializeAttemptProfile } from '../ai/acp/profile-materializer.js'
+import { V4_DEFAULT_POLICY } from '../ai/policy/v4-capability-policy.js'
 import { DeepSeekHarnessAcpEngine } from '../ai/runtime/deepseek-harness-acp-engine.js'
 import { SnapshotStore } from '../ai/snapshot/snapshot-store.js'
 import type { CommitReviewInput } from '../ai/control/attempt-control-broker.js'
@@ -129,13 +130,23 @@ interface BrokerCall {
   submission: { verdict?: string; evidence?: unknown[] }
 }
 
-/** Attempt broker stand-in: rejects the first submission, accepts the second. */
+/**
+ * Attempt broker stand-in: rejects the first submission, accepts the second.
+ *
+ * V4 起同一个 socket 服务 13 条路由，不再只有提交一条 —— 预算预留、usage 上报和工具审计
+ * 都走它。所以这个替身必须按路由分发：以前"任何请求都按提交处理"会让 usage-reporter 的
+ * 第一次预算预留拿到提交拒绝的响应，从而在第一次模型请求前就把整个 turn 判死。
+ *
+ * `calls` 仍然只记录提交，好让下面的断言继续说明"提交了几次、每次带什么证据"。
+ */
 function startMockBroker(socketPath: string, expectedToken: string): Promise<{
   calls: BrokerCall[]
   unauthorized: () => number
+  routes: () => string[]
   close: () => Promise<void>
 }> {
   const calls: BrokerCall[] = []
+  const routes: string[] = []
   let unauthorized = 0
   const server = createServer((req, res) => {
     const chunks: Buffer[] = []
@@ -147,33 +158,51 @@ function startMockBroker(socketPath: string, expectedToken: string): Promise<{
         res.end(JSON.stringify({ accepted: false, reason: 'unauthorized' }))
         return
       }
+      const route = req.url ?? ''
+      routes.push(route)
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as BrokerCall
-      calls.push(body)
-      res.writeHead(200, { 'content-type': 'application/json' })
-      if (calls.length === 1) {
-        res.end(
-          JSON.stringify({
-            accepted: false,
-            code: 'EVIDENCE_UNVERIFIED',
-            reason:
-              'evidence item 1 references evidenceId "made-up-id", which was never returned by a snapshot tool. Re-read the range and submit the id you were given.',
-          }),
-        )
+      const reply = (payload: unknown): void => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(payload))
+      }
+
+      if (route === '/attempt/reserve-model-request') {
+        // 预算在真实 Broker 里是有限的；这个替身只需要不挡住 turn。
+        reply({ allowed: true, reserved: 1 })
         return
       }
-      res.end(
-        JSON.stringify({
-          accepted: true,
-          runId: 'run-poc-1',
-          committedAt: new Date().toISOString(),
-        }),
-      )
+      if (route === '/attempt/report-usage' || route === '/attempt/tool-audit') {
+        reply({ accepted: true })
+        return
+      }
+      if (route !== '/attempt/submit-review') {
+        // 其余路由（注册子 Agent、Web 出口等）本用例不涉及；明确拒绝比静默接受更诚实。
+        reply({ accepted: false, code: 'BROKER_UNKNOWN_ROUTE', reason: `unused route ${route}` })
+        return
+      }
+
+      calls.push(body)
+      if (calls.length === 1) {
+        reply({
+          accepted: false,
+          code: 'EVIDENCE_UNVERIFIED',
+          reason:
+            'evidence item 1 references evidenceId "made-up-id", which was never returned by a snapshot tool. Re-read the range and submit the id you were given.',
+        })
+        return
+      }
+      reply({ accepted: true, runId: 'run-poc-1', committedAt: new Date().toISOString() })
     })
   })
 
   return new Promise((resolveServer) => {
     server.listen(socketPath, () => {
-      resolveServer({ calls, unauthorized: () => unauthorized, close: () => closeServer(server) })
+      resolveServer({
+        calls,
+        unauthorized: () => unauthorized,
+        routes: () => [...routes],
+        close: () => closeServer(server),
+      })
     })
   })
 }
@@ -269,13 +298,16 @@ describe.skipIf(!ENABLED)('ACP runtime POC (real dsh process)', () => {
           apiKeyEnvVar: 'REVIEW_MODEL_API_KEY',
           requestTimeoutMs: 60000,
         },
-        budgets: {
-          maxTotalRequests: 10,
-          maxLoopRequests: 8,
-          maxRetryRequests: 1,
-          maxCompactionRequests: 1,
+        // V4：预算随 policy 一起冻结，attempt patch 不再单独接收 budgets。根身份由 Worker 生成；
+        // cwd 是受控 Workspace，sessionRoot 在持久卷上（与 attempt 目录分开，才能恢复）。
+        policy: V4_DEFAULT_POLICY,
+        identity: {
+          rootAgentId: 'root-poc',
+          rootSessionId: 'session-poc',
         },
-        broker: { socketPath, token },
+        cwd,
+        sessionRoot: mkdtempSync(join(tmpdir(), 'acp-sess-')),
+        broker: { socketPath },
       })
 
       const child = startAcpProcess({
@@ -285,13 +317,17 @@ describe.skipIf(!ENABLED)('ACP runtime POC (real dsh process)', () => {
         cwd,
         apiKeyEnvVar: 'REVIEW_MODEL_API_KEY',
         apiKey: 'poc-not-a-real-key',
+        // 凭据经环境变量下传，不写进 attempt patch 文件。
+        brokerToken: token,
+        rootCapability: 'root-cap-poc',
         killGraceMs: 3000,
       })
 
       const controller = new AbortController()
       try {
         const turn = await runSingleAcpTurn(
-          { process: child, cwd },
+          // V4：权限面来自角色策略。root 的工具集由 profile 解析出来，不再是固定五个。
+          { process: child, cwd, permittedTools: [...profile.rootTools] },
           'Review story PRJ-001 and submit the result.',
           controller.signal,
         )
@@ -314,8 +350,13 @@ describe.skipIf(!ENABLED)('ACP runtime POC (real dsh process)', () => {
         // Two model requests: the first turn plus the correction turn.
         expect(model.requestCount()).toBeGreaterThanOrEqual(2)
 
-        // Nothing was persisted: tool results carry source code.
+        // V4 把 Session JSONL 写在持久卷上（恢复的前提），但 DSH_HOME 里仍然不应当出现
+        // 会话日志：attempt 目录会被清理，任何落在那里的会话内容都会随之丢失，
+        // 而"能恢复"这件事就不成立了。
         expect(findSessionArtifacts(profile.dshHome)).toEqual([])
+
+        // 预算预留确实发生在模型请求之前：这是 V4 用量计数为真值的前提。
+        expect(broker.routes()).toContain('/attempt/reserve-model-request')
       } finally {
         controller.abort()
         const exit = await child.terminate()
@@ -361,6 +402,169 @@ async function buildSnapshotRepo(): Promise<{ gitDir: string; commitSha: string 
 }
 
 const EVIDENCE_ID_PATTERN = /ev_[0-9a-f-]{36}/
+
+describe.skipIf(!ENABLED)('resolved tool inventory contract (real dsh process)', () => {
+  it(
+    'offers the model exactly the tool surface the V4 contract prescribes for the root',
+    async () => {
+      const cwd = mkdtempSync(join(tmpdir(), 'inv-cwd-'))
+      const attemptsRoot = mkdtempSync(join(tmpdir(), 'inv-att-'))
+      const sessionRoot = mkdtempSync(join(tmpdir(), 'inv-sess-'))
+      const socketDir = mkdtempSync(join(tmpdir(), 'inv-sock-'))
+      const socketPath = join(socketDir, 's.sock')
+
+      // 这个用例是整套 contract 机制的兜底：单测比对的是我们自己写下的期望，只有真实
+      // 进程能回答"模型实际看到了哪些工具"。Harness 升级悄悄改掉一个工具名时，只有这里
+      // 会失败 —— 而失败正是我们想要的，因为它意味着 attempt 会 fail closed。
+      const inventory = await captureModelToolInventory({
+        cwd,
+        attemptsRoot,
+        sessionRoot,
+        socketPath,
+      })
+
+      const expected = [...inventory.expectedRootTools].sort()
+      expect(inventory.resolved).not.toBeNull()
+      expect(inventory.resolved!.sort()).toEqual(expected)
+
+      // 全能力确实到达了模型，而不只是"契约里写着开启"。
+      for (const tool of [
+        'bash',
+        'skill',
+        'todo_write',
+        'create_goal',
+        'ralph',
+        'subagent',
+        'subagent_fork',
+        'workflow',
+        'job_list',
+        'read',
+        'write',
+        'edit',
+        'grep',
+        'glob',
+        'web_search',
+        'web_fetch',
+        'submit_review_result',
+      ]) {
+        expect(inventory.resolved, `${tool} must reach the model`).toContain(tool)
+      }
+
+      rmSync(cwd, { recursive: true, force: true })
+      rmSync(attemptsRoot, { recursive: true, force: true })
+      rmSync(sessionRoot, { recursive: true, force: true })
+      rmSync(socketDir, { recursive: true, force: true })
+    },
+    180000,
+  )
+})
+
+/**
+ * 启动一个真实 dsh 进程，抓取它发给模型的第一个请求里声明的工具面。
+ *
+ * 工具面只在模型请求里出现，所以必须真的走到一次 `session/prompt`。Broker 替身按路由应答，
+ * 模型替身立刻结束这一轮，于是整个过程是秒级的。
+ */
+async function captureModelToolInventory(input: {
+  cwd: string
+  attemptsRoot: string
+  sessionRoot: string
+  socketPath: string
+}): Promise<{ resolved: string[] | null; expectedRootTools: readonly string[] }> {
+  let resolved: string[] | null = null
+  const model = createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (c: Buffer) => chunks.push(c))
+    req.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as {
+        tools?: Array<{ function?: { name?: string }; name?: string }>
+      }
+      if (resolved === null && Array.isArray(body.tools)) {
+        resolved = body.tools
+          .map((tool) => tool.function?.name ?? tool.name)
+          .filter((name): name is string => typeof name === 'string')
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(
+        `data: ${JSON.stringify({
+          id: '1',
+          object: 'chat.completion.chunk',
+          choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }],
+        })}\n\n`,
+      )
+      res.write('data: [DONE]\n\n')
+      res.end()
+    })
+  })
+  await new Promise<void>((r) => model.listen(0, '127.0.0.1', () => r()))
+  const port = (model.address() as { port: number }).port
+
+  const broker = createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (c: Buffer) => chunks.push(c))
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify(
+          req.url === '/attempt/reserve-model-request' ? { allowed: true } : { accepted: true },
+        ),
+      )
+    })
+  })
+  await new Promise<void>((r) => broker.listen(input.socketPath, () => r()))
+
+  const profile = materializeAttemptProfile({
+    taskId: 'inventory-task',
+    agentAttempt: 1,
+    attemptsRoot: input.attemptsRoot,
+    route: {
+      providerId: 'review-route',
+      displayName: 'Inventory Route',
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      modelName: 'inventory-model',
+      contextWindow: 131072,
+      maxTokens: 4096,
+      apiKeyEnvVar: 'REVIEW_MODEL_API_KEY',
+      requestTimeoutMs: 30000,
+    },
+    policy: V4_DEFAULT_POLICY,
+    identity: {
+      rootAgentId: 'root-inv',
+      rootSessionId: 'session-inv',
+    },
+    cwd: input.cwd,
+    sessionRoot: input.sessionRoot,
+    broker: { socketPath: input.socketPath },
+    repositories: ['kdmanage-backend'],
+  })
+
+  const child = startAcpProcess({
+    dshHome: profile.dshHome,
+    profileName: profile.profileName,
+    patchPath: profile.patchPath,
+    cwd: input.cwd,
+    apiKeyEnvVar: 'REVIEW_MODEL_API_KEY',
+    apiKey: 'inventory-not-a-real-key',
+    brokerToken: 'inv-token',
+    rootCapability: 'cap-inv',
+    killGraceMs: 3000,
+  })
+
+  try {
+    const turn = await runSingleAcpTurn(
+      { process: child, cwd: input.cwd, permittedTools: [...profile.rootTools] },
+      'Say ok.',
+      new AbortController().signal,
+    )
+    expect(turn.stopReason, `stderr: ${child.stderr()}`).toBe('end_turn')
+    return { resolved, expectedRootTools: profile.rootTools }
+  } finally {
+    await child.terminate()
+    await new Promise<void>((r) => broker.close(() => r()))
+    await new Promise<void>((r) => model.close(() => r()))
+    profile.cleanup()
+  }
+}
 
 describe.skipIf(!ENABLED)('DeepSeekHarnessAcpEngine (real dsh process, real snapshot)', () => {
   it(
@@ -429,15 +633,16 @@ describe.skipIf(!ENABLED)('DeepSeekHarnessAcpEngine (real dsh process, real snap
           apiKeyEnvVar: 'REVIEW_MODEL_API_KEY',
           requestTimeoutMs: 60000,
         },
-        budgets: {
-          maxTotalRequests: 20,
-          maxLoopRequests: 16,
-          maxRetryRequests: 2,
-          maxCompactionRequests: 2,
-        },
+        // V4：数值上限来自冻结的 policy。引擎还需要 Session 持久卷、workerId、要屏蔽的基础设施
+        // 地址，以及不可从 Workspace 触及的平台目录。
+        policy: V4_DEFAULT_POLICY,
         coveragePolicy: { requiredRepositories: [repository], minQueriesPerRepository: 1 },
         apiKey: 'engine-not-a-real-key',
         attemptsRoot,
+        sessionRoot: mkdtempSync(join(tmpdir(), 'acp-eng-sess-')),
+        workerId: 'w-poc',
+        infrastructure: {},
+        forbiddenRoots: [],
         logger: new Logger({ sink: () => {}, minLevel: 'error' }),
         isLeaseValid: () => true,
         commitReview: async (input) => {

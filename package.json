@@ -5,15 +5,17 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
-    "lint": "oxlint src worker supabase",
+    "build": "npm run harness:manifest:check && tsc -b && vite build",
+    "lint": "oxlint src worker supabase scripts",
     "preview": "vite preview",
     "worker:dev": "tsx worker/src/index.ts",
-    "worker:build": "tsc -p tsconfig.worker.json",
+    "worker:build": "npm run harness:manifest:check && tsc -p tsconfig.worker.json",
     "worker:typecheck": "tsc -p tsconfig.worker.test.json",
     "worker:start": "node dist-worker/index.js",
     "worker:check-connectivity": "node dist-worker/connectivity-check.js",
-    "test:worker": "vitest run worker"
+    "harness:manifest:check": "node scripts/v4-harness-manifest.mjs check",
+    "harness:manifest:new-migration": "node scripts/v4-harness-manifest.mjs generate-migration",
+    "test:worker": "npm run harness:manifest:check && vitest run worker"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",

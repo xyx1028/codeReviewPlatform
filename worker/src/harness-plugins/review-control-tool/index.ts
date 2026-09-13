@@ -19,7 +19,9 @@
 import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { brokerPost, BrokerChannelError } from '../shared/broker-client.js'
+import { resolveCallerIdentity } from '../shared/agent-identity.js'
+import { brokerPost, BrokerChannelError, withIdentity } from '../shared/broker-client.js'
+import { BROKER_TOKEN_ENV, readCredentialFromEnv } from '../shared/credential-env.js'
 
 export const name = 'review-control-tool'
 
@@ -27,7 +29,6 @@ export const inject = ['tools']
 
 export interface ReviewControlConfig {
   socketPath: string
-  token: string
   taskId: string
   agentAttempt: number
   requestTimeoutMs?: number
@@ -35,7 +36,6 @@ export interface ReviewControlConfig {
 
 export const Config: z<ReviewControlConfig> = z.object({
   socketPath: z.string().required(),
-  token: z.string().required(),
   taskId: z.string().required(),
   agentAttempt: z.number().required(),
   requestTimeoutMs: z.number(),
@@ -125,20 +125,36 @@ export function apply(ctx: Context, config: ReviewControlConfig): void {
       async execute(args, exec) {
         exec.signal.throwIfAborted()
 
+        // 第一层 root-only：工具本身要求出示身份。子 Agent 即使知道工具名，也只能出示
+        // 自己的 capability，而它不含 submitReview 能力，Broker 会拒。
+        // 失败带原因往上走：提交路径上"身份为什么解析不出来"是必须留痕的。
+        const identity = await resolveCallerIdentity(exec.agent?.id, 'this submission')
+        if (!identity) {
+          throw new Error(
+            'this submission has no verifiable agent identity and cannot be committed',
+          )
+        }
+
         let response
         try {
           response = await brokerPost<SubmitResponse>(
             {
               socketPath: config.socketPath,
-              token: config.token,
+              token: readCredentialFromEnv(BROKER_TOKEN_ENV),
               timeoutMs: config.requestTimeoutMs ?? 30000,
             },
             '/attempt/submit-review',
-            {
-              taskId: config.taskId,
-              agentAttempt: config.agentAttempt,
-              submission: args,
-            },
+            withIdentity(
+              { taskId: config.taskId, agentAttempt: config.agentAttempt },
+              {
+                agentCapability: identity.agentCapability,
+                agentId: identity.agentId,
+                sessionId: identity.sessionId,
+                toolCallId: String(exec.callId),
+                toolName: 'submit_review_result',
+              },
+              { submission: args },
+            ),
           )
         } catch (err) {
           // Transport/lease failures are not model-correctable: surface the

@@ -89,6 +89,8 @@ import { hashFile } from './lib/hash'
 import { aiVerdictLabels, aiVerdictOptions, analysisErrorCodeMeta, analysisJobStatusLabels, batchStatusLabels, humanReviewLabels, humanReviewOptions, storyTaskStatusLabels } from './lib/labels'
 import { aiFillPrompt } from './lib/prompt'
 import { WorkerManagementPage } from './pages/WorkerManagementPage'
+import { AgentRunDetailPage } from './pages/AgentRunDetailPage'
+import { HarnessPolicyPage } from './pages/HarnessPolicyPage'
 import { ProfilePage } from './pages/ProfilePage'
 import { supabaseConfigured } from './lib/supabase'
 import type {
@@ -365,13 +367,15 @@ function Shell({ session }: { session: Session }) {
       ? '/users'
       : location.pathname.startsWith('/workers')
         ? '/workers'
-        : location.pathname.startsWith('/models')
-          ? '/models'
-          : location.pathname.startsWith('/model-operation-log')
-            ? '/model-operation-log'
-            : location.pathname.startsWith('/operation-log')
-              ? '/operation-log'
-              : '/batches'
+        : location.pathname.startsWith('/harness-policy')
+          ? '/harness-policy'
+          : location.pathname.startsWith('/models')
+            ? '/models'
+            : location.pathname.startsWith('/model-operation-log')
+              ? '/model-operation-log'
+              : location.pathname.startsWith('/operation-log')
+                ? '/operation-log'
+                : '/batches'
   const menuItems = [
     { key: '/batches', label: <Link to="/batches">代码评审</Link> },
     {
@@ -384,6 +388,7 @@ function Shell({ session }: { session: Session }) {
     },
     { key: '/profile', label: <Link to="/profile">个人中心</Link> },
     ...(isAdmin ? [{ key: '/workers', label: <Link to="/workers">后台任务监控</Link> }] : []),
+    ...(isAdmin ? [{ key: '/harness-policy', label: <Link to="/harness-policy">默认能力策略</Link> }] : []),
     ...(isAdmin ? [{ key: '/models', label: <Link to="/models">模型管理</Link> }] : []),
     ...(isAdmin ? [{ key: '/users', label: <Link to="/users">用户管理</Link> }] : []),
   ]
@@ -399,6 +404,7 @@ function Shell({ session }: { session: Session }) {
           </div>
         </div>
         <Space>
+          <Text className="header-version">版本 V1.4</Text>
           <Tag color={profileQuery.data?.role === 'ADMIN' ? 'green' : 'blue'}>{profileQuery.data?.role ?? '未配置角色'}</Tag>
           {role === 'REVIEWER' ? (
             <Button size="small" onClick={() => claimAdminMutation.mutate()} loading={claimAdminMutation.isPending}>
@@ -435,6 +441,7 @@ function Shell({ session }: { session: Session }) {
               )}
             />
             <Route path="/workers" element={<WorkerManagementPage isAdmin={isAdmin} />} />
+            <Route path="/harness-policy" element={<HarnessPolicyPage isAdmin={isAdmin} />} />
             <Route path="/models" element={<ModelConfigPage isAdmin={isAdmin} />} />
             <Route path="/users" element={<AdminUsersPage isAdmin={isAdmin} />} />
             <Route path="/batches/:batchId/*" element={<BatchPage canManageBatch={canManageBatch} />} />
@@ -986,6 +993,8 @@ function BatchPage({ canManageBatch }: { canManageBatch: (batch: ReviewBatch) =>
         <Route path="ai-result" element={<AiResultPage batchId={batchId} canManage={canManage} />} />
         <Route path="reviews" element={<ReviewListPage batchId={batchId} />} />
         <Route path="reviews/:storyId" element={<ReviewDetailPage batchId={batchId} canManage={canManage} />} />
+        {/* Agent 运行详情：VIEWER 也能进入只读查看，取消按钮由 canManage 控制。 */}
+        <Route path="agent-runs/:taskId" element={<AgentRunDetailPage canManage={canManage} />} />
       </Routes>
     </Space>
   )
@@ -1479,6 +1488,37 @@ function AutoAnalysisSection({
               待准备仓库：{REQUIRED_REPOSITORIES.filter((name) => !snapshots.some((s) => s.repository_name === name)).join('、')}
             </Text>
           ) : null}
+
+          {/* 逐需求任务列表：每行提供进入 Agent 运行详情的入口（VIEWER 也可查看，只读）。 */}
+          <Divider titlePlacement="left" plain>逐需求 Agent 任务</Divider>
+          <Table<AnalysisStoryTaskWithStory>
+            rowKey="id"
+            size="small"
+            pagination={false}
+            loading={storyTasksQuery.isLoading}
+            locale={{ emptyText: '逐需求任务准备中' }}
+            dataSource={storyTasks}
+            columns={[
+              { title: '需求', render: (_value, task) => taskStoryLabel(task) },
+              {
+                title: 'Agent 状态',
+                dataIndex: 'agent_status',
+                width: 120,
+                render: (status: AnalysisStoryTaskWithStory['agent_status']) => (
+                  <Tag color={status === 'SUCCEEDED' ? 'green' : status === 'FAILED' ? 'red' : status === 'RUNNING' ? 'processing' : 'default'}>
+                    {storyTaskStatusLabels[status] ?? status}
+                  </Tag>
+                ),
+              },
+              {
+                title: '操作',
+                width: 120,
+                render: (_value, task) => (
+                  <Link to={`/batches/${batch.id}/agent-runs/${task.id}`}>运行详情</Link>
+                ),
+              },
+            ]}
+          />
 
           {/* 失败与重试 */}
           {job.status === 'FAILED' ? (

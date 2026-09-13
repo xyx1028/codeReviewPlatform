@@ -1,6 +1,6 @@
 # supabase/tests
 
-数据库最终态回归测试（纯 SQL，不依赖 pgTAP）。这些脚本面向按顺序应用迁移 `0001..0023` 后的 schema，而不是各迁移刚落地时的历史中间态。当前测试文件重点覆盖 `0010`、`0017..0020` 引入并由后续迁移保留的最终契约；`0021..0023` 必须先正常应用。
+数据库最终态回归测试（纯 SQL，不依赖 pgTAP）。这些脚本面向按顺序应用迁移 `0001..0028` 后的 schema，而不是各迁移刚落地时的历史中间态。当前测试文件重点覆盖 `0010`、`0017..0020` 引入并由后续迁移保留的最终契约，以及 `0027` 的 V4 全能力默认开启契约；`0021..0028` 必须先正常应用。
 
 ## 测试文件
 
@@ -9,6 +9,10 @@
 - `0018_execution_engine_admin_actor_test.sql`：删除执行方式切换入口后，`admin_get_model_secret_id` 的显式 actor、无 JWT service-role 调用和角色权限。
 - `0019_single_harness_execution_test.sql`：唯一无版本 Worker RPC；旧固定阶段、带版本后缀 RPC 和引擎协商入口不存在；新 Job 固定 ACP、历史 insert/retry fencing、历史来源字段与 Worker overview 三阶段。
 - `0020_remove_model_provider_test.sql`：最终模型表无 provider/engine/prompt，provider-free create/update 签名、显式 actor 权限、快照字段和默认请求预算 `120`。
+- `0028_tree_digest_excludes_status.sql` 无独立测试文件：它只替换 `analysis_agent_tree_digest`，
+  相关契约（摘要与节点状态无关、且与 TypeScript 侧逐字一致）在
+  `0027_v4_harness_all_capabilities_test.sql` 里断言。
+- `0027_v4_harness_all_capabilities_test.sql`：V4 全能力默认开启契约——`policy_version = 4` 任务领取、能力 policy 默认全开、Agent Tree 新表（`analysis_agent_node`/`analysis_tool_audit`/`analysis_permission_decision`/`analysis_session_checkpoint`/`analysis_artifact`）的约束与 RLS、唯一提交权与 Evidence origin 约束、Session checkpoint 只存 locator/hash 不存原文。
 
 测试文件名沿用对应迁移编号，属于迁移历史标识，不表示当前存在多种执行方式。
 
@@ -30,7 +34,7 @@
 supabase db reset --no-seed
 ```
 
-预期迁移从 `0001` 顺序执行到 `0023`。不要对 linked/远端项目执行 reset、push 或测试脚本，也不要为了测试停止本地 Supabase。
+预期迁移从 `0001` 顺序执行到 `0028`。不要对 linked/远端项目执行 reset、push 或测试脚本，也不要为了测试停止本地 Supabase。
 
 ### 方式一：宿主机 `psql`
 
@@ -42,7 +46,8 @@ for test in \
   supabase/tests/0017_agent_execution_engine_test.sql \
   supabase/tests/0018_execution_engine_admin_actor_test.sql \
   supabase/tests/0019_single_harness_execution_test.sql \
-  supabase/tests/0020_remove_model_provider_test.sql
+  supabase/tests/0020_remove_model_provider_test.sql \
+  supabase/tests/0027_v4_harness_all_capabilities_test.sql
 do
   psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$test" || exit 1
 done
@@ -60,7 +65,8 @@ for test in \
   supabase/tests/0017_agent_execution_engine_test.sql \
   supabase/tests/0018_execution_engine_admin_actor_test.sql \
   supabase/tests/0019_single_harness_execution_test.sql \
-  supabase/tests/0020_remove_model_provider_test.sql
+  supabase/tests/0020_remove_model_provider_test.sql \
+  supabase/tests/0027_v4_harness_all_capabilities_test.sql
 do
   docker exec -i supabase_db_codeReviewPlatform \
     psql -v ON_ERROR_STOP=1 -U postgres -d postgres < "$test" || exit 1
@@ -76,3 +82,4 @@ done
 - `ALL_EXECUTION_ENGINE_ACTOR_TESTS_PASSED`
 - `ALL_SINGLE_HARNESS_EXECUTION_TESTS_PASSED`
 - `ALL_REMOVE_MODEL_PROVIDER_TESTS_PASSED`
+- `ALL_V4_HARNESS_CAPABILITY_TESTS_PASSED`

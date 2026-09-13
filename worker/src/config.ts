@@ -23,6 +23,19 @@ export interface WorkerConfig {
   workerStoryConcurrency: number
   /** Per-attempt Harness profile trees live here. */
   agentAttemptsRoot: string
+  /**
+   * Session JSONL 的持久卷根目录。
+   *
+   * 必须与 attempt 临时目录分开：attempt 结束会删掉自己的树，而恢复恰恰需要 Session 活过
+   * 那次删除。放在同一个目录下等于"支持恢复"这句话不成立。
+   */
+  sessionRoot: string
+  /** 卷级 Session 回收的保留期（天）。可由 AGENT_SESSION_RETENTION_DAYS 覆盖。 */
+  sessionRetentionDays: number
+  /** Session 卷的容量上限，超过即按最旧优先回收并告警。 */
+  sessionVolumeMaxBytes: number
+  /** 孤儿 Workspace 的最大存活时长。 */
+  orphanWorkspaceMaxAgeMs: number
 }
 
 export class ConfigError extends Error {
@@ -149,5 +162,25 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     heartbeatIntervalMs,
     workerStoryConcurrency,
     agentAttemptsRoot: optStr(env, 'AGENT_ATTEMPTS_ROOT', '/workspace/agent-attempts')!,
+    sessionRoot: optStr(env, 'AGENT_SESSION_ROOT', '/workspace/agent-sessions')!,
+    sessionVolumeMaxBytes: intInRange(
+      env,
+      'AGENT_SESSION_VOLUME_MAX_BYTES',
+      // 20 GiB。Session 日志带源码，容量必须有上限，否则一次任务洪峰就能填满卷，
+      // 而卷满会让所有在跑的 attempt 一起失败。
+      20 * 1024 * 1024 * 1024,
+      64 * 1024 * 1024,
+      4 * 1024 * 1024 * 1024 * 1024,
+    ),
+    // 卷级回收的保留期。默认与 §4 policy 的 session.retentionDays 一致，但必须可运维覆盖：
+    // 回收是跨所有 Job 的卷级动作，不能由某一个 Job 的冻结 policy 决定。
+    sessionRetentionDays: intInRange(env, 'AGENT_SESSION_RETENTION_DAYS', 7, 1, 365),
+    orphanWorkspaceMaxAgeMs: intInRange(
+      env,
+      'ORPHAN_WORKSPACE_MAX_AGE_MS',
+      6 * 60 * 60 * 1000,
+      60 * 1000,
+      7 * 24 * 60 * 60 * 1000,
+    ),
   }
 }

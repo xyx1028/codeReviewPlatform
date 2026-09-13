@@ -16,7 +16,9 @@ deepseekharness
 !.env.example
 src
 public
-supabase
+supabase/*
+!supabase/migrations/
+!supabase/migrations/*.sql
 代码评审平台
 coverage
 *.local

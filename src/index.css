@@ -198,8 +198,14 @@ a {
 }
 
 .subtitle,
-.header-email {
+.header-email,
+.header-version {
   color: rgba(255, 255, 255, 0.72);
+}
+
+.header-version {
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .subtitle {

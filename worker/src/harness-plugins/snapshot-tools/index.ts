@@ -16,7 +16,9 @@
 import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { brokerPost, BrokerChannelError } from '../shared/broker-client.js'
+import { resolveCallerIdentity } from '../shared/agent-identity.js'
+import { brokerPost, BrokerChannelError, withIdentity } from '../shared/broker-client.js'
+import { BROKER_TOKEN_ENV, readCredentialFromEnv } from '../shared/credential-env.js'
 
 export const name = 'snapshot-tools'
 
@@ -24,7 +26,6 @@ export const inject = ['tools']
 
 export interface SnapshotToolsConfig {
   socketPath: string
-  token: string
   taskId: string
   agentAttempt: number
   requestTimeoutMs?: number
@@ -34,7 +35,6 @@ export interface SnapshotToolsConfig {
 
 export const Config: z<SnapshotToolsConfig> = z.object({
   socketPath: z.string().required(),
-  token: z.string().required(),
   taskId: z.string().required(),
   agentAttempt: z.number().required(),
   requestTimeoutMs: z.number(),
@@ -53,18 +53,45 @@ export function apply(ctx: Context, config: SnapshotToolsConfig): void {
       ? ` Allowed repositories: ${config.repositories.join(', ')}.`
       : ''
 
-  /** One broker round trip, with model-correctable failures thrown as errors. */
-  async function call<T>(route: string, payload: Record<string, unknown>): Promise<T> {
+  /**
+   * One broker round trip, with model-correctable failures thrown as errors.
+   *
+   * V4 起每次调用都带调用者身份：Broker 用 capability token 判定这个 Agent 是否有
+   * snapshotRead 能力，并把读取到的范围归属到它名下（root 汇总时才能证明证据的生产者
+   * 属于当前 Agent Tree）。
+   */
+  async function call<T>(
+    route: string,
+    payload: Record<string, unknown>,
+    context: { harnessAgentId: string | undefined; toolName: string; toolCallId: string },
+  ): Promise<T> {
+    // 失败带原因往上走，不再吞掉：见 resolveCallerIdentity 的说明。
+    const identity = await resolveCallerIdentity(context.harnessAgentId, 'this snapshot call')
+    if (!identity) {
+      throw new Error(
+        'this call has no verifiable agent identity; the snapshot service refused it',
+      )
+    }
     let response
     try {
       response = await brokerPost<T & BrokerRejection>(
         {
           socketPath: config.socketPath,
-          token: config.token,
+          token: readCredentialFromEnv(BROKER_TOKEN_ENV),
           timeoutMs: config.requestTimeoutMs ?? 30000,
         },
         route,
-        { ...payload, taskId: config.taskId, agentAttempt: config.agentAttempt },
+        withIdentity(
+          { taskId: config.taskId, agentAttempt: config.agentAttempt },
+          {
+            agentCapability: identity.agentCapability,
+            agentId: identity.agentId,
+            sessionId: identity.sessionId,
+            toolCallId: context.toolCallId,
+            toolName: context.toolName,
+          },
+          payload,
+        ),
       )
     } catch (err) {
       const code = err instanceof BrokerChannelError ? err.code : 'BROKER_UNAVAILABLE'
@@ -140,7 +167,11 @@ export function apply(ctx: Context, config: SnapshotToolsConfig): void {
       },
       async execute(args, exec) {
         exec.signal.throwIfAborted()
-        return call('/attempt/search-code', args as Record<string, unknown>)
+        return call('/attempt/search-code', args as Record<string, unknown>, {
+          harnessAgentId: exec.agent?.id,
+          toolName: 'search_snapshot_code',
+          toolCallId: String(exec.callId),
+        })
       },
       presentCall: (args) => ({
         card: 'generic',
@@ -186,7 +217,11 @@ export function apply(ctx: Context, config: SnapshotToolsConfig): void {
       },
       async execute(args, exec) {
         exec.signal.throwIfAborted()
-        return call('/attempt/find-files', args as Record<string, unknown>)
+        return call('/attempt/find-files', args as Record<string, unknown>, {
+          harnessAgentId: exec.agent?.id,
+          toolName: 'find_snapshot_files',
+          toolCallId: String(exec.callId),
+        })
       },
       presentCall: (args) => ({
         card: 'generic',
@@ -246,7 +281,11 @@ export function apply(ctx: Context, config: SnapshotToolsConfig): void {
       },
       async execute(args, exec) {
         exec.signal.throwIfAborted()
-        return call('/attempt/read-code', args as Record<string, unknown>)
+        return call('/attempt/read-code', args as Record<string, unknown>, {
+          harnessAgentId: exec.agent?.id,
+          toolName: 'read_snapshot_code',
+          toolCallId: String(exec.callId),
+        })
       },
       presentCall: (args) => ({
         card: 'generic',
@@ -310,7 +349,11 @@ export function apply(ctx: Context, config: SnapshotToolsConfig): void {
       },
       async execute(args, exec) {
         exec.signal.throwIfAborted()
-        return call('/attempt/list-commits', args as Record<string, unknown>)
+        return call('/attempt/list-commits', args as Record<string, unknown>, {
+          harnessAgentId: exec.agent?.id,
+          toolName: 'list_snapshot_commits',
+          toolCallId: String(exec.callId),
+        })
       },
       presentCall: (args) => ({
         card: 'generic',

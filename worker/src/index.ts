@@ -9,9 +9,17 @@
 
 import { ACP_PROFILE_NAME } from './ai/acp/profile-materializer.js'
 import type { CommitReviewInput } from './ai/control/attempt-control-broker.js'
+import type { AttemptEndReason } from './ai/control/attempt-tree-controller.js'
+import {
+  contractHash,
+  loadCapabilityContract,
+  V4_POLICY_VERSION,
+} from './ai/policy/v4-capability-policy.js'
 import { AGENT_REVIEW_PROMPT_VERSION } from './ai/prompts/agent-review-v1.js'
 import type { ReviewRunner } from './ai/runtime/contracts.js'
 import { buildDeepSeekHarnessReview } from './ai/runtime/factory.js'
+import { enforceSessionRetention } from './ai/session/session-retention.js'
+import { cleanOrphanedOverlays } from './ai/workspace/overlay-cleaner.js'
 import { loadConfig, type WorkerConfig } from './config.js'
 import { SlotPool } from './coordination/concurrency.js'
 import { Heartbeat } from './coordination/heartbeat.js'
@@ -104,19 +112,51 @@ export async function runStoryTask(
       })
     }
   }
+  // 取消状态与租约在同一次心跳往返里拿到。分成两次轮询的代价是"用户点了取消，
+  // Agent Tree 还在跑一整个周期"，那在多 Agent 下意味着继续烧预算。
+  let cancelRequested = false
+  let leaseStarted = false
   const lease = new Heartbeat({
     taskId: task.id,
     workerId: config.workerId,
     intervalMs: config.heartbeatIntervalMs,
-    send: (taskId, workerId) =>
-      jobsDb.heartbeatStoryTask({
+    send: async (taskId, workerId) => {
+      const state = await jobsDb.heartbeatAttempt({
         taskId,
         workerId,
         claimToken: task.claim_token,
         leaseSeconds: config.storyTaskLeaseSeconds,
-      }),
+      })
+      if (state.cancelRequested && !cancelRequested) {
+        cancelRequested = true
+        log.info('attempt_cancel_requested', {
+          event: 'attempt_cancel_requested',
+          cancel_reason: state.cancelReason,
+        })
+        // 立即中止：engine 的 finally 会走完整的 child-first 收敛。
+        attempt.abort()
+      }
+      return state.leaseHeld
+    },
     logger: log,
   })
+
+  /**
+   * 本次收敛的真实原因。
+   *
+   * 三条路径都 abort 同一个 signal，但运维含义不同：用户取消是产品行为，Lease 丢失说明
+   * 任务已被别的 Worker 接管，Worker 关停是滚动重启。§7.8.6 要求把它们分开记，否则
+   * cancel_reason 一律显示 USER_CANCELLED，事故复盘时无从判断到底发生了什么。
+   *
+   * 优先级：显式取消 > 租约丢失 > 关停。用户先点了取消、随后租约才过期，真正的原因仍是
+   * 用户取消。
+   */
+  const attemptEndReason = (): AttemptEndReason => {
+    if (cancelRequested) return 'USER_CANCELLED'
+    if (leaseStarted && !lease.leaseHeld()) return 'LEASE_LOST'
+    if (options.signal?.aborted) return 'WORKER_SHUTDOWN'
+    return 'USER_CANCELLED'
+  }
 
   try {
     repositories = await prepareTaskRepositories(task, config)
@@ -125,6 +165,7 @@ export async function runStoryTask(
       return
     }
     lease.start()
+    leaseStarted = true
 
     runner = await buildDeepSeekHarnessReview({
       jobsDb,
@@ -133,8 +174,23 @@ export async function runStoryTask(
       branch: task.job.requested_branch as BranchName,
       repositories,
       agentAttemptsRoot: config.agentAttemptsRoot,
+      sessionRoot: config.sessionRoot,
+      // Workspace 绝不能触及这些：pinned 快照缓存（写它会污染证据源）、attempt 树根、
+      // Session 卷、Worker 自己的工作目录。
+      forbiddenRoots: [
+        config.codeCacheRoot,
+        config.agentAttemptsRoot,
+        config.sessionRoot,
+        config.workspaceRoot,
+      ],
+      infrastructure: {
+        supabaseUrl: config.supabaseUrl,
+        gitlabBaseUrl: config.gitlabBaseUrl,
+      },
       logger: log,
-      isLeaseValid: () => lease.leaseHeld(),
+      isLeaseValid: () => lease.leaseHeld() && !cancelRequested,
+      isCancelRequested: () => cancelRequested,
+      abortReason: attemptEndReason,
       commitReview: (input) =>
         jobsDb
           .saveAgentReviewResult({
@@ -154,6 +210,12 @@ export async function runStoryTask(
               content_hash: item.contentHash,
               evidence_type: item.evidenceType,
               description: item.description,
+              // 生产者归属：root 汇总 child 证据时，数据库据此确认它属于当前 Agent Tree。
+              producer_agent_id: item.producer?.agentId ?? null,
+              producer_session_id: item.producer?.sessionId ?? null,
+              tool_call_id: item.producer?.toolCallId ?? null,
+              // 固定快照证据。Workspace 生成物走 analysis_artifact，不能冒充现有实现。
+              evidence_origin: 'PINNED_SNAPSHOT',
             })),
             usage: {
               tool_calls: input.usage.toolCalls,
@@ -161,6 +223,20 @@ export async function runStoryTask(
               searches_run: input.usage.searchesRun,
               retry_requests: input.usage.retryRequests,
               compaction_requests: input.usage.compactionRequests,
+              // 真实模型请求数。V3 这里传的是 Broker 的工具调用数，那是错的映射。
+              model_requests: input.usage.modelRequests,
+              root_model_requests: input.usage.rootModelRequests,
+              child_model_requests: input.usage.childModelRequests,
+              web_requests: input.usage.webRequests,
+              web_bytes: input.usage.webBytes,
+              input_tokens: input.usage.inputTokens,
+              output_tokens: input.usage.outputTokens,
+              // V4 身份：数据库据此做 root-only 与 fencing 校验。
+              root_agent_id: input.identity.rootAgentId,
+              root_session_id: input.identity.rootSessionId,
+              tree_digest: input.identity.treeDigest,
+              session_revision: input.identity.sessionRevision,
+              policy_hash: input.identity.policyHash,
             },
             configHash: input.configHash ?? null,
             promptVersion: AGENT_REVIEW_PROMPT_VERSION,
@@ -328,6 +404,10 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
         capabilities: {
           worker_story_concurrency: config.workerStoryConcurrency,
           agent_profile: ACP_PROFILE_NAME,
+          // 运维需要能一眼看出某个副本跑的是哪一代能力面和哪个 Harness 版本。
+          policy_version: V4_POLICY_VERSION,
+          harness_version: loadCapabilityContract().harnessVersion,
+          capability_contract_hash: contractHash(),
         },
         signal: controller.signal,
       })
@@ -344,6 +424,35 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
     void reportAvailability()
   }, 5000)
 
+  /** 每 10 分钟最多跑一次，避免每个轮询周期都去遍历整个卷。 */
+  let lastCleanupAt = 0
+  const runPeriodicCleanup = (): void => {
+    const now = Date.now()
+    if (now - lastCleanupAt < 10 * 60 * 1000) return
+    lastCleanupAt = now
+    try {
+      cleanOrphanedOverlays({
+        attemptsRoot: config.agentAttemptsRoot,
+        maxAgeMs: config.orphanWorkspaceMaxAgeMs,
+        logger,
+      })
+      enforceSessionRetention({
+        root: config.sessionRoot,
+        // 卷级回收是跨所有 Job 的动作，所以用可运维的全局保留期，而不是某一个 Job 冻结的
+        // policy；单个 Job 的 session.retentionDays 只决定它自己 checkpoint 的
+        // retention_until。
+        retentionDays: config.sessionRetentionDays,
+        maxTotalBytes: config.sessionVolumeMaxBytes,
+        logger,
+      })
+    } catch (error) {
+      logger.error('periodic_cleanup_failed', {
+        event: 'periodic_cleanup_failed',
+        error_message: redactError(error),
+      })
+    }
+  }
+
   const loop = async (): Promise<void> => {
     logger.info('worker_started', { event: 'worker_started' })
     let first = true
@@ -352,6 +461,10 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
         await tryPrepareOneJob()
 
         await jobsDb.reclaimStaleStoryTaskLeases()
+
+        // 孤儿回收与保留期。放在轮询里而不是靠外部 cron：被 SIGKILL 的 attempt 留下的
+        // Workspace 里有源码，而 Session 卷写满会让所有在跑的 attempt 一起失败。
+        runPeriodicCleanup()
 
         let claimedAny = false
         while (!stopped && pool.availableSlots > 0) {

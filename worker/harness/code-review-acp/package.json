@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Hardened DeepSeek Harness profile for one code-review attempt over ACP.",
+  "description": "DeepSeek Harness profile for one V4 code-review attempt over ACP: all capabilities on, every capability governed.",
   "dsh": {
     "profile": {
       "bundles": [
@@ -14,8 +14,9 @@
     }
   },
   "dependencies": {
-    "@codereview/harness-volatile-session-persistence": "*",
-    "@codereview/harness-model-budget-governor": "*",
+    "@codereview/harness-agent-authority-policy": "*",
+    "@codereview/harness-usage-reporter": "*",
+    "@codereview/harness-platform-web": "*",
     "@codereview/harness-snapshot-tools": "*",
     "@codereview/harness-review-control-tool": "*"
   }

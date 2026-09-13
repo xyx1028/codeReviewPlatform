@@ -269,8 +269,11 @@ describe('JobsDb canonical RPC contract', () => {
     await expect(none.claimJobForFinalization('worker-1')).resolves.toBeNull()
   })
 
-  it('heartbeats a claimed story task with its token and requires strict true', async () => {
-    const db = new RecordingDb({ heartbeat_story_task: true })
+  it('heartbeats a claimed story task through the attempt-control RPC and reads lease_held', async () => {
+    // V4：心跳合并进 attempt 控制面 RPC（heartbeat_analysis_attempt），一次往返同时带回
+    // lease/cancel/sealed/session_revision。heartbeatStoryTask 只暴露其中的 leaseHeld 布尔，
+    // 且必须严格来自返回对象的 `lease_held === true`，而不是把整个响应当真值。
+    const db = new RecordingDb({ heartbeat_analysis_attempt: { lease_held: true } })
     const jobs = new JobsDb(db)
 
     await expect(
@@ -282,7 +285,7 @@ describe('JobsDb canonical RPC contract', () => {
       }),
     ).resolves.toBe(true)
     expect(db.last()).toMatchObject({
-      fn: 'heartbeat_story_task',
+      fn: 'heartbeat_analysis_attempt',
       params: {
         p_task_id: 'task-1',
         p_worker_id: 'worker-1',
@@ -291,9 +294,10 @@ describe('JobsDb canonical RPC contract', () => {
       },
     })
 
-    const nonBoolean = new JobsDb(new RecordingDb({ heartbeat_story_task: 'true' }))
+    // lease_held 缺失或不为严格 true → 视为未持有租约（false），而不是含糊地放行。
+    const lost = new JobsDb(new RecordingDb({ heartbeat_analysis_attempt: { lease_held: false } }))
     await expect(
-      nonBoolean.heartbeatStoryTask({
+      lost.heartbeatStoryTask({
         taskId: 'task-1',
         workerId: 'worker-1',
         claimToken: CLAIM_TOKEN,

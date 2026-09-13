@@ -21,6 +21,11 @@ const config: WorkerConfig = {
   heartbeatIntervalMs: 30000,
   workerStoryConcurrency: 2,
   agentAttemptsRoot: '/tmp/agent-attempts',
+  // V4：Session 卷必须与 attempt 临时目录分开，恢复才成立；容量与孤儿回收也随之进 config。
+  sessionRoot: '/tmp/agent-sessions',
+  sessionRetentionDays: 7,
+  sessionVolumeMaxBytes: 20 * 1024 * 1024 * 1024,
+  orphanWorkspaceMaxAgeMs: 6 * 60 * 60 * 1000,
 }
 
 const claim: PreparationClaim = {

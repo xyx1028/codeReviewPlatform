@@ -27,3 +27,6 @@ coverage
 *.njsproj
 *.sln
 *.sw?
+
+# Supabase CLI runtime state and generated local credentials.
+supabase/.temp/

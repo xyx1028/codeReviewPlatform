@@ -18,6 +18,12 @@ import { EvidenceLedger } from '../ai/snapshot/evidence-ledger.js'
 import { SearchCoverageLedger } from '../ai/snapshot/search-coverage-ledger.js'
 import { verifyReviewSubmission } from '../ai/snapshot/deterministic-verifier.js'
 import { startAttemptControlBroker } from '../ai/control/attempt-control-broker.js'
+import {
+  AgentAuthorityLedger,
+  mintRootIdentity,
+} from '../ai/control/agent-authority-ledger.js'
+import { HierarchicalBudgetLedger } from '../ai/control/hierarchical-budget-ledger.js'
+import { V4_DEFAULT_POLICY, policyHash } from '../ai/policy/v4-capability-policy.js'
 import { brokerPost } from '../harness-plugins/shared/broker-client.js'
 import { Logger } from '../logger.js'
 
@@ -413,15 +419,36 @@ describe('verifyReviewSubmission', () => {
 })
 
 describe('AttemptControlBroker', () => {
+  /** 本次 attempt 的根身份。V4 里每个 Broker 请求都必须出示它，否则 403。 */
+  interface RootIdentity {
+    agentCapability: string
+    agentId: string
+    sessionId: string
+  }
+
   async function withBroker(
     overrides: {
       isLeaseValid?: () => boolean
       commitReview?: (input: unknown) => Promise<{ runId: string; committedAt: string }>
     },
-    body: (handle: Awaited<ReturnType<typeof startAttemptControlBroker>>) => Promise<void>,
+    body: (
+      handle: Awaited<ReturnType<typeof startAttemptControlBroker>>,
+      identity: RootIdentity,
+    ) => Promise<void>,
   ) {
     const socketRoot = mkdtempSync(join(tmpdir(), 'brk-'))
     let commits = 0
+    // V4：Broker 不再只认 attempt token；它按 agent capability 查身份。根身份由 Worker 生成
+    // （mintRootIdentity），预算裁决走跨进程账本（HierarchicalBudgetLedger）。
+    const { rootAgentId, rootSessionId } = mintRootIdentity(TASK_ID, ATTEMPT)
+    const authority = new AgentAuthorityLedger({
+      taskId: TASK_ID,
+      agentAttempt: ATTEMPT,
+      policy: V4_DEFAULT_POLICY,
+      rootAgentId,
+      rootSessionId,
+    })
+    const budget = new HierarchicalBudgetLedger({ policy: V4_DEFAULT_POLICY })
     const handle = await startAttemptControlBroker({
       taskId: TASK_ID,
       agentAttempt: ATTEMPT,
@@ -429,6 +456,10 @@ describe('AttemptControlBroker', () => {
       coveragePolicy: { requiredRepositories: [REPO], minQueriesPerRepository: 1 },
       socketRoot,
       logger: silentLogger(),
+      policy: V4_DEFAULT_POLICY,
+      policyHash: policyHash(V4_DEFAULT_POLICY),
+      authority,
+      budget,
       isLeaseValid: overrides.isLeaseValid ?? (() => true),
       commitReview:
         overrides.commitReview ??
@@ -437,22 +468,33 @@ describe('AttemptControlBroker', () => {
           return { runId: `run-${commits}`, committedAt: '2026-01-01T00:00:00.000Z' }
         }),
     })
+    // root capability token 只交给子进程的 patch，从不进日志；测试里由 ledger 直接取用。
+    const identity: RootIdentity = {
+      agentCapability: authority.rootCapabilityToken,
+      agentId: rootAgentId,
+      sessionId: rootSessionId,
+    }
     try {
-      await body(handle)
+      await body(handle, identity)
     } finally {
       await handle.close()
       rmSync(socketRoot, { recursive: true, force: true })
     }
   }
 
-  const envelope = { taskId: TASK_ID, agentAttempt: ATTEMPT }
+  /** attempt 定位字段 + 根 agent 身份，一起构成一个合法请求体的前缀。 */
+  const attemptOf = (identity: RootIdentity) => ({
+    taskId: TASK_ID,
+    agentAttempt: ATTEMPT,
+    ...identity,
+  })
 
   it('rejects a wrong token without doing any work', async () => {
-    await withBroker({}, async (handle) => {
+    await withBroker({}, async (handle, identity) => {
       const res = await brokerPost<{ code?: string }>(
         { socketPath: handle.socketPath, token: 'wrong-token' },
         '/attempt/read-code',
-        { ...envelope, repository: REPO, path: 'src/main/OrderService.java', startLine: 1, endLine: 5 },
+        { ...attemptOf(identity), repository: REPO, path: 'src/main/OrderService.java', startLine: 1, endLine: 5 },
       )
       expect(res.status).toBe(401)
       expect(handle.usage().evidenceShown).toBe(0)
@@ -460,11 +502,11 @@ describe('AttemptControlBroker', () => {
   })
 
   it('rejects a request naming a different task attempt', async () => {
-    await withBroker({}, async (handle) => {
+    await withBroker({}, async (handle, identity) => {
       const res = await brokerPost<{ code?: string }>(
         { socketPath: handle.socketPath, token: handle.token },
         '/attempt/read-code',
-        { taskId: TASK_ID, agentAttempt: 99, repository: REPO, path: 'x', startLine: 1, endLine: 2 },
+        { ...identity, taskId: TASK_ID, agentAttempt: 99, repository: REPO, path: 'x', startLine: 1, endLine: 2 },
       )
       expect(res.status).toBe(403)
       expect(res.body.code).toBe('ATTEMPT_MISMATCH')
@@ -472,11 +514,11 @@ describe('AttemptControlBroker', () => {
   })
 
   it('refuses every call once the lease is gone', async () => {
-    await withBroker({ isLeaseValid: () => false }, async (handle) => {
+    await withBroker({ isLeaseValid: () => false }, async (handle, identity) => {
       const res = await brokerPost<{ code?: string }>(
         { socketPath: handle.socketPath, token: handle.token },
         '/attempt/search-code',
-        { ...envelope, repository: REPO, query: 'createOrder' },
+        { ...attemptOf(identity), repository: REPO, query: 'createOrder' },
       )
       expect(res.status).toBe(409)
       expect(res.body.code).toBe('TASK_LEASE_LOST')
@@ -484,25 +526,48 @@ describe('AttemptControlBroker', () => {
   })
 
   it('refuses every call after revoke', async () => {
-    await withBroker({}, async (handle) => {
+    await withBroker({}, async (handle, identity) => {
       handle.revoke('cancelled for test')
       const res = await brokerPost<{ code?: string }>(
         { socketPath: handle.socketPath, token: handle.token },
         '/attempt/search-code',
-        { ...envelope, repository: REPO, query: 'createOrder' },
+        { ...attemptOf(identity), repository: REPO, query: 'createOrder' },
       )
       expect(res.status).toBe(409)
       expect(res.body.code).toBe('ATTEMPT_REVOKED')
     })
   })
 
-  it('issues evidence ids on read and never leaks blob ids to the caller', async () => {
+  it('rejects a model request that carries no agent capability', async () => {
+    // V4：attempt token 证明"是本次子进程"，agent capability 证明"是树里某个已注册节点"。
+    // 缺 capability 的请求即使 attempt/lease 都对，也必须以 403 AGENT_IDENTITY_INVALID 挡下 ——
+    // 否则子 Agent 伪造 root id 直接请求 Broker 就能得逞。
     await withBroker({}, async (handle) => {
+      const res = await brokerPost<{ code?: string }>(
+        { socketPath: handle.socketPath, token: handle.token },
+        '/attempt/read-code',
+        {
+          taskId: TASK_ID,
+          agentAttempt: ATTEMPT,
+          repository: REPO,
+          path: 'src/main/OrderService.java',
+          startLine: 1,
+          endLine: 5,
+        },
+      )
+      expect(res.status).toBe(403)
+      expect(res.body.code).toBe('AGENT_IDENTITY_INVALID')
+      expect(handle.usage().evidenceShown).toBe(0)
+    })
+  })
+
+  it('issues evidence ids on read and never leaks blob ids to the caller', async () => {
+    await withBroker({}, async (handle, identity) => {
       const res = await brokerPost<Record<string, unknown>>(
         { socketPath: handle.socketPath, token: handle.token },
         '/attempt/read-code',
         {
-          ...envelope,
+          ...attemptOf(identity),
           repository: REPO,
           path: 'src/main/OrderService.java',
           startLine: 1,
@@ -519,11 +584,11 @@ describe('AttemptControlBroker', () => {
   })
 
   it('returns a tool error the model can act on for a blocked path', async () => {
-    await withBroker({}, async (handle) => {
+    await withBroker({}, async (handle, identity) => {
       const res = await brokerPost<{ code?: string; reason?: string }>(
         { socketPath: handle.socketPath, token: handle.token },
         '/attempt/read-code',
-        { ...envelope, repository: REPO, path: '.env', startLine: 1, endLine: 2 },
+        { ...attemptOf(identity), repository: REPO, path: '.env', startLine: 1, endLine: 2 },
       )
       expect(res.status).toBe(422)
       expect(res.body.code).toBe('SNAPSHOT_PATH_BLOCKED')
@@ -531,12 +596,12 @@ describe('AttemptControlBroker', () => {
   })
 
   it('rejects an unverifiable submission, then commits the corrected one once', async () => {
-    await withBroker({}, async (handle) => {
+    await withBroker({}, async (handle, identity) => {
       const read = await brokerPost<{ evidenceId: string }>(
         { socketPath: handle.socketPath, token: handle.token },
         '/attempt/read-code',
         {
-          ...envelope,
+          ...attemptOf(identity),
           repository: REPO,
           path: 'src/main/OrderService.java',
           startLine: 1,
@@ -548,7 +613,7 @@ describe('AttemptControlBroker', () => {
         { socketPath: handle.socketPath, token: handle.token },
         '/attempt/submit-review',
         {
-          ...envelope,
+          ...attemptOf(identity),
           submission: {
             verdict: 'IMPLEMENTED',
             confidence: 90,
@@ -575,7 +640,7 @@ describe('AttemptControlBroker', () => {
         { socketPath: handle.socketPath, token: handle.token },
         '/attempt/submit-review',
         {
-          ...envelope,
+          ...attemptOf(identity),
           submission: {
             verdict: 'IMPLEMENTED',
             confidence: 90,
@@ -601,7 +666,7 @@ describe('AttemptControlBroker', () => {
       const again = await brokerPost<{ accepted: boolean; runId: string }>(
         { socketPath: handle.socketPath, token: handle.token },
         '/attempt/submit-review',
-        { ...envelope, submission: { verdict: 'UNCERTAIN', confidence: 1, summary: 'x', evidence: [] } },
+        { ...attemptOf(identity), submission: { verdict: 'UNCERTAIN', confidence: 1, summary: 'x', evidence: [] } },
       )
       expect(again.body.accepted).toBe(true)
       expect(again.body.runId).toBe('run-1')
@@ -611,12 +676,12 @@ describe('AttemptControlBroker', () => {
 
   it('breaks tool calls down by name and records every submission rejection', async () => {
     // 预算打满时必须能区分"花在检索阅读"和"花在反复提交被拒"，只看总次数看不出来。
-    await withBroker({}, async (handle) => {
+    await withBroker({}, async (handle, identity) => {
       const call = (route: string, body: Record<string, unknown>) =>
         brokerPost<Record<string, unknown>>(
           { socketPath: handle.socketPath, token: handle.token },
           route,
-          { ...envelope, ...body },
+          { ...attemptOf(identity), ...body },
         )
 
       await call('/attempt/search-code', { repository: REPO, query: 'alpha' })
@@ -661,11 +726,11 @@ describe('AttemptControlBroker', () => {
   })
 
   it('records searches so a NOT_IMPLEMENTED verdict can be earned', async () => {
-    await withBroker({}, async (handle) => {
+    await withBroker({}, async (handle, identity) => {
       const search = await brokerPost<{ hits: unknown[] }>(
         { socketPath: handle.socketPath, token: handle.token },
         '/attempt/search-code',
-        { ...envelope, repository: REPO, query: 'somethingAbsent' },
+        { ...attemptOf(identity), repository: REPO, query: 'somethingAbsent' },
       )
       expect(search.status).toBe(200)
       expect(search.body.hits).toEqual([])
@@ -675,7 +740,7 @@ describe('AttemptControlBroker', () => {
         { socketPath: handle.socketPath, token: handle.token },
         '/attempt/submit-review',
         {
-          ...envelope,
+          ...attemptOf(identity),
           submission: {
             verdict: 'NOT_IMPLEMENTED',
             confidence: 85,

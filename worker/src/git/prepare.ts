@@ -14,7 +14,16 @@
  *    cannot be obtained it fails.
  */
 
-import { chmodSync, mkdirSync, existsSync, renameSync, rmSync, readdirSync, statSync } from 'node:fs'
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import {
   getRepositoryUrl,
@@ -318,5 +327,37 @@ export function listTopLevelEntries(repoPath: string): string[] {
       .sort()
   } catch {
     return []
+  }
+}
+
+/**
+ * 把一个已冻结的缓存快照物化成 attempt Workspace 里的只读视图。
+ *
+ * 缓存目录本身是共享的、只读的，多个 attempt 会同时读它，所以不能让 Agent 直接把 cwd
+ * 指过去 —— Harness 的 fs-sandbox 会把 cwd 当作可写 workspaceRoot。这里把内容拷进
+ * attempt 自己的 `repos/<repository>/`，随后由 AttemptWorkspace 设成 0500/0400。
+ *
+ * `.git` 不拷：Agent 不需要它，而它包含 remote 配置（token 模式下曾经出现过凭据）。
+ * 顺带满足"`.git/config` 不含凭据"这条要求 —— Workspace 里根本没有 `.git/config`。
+ */
+export function checkoutPinnedCommit(input: {
+  gitDir: string
+  commitSha: string
+  targetDir: string
+}): void {
+  if (!existsSync(input.gitDir)) {
+    throw new GitError(
+      `pinned snapshot for ${input.commitSha} is not present in the cache`,
+      'GIT_SNAPSHOT_MISSING',
+    )
+  }
+  for (const entry of readdirSync(input.gitDir)) {
+    if (entry === '.git') continue
+    cpSync(join(input.gitDir, entry), join(input.targetDir, entry), {
+      recursive: true,
+      // symlink 保持为 symlink 而不是跟随：跟随会把缓存外的内容拷进 Workspace。
+      dereference: false,
+      force: true,
+    })
   }
 }

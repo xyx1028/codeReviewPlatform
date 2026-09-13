@@ -35,6 +35,10 @@ function config(): WorkerConfig {
     heartbeatIntervalMs: 30000,
     workerStoryConcurrency: 2,
     agentAttemptsRoot: '/tmp/attempts',
+    sessionRoot: '/tmp/sessions',
+  sessionRetentionDays: 7,
+    sessionVolumeMaxBytes: 20 * 1024 * 1024 * 1024,
+    orphanWorkspaceMaxAgeMs: 6 * 60 * 60 * 1000,
   }
 }
 
@@ -47,6 +51,12 @@ function task(): StoryTask {
     agent_status: 'RUNNING',
     agent_attempt: 2,
     claim_token: CLAIM_TOKEN,
+    // V4：能力策略 snapshot 与身份/fencing 字段随 task 一起下发；空 policy 表示"用默认全能力"。
+    capability_policy: {},
+    policy_version: 4,
+    policy_hash: null,
+    agent_run_id: null,
+    session_revision: 1,
     job: {
       id: 'job-1',
       batch_id: 'b',
@@ -105,19 +115,38 @@ function submission(): CommitReviewInput {
     evidence: [],
     usage: {
       modelRequests: 0,
+      // V4：BrokerUsageSnapshot 分层记账，root/child/token 各自可辨；这里给出零态的完整形状。
+      rootModelRequests: 0,
+      childModelRequests: 0,
       retryRequests: 0,
       compactionRequests: 0,
+      ralphRounds: 0,
+      inputTokens: null,
+      outputTokens: null,
       toolCalls: 5,
       evidenceShown: 1,
       searchesRun: 2,
+      webRequests: 0,
+      webBytes: 0,
       toolCallsByName: {
         search_snapshot_code: 2,
         read_snapshot_code: 2,
         submit_review_result: 1,
       },
+      deniedModelRequests: 0,
       rejectedSubmissions: [],
+      rejectedSubmissionTotal: 0,
+      perAgent: [],
     },
     configHash: 'cfg',
+    // V4：提交携带由 Worker 观测（非模型自报）的身份与 fencing，用于 root-only 与 fencing 校验。
+    identity: {
+      rootAgentId: 'root-abc',
+      rootSessionId: 'session-abc',
+      treeDigest: 'digest-abc',
+      sessionRevision: 1,
+      policyHash: 'policy-abc',
+    },
   }
 }
 

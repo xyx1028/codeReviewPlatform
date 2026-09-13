@@ -15,18 +15,29 @@ import { dirname, join } from 'node:path'
 import {
   ACP_PROFILE_NAME,
   HARNESS_PLUGIN_PACKAGES,
-  assertBudgets,
+  assertPatchHasNoCredentials,
   buildAttemptPatch,
   computeConfigHash,
   materializeAttemptProfile,
   resolveProfileTemplateDir,
   type AttemptProfileSpec,
 } from '../ai/acp/profile-materializer.js'
-import { buildChildEnv, resolveDshLauncher } from '../ai/acp/acp-process-supervisor.js'
+import { V4_DEFAULT_POLICY } from '../ai/policy/v4-capability-policy.js'
+import {
+  assertCredentialEnvIsScrubbed,
+  buildChildEnv,
+  resolveDshLauncher,
+} from '../ai/acp/acp-process-supervisor.js'
+import {
+  BROKER_TOKEN_ENV,
+  ROOT_CAPABILITY_ENV,
+} from '../harness-plugins/shared/credential-env.js'
 import { decidePermission } from '../ai/acp/acp-client.js'
 
 const SECRET_TOKEN = 'broker-token-9d1f4c2a'
 const SECRET_KEY = 'sk-model-key-must-not-be-written'
+/** 根 capability token：只经环境变量下传，绝不进 attempt patch 文件，也不进 configHash。 */
+const ROOT_CAPABILITY = 'root-cap-7f3e9a1b'
 
 const cleanups: Array<() => void> = []
 afterEach(() => {
@@ -50,6 +61,10 @@ function stubPluginRoot(): string {
 function spec(overrides: Partial<AttemptProfileSpec> = {}): AttemptProfileSpec {
   const attemptsRoot = mkdtempSync(join(tmpdir(), 'attempts-root-'))
   cleanups.push(() => rmSync(attemptsRoot, { recursive: true, force: true }))
+  const cwd = mkdtempSync(join(tmpdir(), 'attempt-cwd-'))
+  cleanups.push(() => rmSync(cwd, { recursive: true, force: true }))
+  const sessionRoot = mkdtempSync(join(tmpdir(), 'session-root-'))
+  cleanups.push(() => rmSync(sessionRoot, { recursive: true, force: true }))
   return {
     taskId: 'task-abc',
     agentAttempt: 3,
@@ -64,13 +79,17 @@ function spec(overrides: Partial<AttemptProfileSpec> = {}): AttemptProfileSpec {
       apiKeyEnvVar: 'REVIEW_MODEL_API_KEY',
       requestTimeoutMs: 120000,
     },
-    budgets: {
-      maxTotalRequests: 50,
-      maxLoopRequests: 40,
-      maxRetryRequests: 6,
-      maxCompactionRequests: 4,
+    // V4：数值上限与 sandbox 模式都来自冻结的 policy，不再是独立的 budgets 结构。
+    policy: V4_DEFAULT_POLICY,
+    // 根身份的 id 写进 attempt patch，模型无从选择；capability token 只走环境变量。
+    identity: {
+      rootAgentId: 'root-abc',
+      rootSessionId: 'session-abc',
     },
-    broker: { socketPath: '/tmp/attempt.sock', token: SECRET_TOKEN },
+    broker: { socketPath: '/tmp/attempt.sock' },
+    // Harness cwd 与 Session JSONL 根目录都必须显式给出（前者是受控 Workspace，后者在持久卷）。
+    cwd,
+    sessionRoot,
     repositories: ['kdmanage-backend', 'tmanage-backend'],
     ...overrides,
   }
@@ -108,18 +127,84 @@ describe('buildAttemptPatch', () => {
       expect(config?.taskId).toBe('task-abc')
       expect(config?.agentAttempt).toBe(3)
       expect(config?.socketPath).toBe('/tmp/attempt.sock')
-      expect(config?.token).toBe(SECRET_TOKEN)
+      // token 不在 patch 里：插件从环境变量读，见 credential-env.ts 的说明。
+      expect(config?.token).toBeUndefined()
     }
   })
 
-  it('carries the resolved budgets', () => {
+  it('configures the sandbox as workspace-write rooted at the passed workspace', () => {
+    // V4：不再有独立的 model-budget-governor 行；数值上限来自 policy，写操作被 sandbox 收进 cwd。
+    // 断言真正的安全属性：既不是 danger-full-access，写根也正是传入的受控 Workspace。
+    const base = spec()
+    const patch = buildAttemptPatch(base) as Array<{ id: string; config: Record<string, unknown> }>
+    const sandbox = patch.find((row) => row.id === 'sandbox-policy')?.config
+    expect(sandbox?.mode).toBe('workspace-write')
+    expect(sandbox?.mode).not.toBe('danger-full-access')
+    expect(sandbox?.workspaceRoot).toBe(base.cwd)
+    // fs-sandbox 的 cwd 必须与 sandbox workspaceRoot 一致，否则读写落在不同目录。
+    expect(patch.find((row) => row.id === 'fs-sandbox')?.config.cwd).toBe(base.cwd)
+  })
+
+  it('writes the platform-generated root identity into the authority policy row', () => {
+    // 根身份的 id 由 Worker 决定并写进 patch，模型无从选择。
     const patch = buildAttemptPatch(spec()) as Array<{ id: string; config: Record<string, unknown> }>
-    expect(patch.find((row) => row.id === 'model-budget-governor')?.config).toEqual({
-      maxTotalRequests: 50,
-      maxLoopRequests: 40,
-      maxRetryRequests: 6,
-      maxCompactionRequests: 4,
-    })
+    const authority = patch.find((row) => row.id === 'agent-authority-policy')?.config
+    expect(authority?.rootAgentId).toBe('root-abc')
+    expect(authority?.rootSessionId).toBe('session-abc')
+    // root-reviewer 是唯一能提交的角色：它解析出的工具面必须包含提交工具。
+    expect(authority?.rootTools).toContain('submit_review_result')
+  })
+
+  it('keeps every credential out of the on-disk patch', () => {
+    // patch 文件落在 dshHome 下，而 workspace-write 沙箱只限制写不限制读：任何写进这个
+    // 文件的令牌都等于交给拿到 Shell 的子 Agent。凭据一律走环境变量。
+    const patch = buildAttemptPatch(spec())
+    const serialized = JSON.stringify(patch)
+    expect(serialized).not.toContain(SECRET_TOKEN)
+    expect(serialized).not.toContain(ROOT_CAPABILITY)
+    expect(serialized).not.toContain(SECRET_KEY)
+    for (const row of patch as Array<{ config?: Record<string, unknown> }>) {
+      expect(Object.keys(row.config ?? {})).not.toContain('token')
+      expect(Object.keys(row.config ?? {})).not.toContain('rootCapability')
+    }
+    // 闸门本身也必须放行这份 patch，否则 materialize 会拒绝启动。
+    expect(() => assertPatchHasNoCredentials(patch)).not.toThrow()
+  })
+
+  it('refuses to materialize a patch that carries a credential-shaped field', () => {
+    // 这是防止"改回去"的机械闸门：有人把 token 重新塞进 patch 时启动即失败。
+    expect(() =>
+      assertPatchHasNoCredentials([{ id: 'snapshot-tools', config: { token: 'leaked' } }]),
+    ).toThrow(/credential-shaped field/)
+  })
+
+  it('pins the jobs and workflow concurrency limits from the frozen policy', () => {
+    // 不下传就退回 Harness 内置默认值，而那个值会随依赖升级漂移 —— §4 冻结的 policy
+    // 就成了一份不生效的文档。并发上限属于 provider（jobs / workflow-worker-thread），
+    // 不属于 tool-* 插件。
+    const base = spec()
+    const patch = buildAttemptPatch(base) as Array<{ id: string; config: Record<string, unknown> }>
+    expect(patch.find((row) => row.id === 'jobs')?.config.maxConcurrentJobsPerOwner).toBe(
+      base.policy.jobs.maxConcurrentJobsPerOwner,
+    )
+    const workflow = patch.find((row) => row.id === 'workflow-worker-thread')?.config
+    expect(workflow?.maxConcurrentAgents).toBe(base.policy.workflow.maxConcurrentSteps)
+    expect(workflow?.maxTotalAgents).toBe(base.policy.agents.maxAgentsPerAttempt)
+  })
+
+  it('drives session persistence off the persistent volume, not the attempt tree', () => {
+    // Session JSONL 必须落在持久卷（sessionRoot），否则 attempt 目录被删后无从恢复。
+    const base = spec()
+    const patch = buildAttemptPatch(base) as Array<{ id: string; config: Record<string, unknown> }>
+    expect(patch.find((row) => row.id === 'session-persistence-jsonl')?.config.root).toBe(
+      base.sessionRoot,
+    )
+  })
+
+  it('never approves danger-full-access and denies automated approvals outright', () => {
+    // 自动化流程里没有人可以批准，能力边界完全由 policy 决定：审批策略必须是 never。
+    const patch = buildAttemptPatch(spec()) as Array<{ id: string; config: Record<string, unknown> }>
+    expect(patch.find((row) => row.id === 'approval')?.config.policy).toBe('never')
   })
 })
 
@@ -130,6 +215,9 @@ describe('computeConfigHash', () => {
     const hash = computeConfigHash(templateDir, patch, { '@codereview/x': '/entry.js' })
     expect(hash).toMatch(/^[0-9a-f]{64}$/)
     expect(hash).not.toContain(SECRET_TOKEN)
+    // V4：根 capability token 只进 attempt patch 文件（0600），绝不能成为 configHash 的输入 ——
+    // 否则等于把令牌写进任何存了这个 hash 的地方。它在 hash 前被脱敏成占位符。
+    expect(hash).not.toContain(ROOT_CAPABILITY)
   })
 
   it('is stable for the same attempt and changes when the route changes', () => {
@@ -261,7 +349,40 @@ describe('buildChildEnv', () => {
     cwd: '/tmp/attempt/cwd',
     apiKeyEnvVar: 'REVIEW_MODEL_API_KEY',
     apiKey: SECRET_KEY,
+    brokerToken: SECRET_TOKEN,
+    rootCapability: ROOT_CAPABILITY,
   }
+
+  it('hands the broker credentials to the Harness under scrubbed variable names', () => {
+    // 凭据必须存在于 DSH 进程环境（插件要用），且变量名必须命中 Harness 的
+    // SENSITIVE_ENV_PATTERN —— 那是"模型可见的 Shell 读不到它们"的唯一依据。
+    const env = buildChildEnv(options)
+    expect(env[BROKER_TOKEN_ENV]).toBe(SECRET_TOKEN)
+    expect(env[ROOT_CAPABILITY_ENV]).toBe(ROOT_CAPABILITY)
+    expect(() =>
+      assertCredentialEnvIsScrubbed([
+        options.apiKeyEnvVar,
+        BROKER_TOKEN_ENV,
+        ROOT_CAPABILITY_ENV,
+      ]),
+    ).not.toThrow()
+  })
+
+  it('rejects a credential variable name the Harness would not scrub', () => {
+    // 一次重命名就能静默作废上面那条不变量，所以启动路径上有机械检查。
+    expect(() => assertCredentialEnvIsScrubbed(['REVIEW_BROKER_HANDLE'])).toThrow(
+      /would survive into sandboxed shell children/,
+    )
+  })
+
+  it('does not let extraEnv shadow a credential', () => {
+    // extraEnv 是 workspace 的非机密白名单；它排在凭据之前展开，覆盖不了凭据。
+    const env = buildChildEnv({
+      ...options,
+      extraEnv: { [BROKER_TOKEN_ENV]: 'attacker-supplied' },
+    })
+    expect(env[BROKER_TOKEN_ENV]).toBe(SECRET_TOKEN)
+  })
 
   it('builds the environment from scratch instead of inheriting the worker one', () => {
     process.env.CRP_TEST_LEAKED_SECRET = 'worker-only-value'
@@ -367,59 +488,43 @@ describe('decidePermission (deny by default)', () => {
   })
 })
 
-describe('assertBudgets（spawn 前挡住不完整的预算）', () => {
-  const valid = {
-    maxTotalRequests: 50,
-    maxLoopRequests: 40,
-    maxRetryRequests: 6,
-    maxCompactionRequests: 4,
-  }
-
-  it('合法预算原样返回副本', () => {
-    const out = assertBudgets(valid)
-    expect(out).toEqual(valid)
-    expect(out).not.toBe(valid)
-  })
-
-  it('允许 retry / compaction 为 0', () => {
-    expect(() =>
-      assertBudgets({ ...valid, maxRetryRequests: 0, maxCompactionRequests: 0 }),
-    ).not.toThrow()
-  })
-
-  for (const key of ['maxTotalRequests', 'maxLoopRequests'] as const) {
-    it(`${key} 缺失时报错并指名字段`, () => {
-      const broken = { ...valid } as Record<string, number>
-      delete broken[key]
-      // 这类配置错误在 Harness 侧的表现是 turn 静默 cancelled、stderr 全空，
-      // 所以必须在 worker 侧就报出来。
-      expect(() => assertBudgets(broken as unknown as typeof valid)).toThrow(
-        new RegExp(`${key} must be an integer >= 1`),
-      )
-    })
-
-    it(`${key} 为 0 时报错`, () => {
-      expect(() => assertBudgets({ ...valid, [key]: 0 })).toThrow(/must be an integer >= 1/)
-    })
-  }
-
-  it('非整数报错', () => {
-    expect(() => assertBudgets({ ...valid, maxLoopRequests: 4.5 })).toThrow(/integer/)
-  })
-
-  it('负数报错', () => {
-    expect(() => assertBudgets({ ...valid, maxRetryRequests: -1 })).toThrow(/>= 0/)
-  })
-
-  it('总预算小于 loop 预算报错：那样 loop 上限永远到不了', () => {
-    expect(() => assertBudgets({ ...valid, maxTotalRequests: 10, maxLoopRequests: 40 })).toThrow(
-      /must be at least maxLoopRequests/,
+describe('computeConfigHash ignores per-attempt identity（两次 attempt 必须可比）', () => {
+  // V4 删除了 assertBudgets/BudgetSpec：预算不再是 profile 的独立输入，而是随 attempt 从
+  // 数据库 policy snapshot 来。原先"spawn 前挡住不完整预算"的职责移到了 policy 归一层
+  // （normalizeCapabilityPolicy），由 v4-capability-contract.test.ts 覆盖。这里改为钉住一条
+  // 对 configHash 至关重要的性质：同一份配置、不同的 per-attempt socket，hash 必须一致，
+  // 否则两次 attempt 的 profile 无法比对，追溯就失效了。
+  it('is identical for two attempts that differ only in the per-attempt socket path', () => {
+    // socketPath 每 attempt 一个随机目录，被 computeConfigHash 归一成占位符。
+    // capability token 已经完全不进 patch（走环境变量），所以这里没有令牌可比。
+    // rootAgentId / rootSessionId 是稳定派生值（mintRootIdentity 按 task+attempt 算出），
+    // 它们进 hash 是对的。
+    const templateDir = resolveProfileTemplateDir()
+    const base = spec()
+    const entries = { '@codereview/x': '/entry.js' }
+    const withOtherSocket = {
+      ...base,
+      broker: { ...base.broker, socketPath: '/tmp/some-other-attempt.sock' },
+    }
+    expect(computeConfigHash(templateDir, buildAttemptPatch(withOtherSocket), entries)).toBe(
+      computeConfigHash(templateDir, buildAttemptPatch(base), entries),
     )
   })
 
-  it('一次报出全部问题，而不是逐个暴露', () => {
-    expect(() =>
-      assertBudgets({ maxRetryRequests: 6, maxCompactionRequests: 4 } as unknown as typeof valid),
-    ).toThrow(/maxTotalRequests.*maxLoopRequests/s)
+  it('changes when the frozen policy narrows the sandbox to read-only', () => {
+    // policy 是 configHash 的真实输入：read-only 会移除写工具，profile 因此不同。
+    const templateDir = resolveProfileTemplateDir()
+    const base = spec()
+    const entries = { '@codereview/x': '/entry.js' }
+    const readOnly = {
+      ...base,
+      policy: {
+        ...V4_DEFAULT_POLICY,
+        sandbox: { ...V4_DEFAULT_POLICY.sandbox, defaultMode: 'read-only' as const },
+      },
+    }
+    expect(computeConfigHash(templateDir, buildAttemptPatch(readOnly), entries)).not.toBe(
+      computeConfigHash(templateDir, buildAttemptPatch(base), entries),
+    )
   })
 })

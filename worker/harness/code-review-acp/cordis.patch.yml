@@ -1,61 +1,62 @@
-# The code-review ACP profile's own patch layer.
+# The code-review ACP profile's own patch layer — V4: all capabilities on.
 #
-# This layer is an allowlist over the shipped base bundle, and it operates at
-# the TOOL surface: every model-facing capability the attempt does not need is
-# removed, and the three plugins the platform owns are inserted. Per-attempt
-# values (model route, broker socket, claim token, budgets) are NOT here — they
-# arrive through the launcher's `--patch <attempt-route.patch.yml>` overlay so
-# nothing secret or attempt-specific is written into the profile directory.
+# V3 用这一层关掉了 Shell、Filesystem、Web、Skills、Subagent、Workflow、Goal、Todo、Jobs 和
+# JSONL 持久化。V4 反过来：这些能力全部保持启用，同时插入平台自有的治理插件。
 #
-# Why capability SERVICES stay mounted while their TOOLS are removed:
-# several base plugins are structural dependencies of the agent plane. Removing
-# `subprocess`, `sandbox`, `sandbox-policy`, `bash-sandbox`, `shell-env`,
-# `jobs`, `subagent`, `workflow-worker-thread` or
-# `deepseek-llm-api-extensions` tears down the agent fiber mid-turn, which the
-# runtime reports as `cannot create effect on inactive context` or a closed
-# session handle. Each of those was verified individually against a real
-# `dsh` process. So the boundary this profile enforces is: the model is offered
-# no shell, filesystem, web, skill, subagent, workflow or todo tool at all, and
-# repository content reaches it only through the snapshot MCP server. The
-# services behind those tools remain mounted but unreachable by the model.
+# 这一层现在只做三件事：
 #
-# Anything added to the base bundle by a future Harness release arrives
-# ENABLED. Boot therefore verifies the resolved tool surface against an
-# allowlist in the worker; an unknown tool fails the attempt closed rather
-# than silently exposing itself to the model.
+#   1. 保持禁用第 1.4 节列出的"不属于全能力"的项目 —— 重复的 llm-deepseek adapter、
+#      外部 telemetry、当前 OS 不支持的 PowerShell；
+#   2. 把 Harness 自带的 web 出口换成平台网关（工具名不变，出口换主人）；
+#   3. 插入平台插件：agent-authority-policy、usage-reporter、platform-web、
+#      snapshot-tools、review-control-tool。
+#
+# 每 attempt 的值（模型路由、Broker socket、claim token、根身份、角色工具集、预算）都不在
+# 这里 —— 它们通过启动器的 `--patch <attempt-route.patch.yml>` 覆盖层进来，所以 profile 目录
+# 里不写任何秘密或 attempt 特定的东西。
+#
+# 关于"未知工具"：Harness 未来版本新增到 base bundle 的东西会以 ENABLED 状态到达。启动时
+# 会把解析出来的工具面与 worker 侧的 v4-capability-contract.json 比对，出现契约外的工具就
+# fail closed，而不是让它静默进入模型上下文。这也是为什么本文件不需要"预防性禁用"。
 
 # ---------------------------------------------------------------------------
-# 1. No command execution reachable by the model.
-#    `subprocess`, `sandbox`, `sandbox-policy`, `bash-sandbox` and `shell-env`
-#    must stay mounted (verified: disabling any of them breaks the turn).
+# 1. 不属于 V4 全能力的项目（第 1.4 节）。
+#
+#    llm-deepseek 与当前 llm-pi-ai 路由重复，而且会引入一条能使用环境里现成 DeepSeek
+#    凭据的旁路：模型路由必须每 attempt 由平台指定，不能有第二个来源。
 # ---------------------------------------------------------------------------
-- id: tool-bash
+- id: llm-deepseek
   disabled: true
+
+#    外部 Telemetry 会把会话内容发到第三方。工具结果里带真实源码，不能出网。
+- id: session-telemetry-otel
+  disabled: true
+
+#    Linux/macOS 容器上没有 PowerShell。留着它只会在启动时报缺依赖。
 - id: tool-pwsh
   disabled: true
 - id: pwsh-sandbox
   disabled: true
-- id: tool-jobs
+
+- id: hmr
+  disabled: true
+
+#    会话标题需要额外一次模型请求，对自动化流程没有价值，却要占预算。
+- id: session-title-llm
   disabled: true
 
 # ---------------------------------------------------------------------------
-# 2. No ambient filesystem. Repository content arrives only through the
-#    snapshot MCP server, which reads exact commit objects.
-# ---------------------------------------------------------------------------
-- id: fs-observation-policy
-  disabled: true
-- id: fs-sandbox
-  disabled: true
-- id: tool-fs
-  disabled: true
-- id: tool-fs-search
-  disabled: true
-
-# ---------------------------------------------------------------------------
-# 3. No network egress of the agent's own choosing.
-# ---------------------------------------------------------------------------
-- id: web
-  disabled: true
+# 2. Web：能力开启，出口换人。
+#
+#    tool-web / web-search-deepseek / web-fetch-http 都在 Harness 进程里直接发请求。那意味着
+#    出口策略要在子进程里执行，而子进程既不知道平台的域名白名单，也不持有 attempt 的 Web
+#    配额，更不该知道 Supabase / Vault / GitLab 管理面在哪。
+#
+#    平台插件 platform-web 注册同名的 web_search / web_fetch，请求交给 Worker 代发：HTTPS
+#    限定、域名白名单、DNS 解析后复查、逐跳 redirect 重新校验、响应大小与总字节配额。
+#    对模型来说工具面完全一样，所以"Web 默认开启"依然成立。
+#
+#    `web` 服务本身保持挂载：它是 web 工具族的结构依赖。
 - id: web-search-deepseek
   disabled: true
 - id: web-fetch-http
@@ -64,96 +65,52 @@
   disabled: true
 
 # ---------------------------------------------------------------------------
-# 4. No repository-authored instructions or skills: snapshot content is
-#    untrusted data, never instructions.
-# ---------------------------------------------------------------------------
-- id: agent-instructions
-  disabled: true
-- id: skill
-  disabled: true
-- id: skill-filesystem
-  disabled: true
-- id: skill-badge
-  disabled: true
-- id: tool-skill
-  disabled: true
-
-# ---------------------------------------------------------------------------
-# 5. One agent per attempt: the model cannot spawn subagents, forks or
-#    workflows. The `subagent` and `workflow-worker-thread` services stay
-#    mounted (verified: removing them breaks the turn); only their tools go.
-# ---------------------------------------------------------------------------
-- id: subagent-spawn-in-process
-  disabled: true
-- id: subagent-fork-in-process
-  disabled: true
-- id: tool-subagent
-  disabled: true
-- id: tool-subagent-fork
-  disabled: true
-- id: tool-subagent-control
-  disabled: true
-- id: tool-subagent-list-agents
-  disabled: true
-- id: tool-workflow
-  disabled: true
-
-# ---------------------------------------------------------------------------
-# 6. No interactive surfaces, slash commands, or planning modes.
-# ---------------------------------------------------------------------------
-- id: commands
-  disabled: true
-- id: command-feedback
-  disabled: true
-- id: command-compact
-  disabled: true
-- id: command-goal
-  disabled: true
-- id: goal
-  disabled: true
-- id: goal-round-driver
-  disabled: true
-- id: plan-mode
-  disabled: true
-- id: tool-todo
-  disabled: true
-- id: tool-goal
-  disabled: true
-- id: tool-ralph
-  disabled: true
-
-# ---------------------------------------------------------------------------
-# 7. No telemetry and no session content on disk. Tool results carry real
-#    source code, so the JSONL backend is replaced by a volatile one.
-# ---------------------------------------------------------------------------
-- id: session-telemetry-otel
-  disabled: true
-- id: session-persistence-jsonl
-  disabled: true
-
-# ---------------------------------------------------------------------------
-# 8. The model route is supplied per attempt through llm-pi-ai only. The
-#    first-party DeepSeek adapter is disabled so no ambient DeepSeek
-#    credential can be used. `deepseek-llm-api-extensions` must stay mounted
-#    (verified: it is a structural dependency, not a credential source).
-# ---------------------------------------------------------------------------
-- id: llm-deepseek
-  disabled: true
-
-# ---------------------------------------------------------------------------
-# 9. The platform's own plugins.
+# 3. 平台自有插件。
+#
+#    顺序无关（激活由服务可用性驱动），分组只为可读。每一项的 config 都留成显式的占位值，
+#    这样 attempt patch 万一没覆盖到，schema 校验会在启动时明确报缺字段。
+#
+#    这一点是从一次真实故障学来的：曾经给预算写过 1 作为占位值，结果 attempt patch 因为
+#    键名写错没有覆盖到，agent 在第一次模型请求被拒时销毁 fiber，表现为 turn 直接 cancelled、
+#    stderr 全空、零个 update —— 完全无法诊断。留空则是响亮的失败。
 # ---------------------------------------------------------------------------
 - insert:
-    - id: session-persistence-memory
-      name: '@codereview/harness-volatile-session-persistence'
-    # 预算故意不给占位值：真实值只能来自 attempt patch。
-    #
-    # 曾经这里写着 maxTotalRequests/maxLoopRequests = 1。一旦 attempt patch 因为
-    # 键名写错等原因没有覆盖到，agent 就会在第一次模型请求被拒时销毁 fiber，
-    # 表现为 turn 直接 cancelled、stderr 全空、零个 update —— 完全无法诊断。
-    # 留空则 schema 校验会在启动时明确报缺字段，属于响亮的失败。
-    - id: model-budget-governor
-      name: '@codereview/harness-model-budget-governor'
+    # 身份与角色策略。它必须先于其他平台插件生效：另外两个插件都依赖它安装的进程内
+    # 身份表来回答"这次调用是哪个 Agent 发起的"。
+    - id: agent-authority-policy
+      name: '@codereview/harness-agent-authority-policy'
+      config:
+        socketPath: /nonexistent/attempt-patch-required.sock
+        token: attempt-patch-required
+        taskId: attempt-patch-required
+        agentAttempt: 0
+        rootAgentId: attempt-patch-required
+        rootSessionId: attempt-patch-required
+        rootCapability: attempt-patch-required
+        rootTools: []
+
+    # 真实模型用量与分层预算。预留发生在调用 provider 之前，所以拒绝时 provider 永远
+    # 不会被联系上。
+    - id: usage-reporter
+      name: '@codereview/harness-usage-reporter'
+      config:
+        socketPath: /nonexistent/attempt-patch-required.sock
+        token: attempt-patch-required
+        taskId: attempt-patch-required
+        agentAttempt: 0
+        rootAgentId: attempt-patch-required
+
+    # 平台 Web 网关。
+    - id: platform-web
+      name: '@codereview/harness-platform-web'
+      config:
+        socketPath: /nonexistent/attempt-patch-required.sock
+        token: attempt-patch-required
+        taskId: attempt-patch-required
+        agentAttempt: 0
+
+    # 固定 Commit 的只读检索与阅读。read_snapshot_code 返回的 evidenceId 是提交时唯一
+    # 可引用的证据凭据。
     - id: snapshot-tools
       name: '@codereview/harness-snapshot-tools'
       config:
@@ -161,6 +118,8 @@
         token: attempt-patch-required
         taskId: attempt-patch-required
         agentAttempt: 0
+
+    # 终端提交工具。只对 root 角色可见，并且在工具、Broker、数据库三层各校验一次。
     - id: review-control-tool
       name: '@codereview/harness-review-control-tool'
       config:

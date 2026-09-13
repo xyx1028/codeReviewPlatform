@@ -73,6 +73,60 @@ Worker 主动轮询 Supabase，不监听入站端口。每个 Story Task attempt
 
 禁止使用 `VITE_MODEL_API_KEY` 或把模型 Key 放进 Worker `.env` 作为长期配置。API Key 不得进入 profile、patch、config hash、错误或日志。
 
+### 3.2.1 Broker 凭据（V4）
+
+每 attempt 的 Broker bearer token 与根 Agent capability token **只经环境变量**传给 Harness
+子进程，不写进 attempt patch 文件：
+
+| 变量 | 内容 |
+|---|---|
+| `REVIEW_BROKER_ACCESS_TOKEN` | 该 attempt 的 Broker bearer token |
+| `REVIEW_ROOT_CAPABILITY_TOKEN` | 根 Agent 的 capability token |
+
+两者都由 Worker 在 spawn 时生成并注入，运维**不需要也不应当**配置它们。
+
+为什么不能落盘：patch 文件写在 `AGENT_ATTEMPTS_ROOT/attempt-*/` 下（0600，属主是 worker
+用户），而 Sandbox Shell 以同一个用户运行，且 `workspace-write` 沙箱**只限制写、不限制读**
+（`@deepseek-ai/dsh-sandbox-local` 的三档 profile 分别是 bwrap `--ro-bind / /`、
+Landlock `readOnly: ["/"]`、Seatbelt `(allow default)`）。凭据写进该文件，等于任何拿到
+Shell 的子 Agent 都能读到根 Agent 的令牌并冒充它提交 —— 直接击穿"根 Agent 唯一提交"。
+
+为什么环境变量安全：Harness 在 spawn 模型可见的 Shell 之前会重建环境
+（`@deepseek-ai/dsh-subprocess` 的 `scrubbedParentEnv()`），按**变量名**丢弃所有匹配
+`/KEY|PASSWORD|SECRET|TOKEN/i` 以及所有 `DSH_*` 的条目。上表两个名字与
+`REVIEW_MODEL_API_KEY` 都命中该规则，因此它们存在于 Harness 进程内（插件可读）而不存在于
+Shell 子进程内。
+
+**重命名这三个变量前必须确认新名字仍然命中该规则**，否则凭据会随环境泄漏给模型。启动路径
+上有机械检查（`assertCredentialEnvIsScrubbed`），名字不合规时 Worker 直接启动失败；另有
+`assertPatchHasNoCredentials` 在 materialize 时拒绝任何把令牌塞回 patch 的改动。
+
+### 3.2.2 沙箱资源上限（V4）
+
+Worker 用 `sh -c 'ulimit …; exec dsh …'` 启动 Harness，rlimit 由**所有后代继承**，因此
+Sandbox Shell 与 Jobs 起的每个构建、测试、静态检查进程都受同一组上限约束：
+
+| 限额 | 施加位置 | 来源 |
+|---|---|---|
+| 打开文件数 | `ulimit -n 1024`（继承） | 固定值 |
+| 单文件大小 | `ulimit -f`（继承） | policy `sandbox.maxWorkspaceBytes` |
+| core dump | `ulimit -c 0`（继承） | 固定值；core 可能含内存里的凭据 |
+| RSS（内存炸弹） | 容器 `mem_limit` / `memswap_limit` | Linux 的 `RLIMIT_RSS` 早已不生效；`ulimit -v` 限制虚拟地址空间，而 Node 需要大量 VA，设了会起不来 |
+| 进程数（fork bomb） | 容器 `pids_limit` | policy `sandbox.maxProcessesPerAttempt` × `WORKER_STORY_CONCURRENCY` + 开销 |
+| 单条命令 CPU 时限 | bash-sandbox `commandTimeoutMs` | policy `sandbox.commandTimeoutMs` |
+
+两项**刻意不用** rlimit，都是实测结论：
+
+- `ulimit -t`（CPU 时间）会在累计耗时到点后杀掉整个 attempt，而不是那条跑飞的命令；
+- `ulimit -u`（RLIMIT_NPROC）按 **UID 全局计数**而不是按进程树计数，而容器默认共享宿主
+  user namespace —— 同一个 `worker` UID 的所有副本会合并计到一个上限里，设成
+  `maxProcessesPerAttempt` 会让正常构建随机报 `fork: Resource temporarily unavailable`。
+  fork bomb 的正确原语是 cgroup 的 `pids_limit`（按容器计数，不依赖进程自律）。
+
+**扩容时必须同步核对 `pids_limit`**：它要 ≥ `maxProcessesPerAttempt × WORKER_STORY_CONCURRENCY`
+再加 Worker/init 开销，调小会让正常构建随机失败。`WorkspacePolicy.recommendedContainerPidLimit()`
+给出建议值。
+
 ### 3.3 Git 凭据
 
 - 本地可使用 `GIT_AUTH_MODE=local` 复用 Credential Helper；
@@ -361,3 +415,425 @@ npm run lint
 - [ ] API Key/claim token/源码不进入文件和日志；
 - [ ] 正常、失败、lease lost、重启后无孤儿；
 - [ ] 扩容后并发、RPM/TPM 与费用在预算内。
+
+---
+
+# 15. V4 多 Agent 全能力默认开启运维
+
+> 适用基线：V4 DeepSeek Harness 全能力默认开启（多 Agent Tree、Session JSONL 持久化、
+> Sandbox Shell、Web egress、Workflow/Subagent/Jobs）。
+> 执行方案：`代码评审平台/v4-DeepSeekharness全功能运用重构增强/代码评审平台-V4-DeepSeekHarness-全能力默认开启执行方案.md`（第 7.11、9、12 节）。
+>
+> V4 与前面章节的关系：第 1–14 节描述的单 Task 生命周期、Secret 生命周期、连通性验收
+> 仍然成立。本章只补充 V4 新增的运维面，不重复也不推翻既有约束。“默认全开”是**用户**
+> 语义；本章的熔断开关是**运维**在事故期间的临时收窄手段，二者不冲突。
+
+## 15.1 完整环境变量清单（含 V4 新增）
+
+除第 2 节已列的变量外，`worker/src/config.ts` 还校验以下 V4 变量：
+
+| 变量 | 必填 | 默认值 | 说明 |
+|---|---|---|---|
+| `AGENT_SESSION_ROOT` | 否 | `/workspace/agent-sessions` | Session JSONL 持久卷根目录。**必须是持久卷**，否则 Worker 重启无法恢复 Session。内容含真实源码，需 0700、静态加密、保留期。 |
+| `AGENT_SESSION_VOLUME_MAX_BYTES` | 否 | `21474836480`（20GiB） | Session 卷容量上限，范围 64MiB–4TiB。超过即按最旧优先回收并告警。 |
+| `AGENT_SESSION_RETENTION_DAYS` | 否 | `7` | 卷级 Session 回收保留期（天），范围 1–365。与 §4 policy 的 `session.retentionDays` 默认一致；回收是跨所有 Job 的卷级动作，因此取这个可运维的全局值，而不是某一个 Job 冻结的 policy。单个 Job 的 policy 仍决定它自己 checkpoint 的 `retention_until`。 |
+| `ORPHAN_WORKSPACE_MAX_AGE_MS` | 否 | `21600000`（6h） | 孤儿 Workspace 最大存活时长，范围 60s–7d。 |
+| `HARNESS_CAPABILITY_CONTRACT` | 否 | 镜像内 `worker/harness/code-review-acp/v4-capability-contract.json` | 契约文件覆盖路径，一般不需要设置。 |
+
+运维紧急熔断开关（环境变量，值为空 / `0` / `false` 一律视为未设置）：
+
+| 变量 | 收窄效果 |
+|---|---|
+| `V4_BREAKER_DISABLE_WEB` | 关闭 `web_search` / `web_fetch` 能力 |
+| `V4_BREAKER_DISABLE_SHELL_WRITE` | 关闭 `shell`，Sandbox 回退 `read-only` |
+| `V4_BREAKER_DISABLE_SUBAGENTS` | 关闭 subagent spawn/fork/ralph，委派深度归零、每 attempt 仅 1 个 Agent |
+| `V4_BREAKER_DISABLE_WORKFLOW` | 关闭 `workflow` 能力 |
+
+启用熔断后 Worker 每次组装 policy 都会记录 `v4_emergency_breakers_active` 事件（携带
+`breakers` 列表）。这些开关**不写入数据库、不改用户配置**：事故解除后从容器环境移除变量
+并滚动重启，即恢复 V4 默认全开语义。不要用它们做长期功能裁剪。
+
+模型 Base URL、模型名、预算、API Key 仍来自 Job 冻结的模型 snapshot 与 Supabase Vault，
+不是 Worker 静态环境变量。
+
+## 15.2 运行目录、持久卷与保留期
+
+`docker-compose.worker.yml` 为四个运行根目录分别声明 named volume：
+
+| 卷 | 挂载点 | 是否持久 | 是否可多副本共享 | 说明 |
+|---|---|---|---|---|
+| `worker-sessions` | `AGENT_SESSION_ROOT` | **必须持久** | 是（受单写者锁保护） | Session JSONL，重启恢复的唯一依据，含源码 |
+| `worker-cache` | `CODE_CACHE_ROOT` | 建议持久 | 是（按 Commit 寻址） | 四仓库精确 Commit 快照 |
+| `worker-attempts` | `AGENT_ATTEMPTS_ROOT` | 可短暂 | 是（按 attempt 隔离） | 每 attempt 私有 DSH_HOME，结束即删 |
+| `worker-jobs` | `WORKSPACE_ROOT` | 可短暂 | 每副本按 `WORKER_ID` | Worker instance lock |
+
+Session 卷为什么必须持久：Session JSONL 是 Worker 重启后重放、继续未提交 Session 的唯一
+依据（`session.resumeOnWorkerRestart=true`）。放在匿名卷 / tmpfs / attempt 临时目录都会让
+“恢复”退化成“从零重来”，浪费预算并可能重复外部副作用。多副本共享同一 Session 卷是安全的：
+目录名由 `task+attempt` 派生，并由**双层单写者锁**保护——本地 `.writer.lock`（`O_EXCL`）挡
+同机竞争，数据库 `session_revision` fencing 挡跨机竞争；并发接管会以 `SESSION_FENCED` 拒绝，
+不会写出交错 JSONL。同 Worker 同 attempt 的进程重启会记录 `session_writer_lock_reclaimed`
+并正常接管自己的锁。
+
+保留期与磁盘告警阀值：
+
+| 对象 | 保留期 | 回收方 | 磁盘告警 |
+|---|---|---|---|
+| Session JSONL | `session.retentionDays`（默认 7 天） | `session-retention` 周期扫描 | 卷用量 > 80% `AGENT_SESSION_VOLUME_MAX_BYTES` 预警；> 100% 记 `session_volume_over_capacity` 并按最旧优先回收 |
+| Workspace / attempt 临时树 | attempt 结束即删；孤儿 > `ORPHAN_WORKSPACE_MAX_AGE_MS`（默认 6h） | `overlay-cleaner` / 周期清理 | 卷所在磁盘 > 85% 告警 |
+| Artifact（Patch/报告） | `analysis_artifact.retention_until`（随 checkpoint 保留期） | 保留期到期后随记录清理 | 同 Session 卷磁盘告警 |
+
+正常回收路径的成功事件：`session_retention_completed`、`overlay_cleanup_completed`。失败事件：
+`session_retention_scan_failed`、`session_retention_delete_failed`、`workspace_cleanup_failed`、
+`overlay_cleanup_failed`、`process_tree_cleanup_failed`、`periodic_cleanup_failed`——出现即需排查
+（多为磁盘满、权限或残留进程持有文件句柄）。
+
+宿主机侧：Session 卷所在磁盘必须启用静态加密；卷目录保持 0700 且属于容器内非 root
+`worker` 用户（镜像已预置，空卷首次挂载即继承该权限）。
+
+## 15.3 RPM / TPM / 模型费用告警
+
+V4 是多 Agent，单个 Job 的模型请求量显著高于 V3。分层预算由 `model-budget-governor` 在
+provider 请求前计量（root / child / retry / compaction 分类），耗尽以稳定错误结束当前
+attempt，不会绕过上限继续调用。
+
+告警来源与阈值建议：
+
+- **供应商侧 RPM/TPM**：以模型供应商配额为硬上限，设置 80% 预警。V4 扩容前必须重新评估，
+  因为 4 副本 × 2 槽位 × 多 Agent 的峰值请求远高于 V3。
+- **数据库侧并发**：`max_parallel_tasks` 是同一模型配置的最终 Task 并发阀门。
+- **单 attempt 预算**：`modelBudget.maxTotalRequests`（默认 160）等，见 policy 默认值。
+- **费用**：以 `analysis_agent_node` 的 `input_tokens` / `output_tokens` 聚合估算，按周对账。
+
+按 run 汇总 token 与请求，用于费用与预算告警：
+
+```sql
+-- 单个 Job 的分层 token 与请求量（费用估算 / 异常放大检测）
+select
+  node.agent_run_id,
+  count(*)                          as agent_count,
+  sum(node.model_requests)          as model_requests,
+  sum(node.tool_calls)              as tool_calls,
+  sum(coalesce(node.input_tokens, 0))  as input_tokens,
+  sum(coalesce(node.output_tokens, 0)) as output_tokens
+from public.analysis_agent_node node
+where node.agent_run_id = '<agent_run_id>'
+group by node.agent_run_id;
+```
+
+调优顺序不变：先看真实的 per-Agent 请求 / retry / compaction / 工具 / Evidence 计数，再调预算；
+不要凭单个 Task 耗时盲目抬高总请求上限。
+
+## 15.4 Agent / Job / 进程孤儿检查
+
+### 进程孤儿
+
+`acp-process-supervisor.ts` 以 `detached: true` 让每个 attempt 的 `dsh` 独立成进程组，回收时
+逐级升级（`terminate` → 组 `SIGTERM` → 组 `SIGKILL`），最后用 `ps -eo pid=,pgid=,stat=` 读全表
+按 `pgid` 过滤，确认组内没有存活进程。**镜像必须装 `procps` 提供 `ps`**，否则无法确认后代
+进程（构建 / 测试 / 静态检查）已回收，会记 `process_tree_cleanup_failed`。
+
+两条在真实 Linux 容器里实测出来的注意事项（测试见
+`worker/src/__tests__/v4-process-tree-linux.test.ts`，`RUN_LINUX_PROCESS_TREE=1` 开启）：
+
+1. **组信号是必须的，不是保险。** 只终止直接子进程时，Shell / Jobs 起的孙辈进程会继续运行
+   （实测留下 3 个存活的 `sleep`）。所以 `detached: true` 那一位是"能否回收整棵进程树"的
+   全部区别所在。
+2. **僵尸不等于未回收。** 组 `SIGKILL` 之后，后代先变成僵尸（`ps` 的 `stat` 列为 `Z`），要等
+   父进程 wait 掉才从进程表消失 —— 而它们的父进程刚好也被同一次信号杀了。因此：
+   - `listProcessGroup()` 按 `stat` 排除 `Z`，否则每一次用过 Shell 的 attempt 都会误报
+     `process_tree_cleanup_failed`，真正的回收失败会被这些噪音盖住；
+   - **容器必须有 init 进程收僵尸**（`docker-compose.worker.yml` 的 `init: true`，Docker 会注入
+     tini 作为 PID 1）。没有它时 PID 1 就是 Worker 自己，而 libuv 只 wait 它亲手 spawn 的子进程，
+     继承来的孤儿会永久挂着，最终撞上容器的 PID 上限。实测：不加 `init` 时组内留下 2 个
+     `state=Z`；加了之后组为空。
+
+`ps -g <pgid>` **不能**用来选进程组：procps 的 `-g` 选的是 session，而 procps-ng 4.0.2 不支持
+`--pgid` 长选项。按 `pgid` 列自己过滤是唯一精确的做法。
+
+容器内核对残留进程：
+
+```bash
+# 进入某副本，查看是否只剩 npm / node 主进程，无游离的构建/测试进程；
+# STAT 列出现 Z 说明 init 没在收尸，检查 compose 的 init: true 是否生效
+docker compose -f docker-compose.worker.yml exec worker \
+  ps -eo pid,ppid,pgid,stat,comm
+
+# 确认 PID 1 是 tini（init 已注入），而不是 node 本身
+docker compose -f docker-compose.worker.yml exec worker ps -o pid=,comm= -p 1
+```
+
+### Agent Tree 孤儿（数据库）
+
+```sql
+-- 仍标记 RUNNING 但所属 run 已结束的 Agent 节点（疑似孤儿 / 未正常收敛）
+select node.agent_run_id, node.agent_id, node.agent_role, node.provider,
+       node.delegation_depth, node.status, node.started_at
+from public.analysis_agent_node node
+join public.analysis_agent_run run on run.id = node.agent_run_id
+where node.status = 'RUNNING'
+  and run.status in ('FAILED', 'COMPLETED', 'CANCELLED')
+order by node.started_at;
+```
+
+### Job / Task 孤儿
+
+沿用第 6.4、12 节原则：先确认对应 Worker PID/容器与 Task lease 已失效，再回收 attempt 叶子；
+不递归清理共享 cache。lease 与孤儿状态可结合 `analysis_agent_run` 与 Task 记录判断。
+
+### Session 孤儿
+
+```sql
+-- 已过保留期但尚未标记 EXPIRED 的 Session checkpoint（应被 retention 回收）
+select session_id, session_revision, status, storage_locator, retention_until
+from public.analysis_session_checkpoint
+where retention_until < now()
+  and status <> 'EXPIRED'
+order by retention_until;
+```
+
+> 注意：`storage_locator` 是宿主路径，属敏感字段，仅在受控排障场景查看，不得转贴进普通日志
+> 或工单；日志侧已由 `redaction.ts` 只保留 basename。
+
+## 15.5 Session corruption runbook
+
+触发信号：`SESSION_RECOVERY_FAILED` / `SESSION_FORMAT_UNSUPPORTED` 错误码，或 checkpoint
+状态被标记为 `CORRUPT` / `UNSUPPORTED`。
+
+### 先分清三种形态，它们的处置完全不同
+
+Session 日志由 `dsh-session-persistence-jsonl` 写在持久卷上，布局是
+`<AGENT_SESSION_ROOT>/attempt-<摘要>/<workspace-slug>/<sessionId>/session.v3.jsonl`。
+
+平台把编码显式设为 `compression: 'none'`（明文换行分隔），不是插件默认的 zstd 帧。这个选择
+有两条运维含义：
+
+- **日志可以直接读。** 事故里人能一眼看到尾部发生了什么，不需要先解码。
+- **平台能自己验证已提交前缀。** 压缩形态下只能通过 backend 读，"committed 部分是否损坏"
+  只有等 resume 真的失败才知道。
+
+三种形态：
+
+| 形态 | 判据 | 是否可恢复 | 处置 |
+|---|---|---:|---|
+| **崩溃残尾** | 最后一行 JSON 不完整，之前每行都完整 | 可恢复 | 无需干预。backend 丢弃残尾并补写合成收尾，Worker 正常 resume |
+| **已提交前缀损坏** | 中间某行无法解析 | 不可恢复 | `SESSION_RECOVERY_FAILED`。保留原文，让平台开新 attempt |
+| **格式/策略不匹配** | 文件名的 `vN` 或 policy hash 与当前不符 | 不可恢复 | `SESSION_FORMAT_UNSUPPORTED`。同上，绝不改写 JSONL |
+
+**崩溃残尾不是故障。** 一个健康的系统在每次 Worker 被强杀后都会留下残尾；把它当损坏处理
+等于"只有从没崩过的会话才能恢复"，resume 就形同虚设。
+
+### 处置
+
+1. **不修改、不删除 JSONL 原文**。它是审计与取证依据，也是唯一能区分上面三种形态的东西。
+2. 手工判断形态（明文日志可以直接看）：
+
+   ```bash
+   # 最后一行是否完整 JSON —— 完整说明不是残尾问题
+   tail -n 1 <storage_locator> | python3 -c 'import sys,json; json.loads(sys.stdin.read()); print("last record complete")'
+
+   # 已提交前缀是否都能解析（排除最后一行）
+   head -n -1 <storage_locator> | python3 -c '
+   import sys,json
+   for i, line in enumerate(sys.stdin, 1):
+       if line.strip():
+           try: json.loads(line)
+           except Exception: print("corrupt committed record", i); break
+   else: print("committed prefix is intact")'
+   ```
+3. 定位受影响 Session：
+
+   ```sql
+   select session_id, session_revision, status, content_hash, storage_locator
+   from public.analysis_session_checkpoint
+   where status in ('CORRUPT', 'UNSUPPORTED')
+   order by created_at desc;
+   ```
+4. 将 checkpoint 标记为不可恢复由 Worker 侧完成；运维只需确认该 attempt 已收敛为终止态
+   （`SESSION_FENCED` / `SESSION_RECOVERY_FAILED` 属终止错误码，见第 15.8）。
+4. 通过正常重试路径创建**新 attempt**（新 `agent_attempt` + 新 claim token），不复用旧 token、
+   不手改状态、不篡改旧 JSONL。
+5. 若是 Harness 版本升级导致的格式不兼容（`SESSION_FORMAT_UNSUPPORTED`），按第 12.3 回滚原则
+   处理：标记不兼容、创建新 attempt，不回滚数据库、不改 JSONL。
+6. 已提交结果绝不重跑。
+
+## 15.6 Web egress 故障 runbook
+
+正常事件：`web_egress_completed`（记 `url` = origin+path、status、bytes、redirects）、
+`web_egress_redirect`（记每一跳的 origin+path）。拒绝以 `WEB_EGRESS_DENIED` 返回。
+
+常见故障与处置：
+
+| 现象 | 可能原因 | 处置 |
+|---|---|---|
+| 全部 `WEB_EGRESS_DENIED`，allowlist 为空 | policy `web.allowedDomains` 未配置 | 该 attempt 无可达目的地属预期；如需放行，在模型/policy snapshot 补白名单域名，不改 Worker 代码 |
+| 目的地被拒 | 命中内网 / IP 字面量 / 非白名单端口 / 平台基础设施主机 | 属安全策略预期；核对目标域名是否应加入白名单 |
+| `too many redirects` | 跳转超过 `web.maxRedirects` | 核对目标站点跳转链；必要时调 policy，不放宽内网限制 |
+| content-type 被拒 | 响应非可读文本 | 属预期；Web 工具只读文本 |
+| 大面积 Web 超时 / 供应商故障 | 网络或外部站点问题 | 启用 `V4_BREAKER_DISABLE_WEB` 临时熔断，事故解除后移除并滚动重启 |
+
+排障只用 `web_egress_*` 事件里的 origin+path、status、bytes 关联，**绝不打开 URL query/fragment
+或网页正文**（`redaction.ts` 已强制只保留 origin+path）。
+
+## 15.7 紧急熔断开关用法
+
+场景：某类能力正在造成事故（如 Web egress 打爆供应商、Shell 写入触发磁盘或安全问题、
+子 Agent 放大失控、Workflow 卡死）。
+
+步骤：
+
+1. 在 `.docker/worker.env` 或部署平台注入对应 `V4_BREAKER_DISABLE_*=1`。
+2. 滚动重启 Worker（见第 15.9），使新 policy 生效。
+3. 确认日志出现 `v4_emergency_breakers_active` 且 `breakers` 含对应项。
+4. 事故解除后**移除**该环境变量并再次滚动重启，恢复 V4 默认全开。
+
+注意：熔断只收窄不放开；用户配置与数据库 policy 语义保持默认全开不变。不要把熔断当作
+长期开关，也不要用它替代 policy snapshot 调参。
+
+## 15.8 第 9 节错误码表与处理动作
+
+16 个稳定错误码定义在 `worker/src/ai/policy/v4-errors.ts`（`V4_ERROR_CODES`），与
+`worker/harness/code-review-acp/v4-capability-contract.json` 的 `errorCodes` 一致，contract test
+比对两边。稳定含义：UI 分类、运维告警、回滚判定按码走，消息可改但不含源码/Prompt/凭据。
+
+标记说明：`终止` = attempt 不可能成功应立即收敛（`isTerminalV4Error`）；`可自纠` = 模型可换
+工具/URL/证据再试，不终止 turn（`isModelCorrectableV4Error`）。
+
+| 错误码 | 含义 | 类别 | 运维/重试处理动作 |
+|---|---|---|---|
+| `AGENT_IDENTITY_INVALID` | Agent capability 或 lineage 无效 | — | 疑似令牌伪造/重放；检查 `analysis_agent_node` lineage，勿放宽校验 |
+| `AGENT_ROLE_DENIED` | 当前 role 无权调用该工具 | 可自纠 | 正常治理拒绝；无需干预，模型应换工具 |
+| `SUBMIT_ROOT_ONLY` | 非根 Agent 尝试提交 | 可自纠 | 预期约束；唯一提交权归 root |
+| `AGENT_TREE_LIMIT_EXCEEDED` | Agent 数量或深度超限 | 可自纠 | 检查 `maxAgentsPerAttempt`/`maxDelegationDepth`；失控时用 `V4_BREAKER_DISABLE_SUBAGENTS` |
+| `AGENT_TREE_CANCELLED` | Agent Tree 已取消 | 终止 | 由 cancel/drain 触发；确认进程树已回收 |
+| `MODEL_BUDGET_EXHAUSTED` | 模型预算耗尽 | 终止 | 评估需求范围与真实 usage 后调 `modelBudget`，勿盲目抬上限 |
+| `TOOL_BUDGET_EXHAUSTED` | Tool/Web/Workspace 预算耗尽 | 可自纠 | 检查对应预算项与 attempt 是否异常放大 |
+| `WORKSPACE_POLICY_DENIED` | Filesystem/Shell 越界 | 可自纠 | 预期沙箱拒绝；持续越界排查 prompt/工具行为 |
+| `WEB_EGRESS_DENIED` | Web 目的地或请求被拒 | 可自纠 | 见 15.6；必要时调白名单或熔断 Web |
+| `SESSION_FENCED` | Session 被新 Worker/attempt 接管 | 终止 | 并发写保护预期行为；确认无重复实例后走新 attempt |
+| `SESSION_FORMAT_UNSUPPORTED` | Harness/Session 格式不兼容 | 终止 | 按 12.3：标记不兼容、创建新 attempt、不改 JSONL |
+| `SESSION_RECOVERY_FAILED` | Session 无法安全恢复 | 终止 | 见 15.5 Session corruption runbook |
+| `EVIDENCE_AGENT_INVALID` | Evidence 不属于当前 Agent Tree | 可自纠 | 证据归属校验失败；勿绕过校验 |
+| `EVIDENCE_ORIGIN_INVALID` | Artifact 被错误用于证明现有实现 | 可自纠 | 仅 `PINNED_SNAPSHOT` 可证明代码已存在，Artifact 只能支撑建议 |
+| `ATTEMPT_ALREADY_SEALED` | Attempt 已提交或终止 | 终止 | 拒绝迟到写入，属预期 fencing |
+| `PROCESS_TREE_CLEANUP_FAILED` | 后代进程未完全回收 | 终止 | 见 15.4；确认 `procps` 可用、无残留构建/测试进程 |
+
+## 15.9 V4 扩缩容与滚动重启
+
+在第 13 节原则基础上补充 V4 特有步骤。
+
+滚动重启：
+
+1. 停止创建新 Job，关闭 admission（观察 `attempt_admission_closed`）。
+2. 对活跃 Agent Tree 执行 cancel/drain（观察 `attempt_cancel_requested` → `attempt_drained`）。
+3. 逐副本重启，`stop_grace_period: 30s` 内完成 ACP 取消与 lease 释放。
+4. 确认旧 attempt 的进程树、socket、profile、`.writer.lock` 已回收（无 `process_tree_cleanup_failed`）。
+5. 因 Session 卷持久，重启后 Worker 会尝试恢复未提交 Session（`session_writer_lock_reclaimed`
+   属正常接管）；先用 1 个副本跑小 Job 验证恢复链路。
+6. 再恢复目标副本数。
+
+扩缩容：
+
+- 每副本唯一 `WORKER_ID`（compose 由 hostname 派生）。
+- `worker-sessions` / `worker-cache` 可多副本共享（分别由单写者锁与内容寻址保证安全）；
+  `worker-jobs` instance lock 按 `WORKER_ID` 区分。
+- 扩容**前**必须重新评估供应商 RPM/TPM/费用：多 Agent 峰值远高于 V3。
+- `max_parallel_tasks` 是同一模型配置的最终并发阀门。
+- 缩容前观察当前 lease 与活跃 Agent Tree，等待收敛或安全终止。
+- 镜像回退只允许回到能读取扩展 schema 的兼容版本（见 12.3）。
+
+## 15.10 生产切换与回滚原则（第 12 节）
+
+生产切换（expand/contract，摘自 12.2）：
+
+1. 在非生产或预发布环境完成 Release Gate、连通性、安全和全能力小 Job；
+2. 停止创建新分析 Job；
+3. 等待或安全终止全部存量 attempt，并确认不存在 `QUEUED`、`PREPARING_CODE`、`PROCESSING`、`FINALIZING` 状态的旧 Job；
+4. 部署 Session/Web/Workspace 依赖与持久卷（先 `docker volume create` / compose 声明的
+   `worker-sessions` 等，确认加密与备份）；
+5. 在同一受控发布窗口先应用 DB expand migration 0027，再部署全部 V4 Worker；
+6. 执行迁移后健康检查和受控 V4 smoke Job；
+7. 确认新 Job 的 `policy_version`、policy snapshot 和 policy hash 均为 V4；
+8. 恢复用户“开始 AI 分析”入口，此后所有新 Job 直接使用 V4；
+9. 观察 Agent Tree、预算、错误率、磁盘与模型成本；
+10. 达到稳定窗口后确认发布完成，保留期满后再做 contract migration。
+
+回滚原则（12.3，硬约束）：
+
+- 不直接回滚数据库 migration，优先前滚修复；
+- 停止 V4 新 Job，关闭 Worker admission；
+- cancel/drain 活跃 V4 Agent Tree；
+- 回滚到能读取扩展 schema 的兼容 Worker；
+- **已提交结果绝不重跑**；
+- Session 格式不兼容标记 `SESSION_FORMAT_UNSUPPORTED`，创建新 attempt，不篡改 JSONL；
+- 外部副作用通过 Artifact/Workspace/Audit 清理，不通过删除数据库记录掩盖；
+- 紧急情况下运维可用熔断开关关闭 Web/Shell-write/Subagent/Workflow，但用户配置仍保持
+  V4 默认全开语义，事故解除后恢复。
+
+## 15.11 日志字段白名单与禁止记录项
+
+所有日志必须经过 `worker/src/security/redaction.ts`。
+
+允许记录（白名单）：
+
+- Job / Task / Attempt / Root / Agent / Parent / Session ID；
+- Tool 名、permission verdict、耗时、请求/响应字节数；
+- Budget reserve/commit/deny；
+- Session revision / checkpoint（locator 仅 basename，见下）；
+- Cancel reason；
+- Harness / profile / policy / tool-policy hash；
+- Artifact metadata（类型、大小、content hash、verification status）。
+
+禁止记录（`redaction.ts` 已强制）：
+
+- Prompt、需求全文、源码、工具正文；
+- **Session JSONL 内容**（transcript body）；
+- API Key、service role、Git token、claim token、Broker/agent **capability token**（base64url 长串）；
+- Authorization header（Bearer / Basic）；
+- **Web URL 的 query 与 fragment、网页正文**（只允许 origin+path）；
+- **storage locator 的完整宿主路径**（只保留 basename）。
+
+排障一律用 ID / hash / 计数关联，不临时打开源码或密钥日志。
+
+## 15.12 新表审计查询示例
+
+```sql
+-- (1) Agent Tree 结构：一次 run 的父子关系、角色、来源与状态
+select node.agent_id, node.agent_role, node.provider, node.delegation_depth,
+       node.status, node.parent_agent_node_id, node.error_code
+from public.analysis_agent_node node
+where node.agent_run_id = '<agent_run_id>'
+order by node.delegation_depth, node.started_at;
+
+-- (2) 工具审计：只含安全元数据（无正文/URL query），排查被拒工具
+select ta.started_at, ta.tool_name, ta.permission_verdict, ta.error_code,
+       ta.duration_ms, ta.request_bytes, ta.response_bytes
+from public.analysis_tool_audit ta
+where ta.agent_run_id = '<agent_run_id>'
+  and ta.permission_verdict = 'DENY'
+order by ta.started_at;
+
+-- (3) 权限判定：哪一层策略拒绝了工具（global/role/child-filter/broker/lease/budget）
+select pd.decided_at, pd.agent_role, pd.tool_name, pd.policy_layer,
+       pd.decision, pd.reason_code
+from public.analysis_permission_decision pd
+where pd.agent_run_id = '<agent_run_id>'
+  and pd.decision = 'DENY'
+order by pd.decided_at;
+
+-- (4) Session checkpoint：locator/hash/事件数/保留期（原文不入库）
+select sc.session_id, sc.session_revision, sc.status, sc.event_count,
+       sc.content_hash, sc.retention_until
+from public.analysis_session_checkpoint sc
+where sc.agent_run_id = '<agent_run_id>'
+order by sc.session_revision desc;
+
+-- (5) Artifact：候选 Patch/报告的类型、大小、校验状态与保留期
+select a.artifact_type, a.workspace_path, a.size_bytes, a.content_hash,
+       a.verification_status, a.retention_until
+from public.analysis_artifact a
+where a.agent_run_id = '<agent_run_id>'
+order by a.created_at;
+```
+
+> `storage_locator` 为宿主路径属敏感字段，仅在受控排障查看，不得转贴到普通日志/工单。

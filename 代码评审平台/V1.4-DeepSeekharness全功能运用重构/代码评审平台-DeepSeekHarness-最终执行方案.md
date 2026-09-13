@@ -36,7 +36,7 @@
 - 生产只发布一个完整 V4；
 - 不向用户分批开放能力；
 - V4 Job 从创建开始就使用完整能力面；
-- 未完成全部 Release Gate 前，不把任何 V4 能力切为生产默认。
+- 全部 Release Gate 必须在部署含迁移 0027 的生产版本前完成；迁移部署后，新建 Job 立即使用完整 V4 policy。
 
 ### 1.3 默认开启的准确含义
 
@@ -942,31 +942,32 @@ npm run lint
 21. attempt sealed 后所有迟到调用被拒绝；
 22. 全部 Agent、Workflow、Jobs、进程、Socket 和 Workspace 正确清理。
 
-以上任意一项未通过，V4 不得切为生产默认。
+以上任意一项未通过，不得部署会应用迁移 0027 并启用 V4 Worker 的生产版本。
 
 ## 12. 迁移、发布与回滚
 
 ### 12.1 数据库迁移
 
-采用 expand/contract：
+采用 expand/contract，并在 expand 阶段直接启用 V4：
 
-1. 先新增表、列、索引和 RPC；
-2. 保持 V3 数据可读；
-3. V4 Worker 只领取 `policy_version = 4` 的任务；
-4. 完整验证后将新建 Job 默认设为 V4；
-5. 暂不删除 V3 字段和 RPC；
-6. 稳定运行并完成数据保留期后再做 contract migration。
+1. 迁移 0027 新增表、列、索引和 RPC；
+2. 保持历史 V3 数据可读；
+3. 从 0027 起，`analysis_job.policy_version` 默认值和 `enqueue_analysis_job` 均直接使用 V4；
+4. 不设置默认 V3 的过渡期，也不安排后续 policy flip 迁移；
+5. V4 Worker 只领取 `policy_version = 4` 的任务；
+6. 暂不删除 V3 历史字段和兼容 RPC；
+7. 稳定运行并完成数据保留期后再做 contract migration。
 
 ### 12.2 生产切换
 
-1. 停止创建新分析 Job；
-2. 等待 V3 attempt 完成或安全终止；
-3. 部署 DB expand migration；
+1. 在非生产或预发布环境完成 Release Gate、连通性、安全和全能力小 Job；
+2. 停止创建新分析 Job；
+3. 等待或安全终止全部存量 attempt，并确认不存在 `QUEUED`、`PREPARING_CODE`、`PROCESSING`、`FINALIZING` 状态的旧 Job；
 4. 部署 Session/Web/Workspace 依赖和持久卷；
-5. 部署全部 V4 Worker；
-6. 运行连通性、安全和全能力小 Job；
-7. 将 enqueue 默认 policy 切到 V4；
-8. 恢复用户“开始 AI 分析”入口；
+5. 在同一受控发布窗口先应用 DB expand migration 0027，再部署全部 V4 Worker；
+6. 执行迁移后健康检查和受控 V4 smoke Job；
+7. 确认新 Job 的 `policy_version`、policy snapshot 和 policy hash 均为 V4；
+8. 恢复用户“开始 AI 分析”入口，此后所有新 Job 直接使用 V4；
 9. 观察 Agent Tree、预算、错误率、磁盘和模型成本；
 10. 达到稳定窗口后确认发布完成。
 

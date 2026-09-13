@@ -5,6 +5,10 @@
  * The channel is a Unix domain socket inside a per-attempt 0700 directory.
  * Plugins never hold Supabase credentials, model API keys or snapshot roots;
  * every privileged decision stays in the Worker process behind this channel.
+ *
+ * V4 增加了一层身份：每个请求体除了 attempt 信息，还带调用者的 agent capability。
+ * attempt token 走 HTTP header，agent capability 走请求体 —— 两者是不同的东西，混在一起
+ * 会让"整个子进程"和"子进程里某个 Agent"变得不可区分。
  */
 
 import { request } from 'node:http'
@@ -21,6 +25,16 @@ export interface BrokerChannelOptions {
 export interface BrokerResponse<T> {
   status: number
   body: T
+}
+
+/** 一次调用的 Agent 身份。由插件从 Harness 的执行上下文取得，不由模型提供。 */
+export interface AgentCallIdentity {
+  /** 调用者的 capability token。Broker 只按它查身份。 */
+  agentCapability: string
+  agentId: string
+  sessionId: string
+  toolCallId?: string
+  toolName?: string
 }
 
 export class BrokerChannelError extends Error {
@@ -103,4 +117,22 @@ export function brokerPost<T = unknown>(
     })
     req.end(body)
   })
+}
+
+/** 组装一个带身份的请求体。 */
+export function withIdentity(
+  base: { taskId: string; agentAttempt: number },
+  identity: AgentCallIdentity,
+  payload: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    ...payload,
+    taskId: base.taskId,
+    agentAttempt: base.agentAttempt,
+    agentCapability: identity.agentCapability,
+    agentId: identity.agentId,
+    sessionId: identity.sessionId,
+    toolCallId: identity.toolCallId ?? null,
+    toolName: identity.toolName ?? null,
+  }
 }

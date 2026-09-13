@@ -395,3 +395,233 @@ export interface BatchWorkspace {
   evidence: AiCodeEvidence[]
   humanReviews: HumanReview[]
 }
+
+// ---------------------------------------------------------------------------
+// V4 DeepSeek Harness：Agent 运行详情与默认能力策略（见方案第 7.10 节）
+//
+// 安全约束：这些类型只映射 get_analysis_agent_run_detail /
+// admin_get_v4_capability_policy 返回的安全元数据。浏览器绝不会拿到源码工具正文、
+// Session JSONL、storage locator、API Key、claim/broker token —— 所以下面刻意
+// 不声明任何 locator/token/payload 字段，避免误以为这些数据前端可用。
+// ---------------------------------------------------------------------------
+
+/** Agent 运行整体状态。对应 analysis_agent_run.status。 */
+export type AgentRunStatus = 'RUNNING' | 'FINISHED' | 'FAILED' | 'CANCELLED'
+
+/** Agent Tree 单个节点状态。 */
+export type AgentNodeStatus = 'RUNNING' | 'FINISHED' | 'FAILED' | 'CANCELLED'
+
+/** Agent 角色：一个 root-reviewer 委派若干子 Agent。 */
+export type AgentRole =
+  | 'root-reviewer'
+  | 'research-child'
+  | 'implementation-child'
+  | 'critic-child'
+  | 'workflow-child'
+
+/** Agent 的产生方式：root 自身、spawn/fork 子 Agent、workflow 步骤或 ralph 循环。 */
+export type AgentProvider = 'root' | 'spawn' | 'fork' | 'workflow' | 'ralph'
+
+/** 工具调用的权限判定结果，用于展示每类工具被放行/拒绝/取消的次数。 */
+export type ToolPermissionVerdict = 'ALLOW' | 'DENY' | 'CANCELLED'
+
+/** Evidence 来源：只有 PINNED_SNAPSHOT 能证明代码已存在；GENERATED_ARTIFACT 仅支撑建议。 */
+export type EvidenceOrigin = 'PINNED_SNAPSHOT' | 'GENERATED_ARTIFACT'
+
+/** Artifact 类型：候选 Patch、测试/构建报告、静态分析或说明。 */
+export type ArtifactType = 'PATCH' | 'TEST_REPORT' | 'BUILD_LOG' | 'STATIC_ANALYSIS' | 'NOTE'
+
+/** Artifact 校验状态。 */
+export type ArtifactVerificationStatus = 'UNVERIFIED' | 'VERIFIED' | 'REJECTED'
+
+/** 整次尝试的真实用量汇总（对应 usage 子对象）。 */
+export interface AgentRunUsage {
+  model_requests: number
+  root_model_requests: number
+  child_model_requests: number
+  retry_requests: number
+  compaction_requests: number
+  ralph_rounds: number
+  tool_calls: number
+  evidence_shown: number
+  searches_run: number
+  web_requests: number
+  web_bytes: number
+  input_tokens: number
+  output_tokens: number
+  agent_count: number
+  max_depth_reached: number
+}
+
+/** Agent Tree 节点：按 delegation_depth 缩进展示层级与分 Agent 用量。 */
+export interface AgentTreeNode {
+  node_id: string
+  agent_id: string
+  parent_node_id: string | null
+  agent_role: AgentRole
+  provider: AgentProvider
+  delegation_depth: number
+  status: AgentNodeStatus
+  model_requests: number
+  tool_calls: number
+  evidence_produced: number
+  error_code: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+/** 按工具名 + 权限判定聚合的调用计数（不含任何工具正文）。 */
+export interface ToolSummaryRow {
+  tool_name: string
+  permission_verdict: ToolPermissionVerdict
+  call_count: number
+  total_duration_ms: number
+}
+
+/** Artifact 摘要：只暴露安全元数据，storage_locator 不返回给浏览器。 */
+export interface ArtifactSummary {
+  artifact_id: string
+  artifact_type: ArtifactType
+  workspace_path: string
+  content_hash: string
+  size_bytes: number
+  verification_status: ArtifactVerificationStatus
+  created_at: string
+}
+
+/** Evidence 摘要：区分 PINNED_SNAPSHOT 与 GENERATED_ARTIFACT。 */
+export interface EvidenceSummary {
+  evidence_id: string
+  repository_name: string
+  file_path: string
+  start_line: number | null
+  end_line: number | null
+  evidence_type: EvidenceType
+  evidence_origin: EvidenceOrigin
+  description: string
+  producer_agent_node_id: string | null
+}
+
+/** get_analysis_agent_run_detail 顶层返回。无运行记录时 RPC 返回 null。 */
+export interface AgentRunDetail {
+  run_id: string
+  task_id: string
+  job_id: string
+  agent_attempt: number
+  status: AgentRunStatus
+  policy_hash: string | null
+  tree_digest: string | null
+  session_revision: number | null
+  resume_count: number | null
+  cancel_requested_at: string | null
+  cancel_reason: string | null
+  sealed_at: string | null
+  error_code: string | null
+  started_at: string | null
+  committed_at: string | null
+  finished_at: string | null
+  usage: AgentRunUsage
+  agents: AgentTreeNode[]
+  tool_summary: ToolSummaryRow[]
+  artifacts: ArtifactSummary[]
+  evidence: EvidenceSummary[]
+}
+
+// --- 默认能力策略（admin_get_v4_capability_policy 返回，仅 ADMIN 只读展示） ---
+
+/** 20 个能力开关，默认全部开启。这个页面只读展示，普通启动流程不提供任何开关。 */
+export interface V4Capabilities {
+  instructions: boolean
+  skills: boolean
+  goal: boolean
+  plan: boolean
+  todo: boolean
+  ralph: boolean
+  subagentSpawn: boolean
+  subagentFork: boolean
+  subagentControl: boolean
+  workflow: boolean
+  jobs: boolean
+  shell: boolean
+  filesystem: boolean
+  webSearch: boolean
+  webFetch: boolean
+  parallelTools: boolean
+  autoCompaction: boolean
+  sessionPersistence: boolean
+  sessionResume: boolean
+  artifacts: boolean
+}
+
+export interface V4SandboxPolicy {
+  defaultMode: string
+  dangerFullAccess: boolean
+  commandTimeoutMs: number
+  maxProcessesPerAttempt: number
+  maxWorkspaceBytes: number
+  maxWorkspaceFiles: number
+}
+
+export interface V4AgentsPolicy {
+  maxAgentsPerAttempt: number
+  maxDelegationDepth: number
+  maxConcurrentChildren: number
+  allowOutOfProcessProviders: boolean
+}
+
+export interface V4WorkflowPolicy {
+  maxConcurrentSteps: number
+  maxRuntimeMs: number
+}
+
+export interface V4JobsPolicy {
+  maxConcurrentJobsPerOwner: number
+  maxRuntimeMs: number
+}
+
+export interface V4ParallelToolsPolicy {
+  maxPerStep: number
+  mutationToolsSerial: boolean
+}
+
+export interface V4ModelBudgetPolicy {
+  maxTotalRequests: number
+  maxRootRequests: number
+  maxChildRequests: number
+  maxRetryRequests: number
+  maxCompactionRequests: number
+  maxRalphRounds: number
+}
+
+export interface V4WebPolicy {
+  maxRequestsPerAttempt: number
+  maxResponseBytes: number
+  maxTotalBytes: number
+  allowHttp: boolean
+  allowedPorts: number[]
+  allowedDomains: string[]
+  denyPrivateNetworks: boolean
+  maxRedirects: number
+  requestTimeoutMs: number
+}
+
+export interface V4SessionPolicy {
+  checkpointEveryEvents: number
+  retentionDays: number
+  encryptAtRest: boolean
+  resumeOnWorkerRestart: boolean
+}
+
+/** 完整默认能力策略快照。 */
+export interface V4CapabilityPolicy {
+  version: number
+  capabilities: V4Capabilities
+  sandbox: V4SandboxPolicy
+  agents: V4AgentsPolicy
+  workflow: V4WorkflowPolicy
+  jobs: V4JobsPolicy
+  parallelTools: V4ParallelToolsPolicy
+  modelBudget: V4ModelBudgetPolicy
+  web: V4WebPolicy
+  session: V4SessionPolicy
+}

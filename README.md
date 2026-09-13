@@ -35,30 +35,49 @@ See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rule
 
 The background analysis Worker lives under `worker/` and builds independently of
 the frontend. It polls Supabase, freezes the four whitelisted repositories at
-exact commit SHAs, and runs one DeepSeek Harness ACP Agent per claimed Story
-Task. The Agent searches and reads code through Broker-controlled, read-only
-snapshot tools, submits through the terminal `submit_review_result` tool, and
-commits verified results through canonical service-role RPCs. There is no
-fixed retrieval/analysis pipeline or alternate execution path.
+exact commit SHAs, and runs one DeepSeek Harness ACP attempt per claimed Story
+Task. On V4 each attempt drives a **multi-agent tree** (a root reviewer that may
+spawn/fork research, implementation, critic and workflow children) with the full
+Harness capability set **enabled by default** — Sandbox Shell, Filesystem, Web
+egress, Workflow/Subagent/Jobs, parallel tools, auto-compaction and JSONL
+session persistence. Capabilities are a user-facing default; operators narrow
+them only during incidents via emergency breaker env vars
+(`V4_BREAKER_DISABLE_WEB` / `_SHELL_WRITE` / `_SUBAGENTS` / `_WORKFLOW`).
+
+Snapshot reads still go through Broker-controlled, read-only tools bound to the
+pinned commit; only the root agent can submit through `submit_review_result`;
+and every result is committed through canonical service-role RPCs. The resolved
+tool inventory is validated against the frozen
+`worker/harness/code-review-acp/v4-capability-contract.json`.
+
+Session JSONL transcripts persist on a **named volume** (`AGENT_SESSION_ROOT`,
+default `/workspace/agent-sessions`, 0700, encrypt at rest) so a restarted Worker
+can resume an uncommitted session; concurrent writes are fenced by a local
+single-writer lock plus database `session_revision`.
 
 Scripts:
 
 ```bash
-npm run worker:build   # tsc -p tsconfig.worker.json  -> dist-worker/
-npm run worker:start   # node dist-worker/index.js
-npm run worker:check-connectivity # GitLab + Supabase/Vault + minimal model ping
-npm run worker:dev     # tsx worker/src/index.ts
-npm run test:worker    # vitest run worker
+npm run worker:typecheck            # tsc -p tsconfig.worker.test.json (type check only)
+npm run worker:build                # tsc -p tsconfig.worker.json  -> dist-worker/
+npm run worker:start                # node dist-worker/index.js
+npm run worker:check-connectivity   # GitLab + Supabase/Vault + minimal model ping
+npm run worker:dev                  # tsx worker/src/index.ts
+npm run test:worker                 # vitest run worker
 ```
 
-Container deployment (default 4 replicas × 2 story slots = capacity 8):
+One-command container deployment (default 4 replicas × 2 story slots = capacity
+8; persistent Session/cache volumes are declared in the compose file):
 
 ```bash
 docker compose -f docker-compose.worker.yml up -d --scale worker=4
 ```
 
-See `worker/OPERATIONS.md` for the full Secret checklist, deployment,
-connectivity verification, logging/audit rules, and the weekly runbook.
+See `worker/OPERATIONS.md` (§15 covers V4: full env/secret checklist,
+retention and disk alerts, RPM/TPM/cost alerts, orphan checks with SQL, session
+corruption and web egress runbooks, emergency breakers, scaling/rolling restart,
+the §12 production cutover/rollback principles, the §9 error-code table, the log
+field allowlist, and audit queries for the new tables) for the full runbook.
 
 ## 微信扫码登录与账号绑定
 
