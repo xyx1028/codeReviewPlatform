@@ -55,13 +55,6 @@ export function HarnessPolicyPage({ isAdmin }: { isAdmin: boolean }) {
         <Tag color="blue">只读</Tag>
       </div>
 
-      <Alert
-        type="info"
-        showIcon
-        title="全能力默认开启，无需任何配置步骤"
-        description="这里展示平台统一的默认能力策略，接入任何模型都具备这些能力。普通启动流程不展示任何能力开关：用户只需点击“开始 AI 分析”，后端会自动冻结本次任务的策略。"
-      />
-
       {policyQuery.isError ? (
         <Alert type="error" showIcon title="能力策略加载失败" description={policyQuery.error.message} />
       ) : null}

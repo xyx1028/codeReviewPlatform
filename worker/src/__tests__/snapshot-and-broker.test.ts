@@ -710,9 +710,9 @@ describe('AttemptControlBroker', () => {
       expect(rejected.body.accepted).toBe(false)
 
       const usage = handle.usage()
-      expect(usage.toolCallsByName['search-code']).toBe(2)
-      expect(usage.toolCallsByName['find-files']).toBe(1)
-      expect(usage.toolCallsByName['submit-review']).toBe(1)
+      expect(usage.toolCallsByName.search_snapshot_code).toBe(2)
+      expect(usage.toolCallsByName.find_snapshot_files).toBe(1)
+      expect(usage.toolCallsByName.submit_review_result).toBe(1)
       expect(usage.toolCalls).toBe(4)
       expect(usage.rejectedSubmissions).toHaveLength(1)
       expect(usage.rejectedSubmissions[0]).toMatch(/EVIDENCE/)
@@ -720,8 +720,8 @@ describe('AttemptControlBroker', () => {
       // 快照式返回：调用方拿到的副本不能被后续调用改写。
       const before = handle.usage()
       await call('/attempt/search-code', { repository: REPO, query: 'gamma' })
-      expect(before.toolCallsByName['search-code']).toBe(2)
-      expect(handle.usage().toolCallsByName['search-code']).toBe(3)
+      expect(before.toolCallsByName.search_snapshot_code).toBe(2)
+      expect(handle.usage().toolCallsByName.search_snapshot_code).toBe(3)
     })
   })
 

@@ -39,6 +39,13 @@ function config(): WorkerConfig {
   sessionRetentionDays: 7,
     sessionVolumeMaxBytes: 20 * 1024 * 1024 * 1024,
     orphanWorkspaceMaxAgeMs: 6 * 60 * 60 * 1000,
+    runtimeEvents: {
+      enabled: false,
+      flushMs: 800,
+      queueMax: 512,
+      batchMax: 64,
+      retentionDays: 30,
+    },
   }
 }
 

@@ -365,11 +365,11 @@ function report(label: string, outcome: AttemptOutcome) {
   const failed = ev.find((e) => e.event === 'agent_attempt_failed')
   const drained = ev.find((e) => e.event === 'attempt_drained')
 
-  // 两个不同的观测面，混起来会得出错误结论：
-  //   * tool_calls_by_name 是 **Broker 路由**，只覆盖需要平台授权的调用；
-  //     goal / todo / bash / subagent / workflow 不经 Broker，在这里不可见。
-  //   * tool_names 来自 ACP 通告，是**模型实际调用的工具名**。
-  const brokerRoutes = Object.keys(
+  // 两个不同的观测面：
+  //   * tool_calls_by_name 是 Broker 汇总的**完整模型工具计数**：platform 工具来自执行路由，
+  //     Harness-origin 工具来自 tool lifecycle；内部控制路由不计入。
+  //   * tool_names 来自 ACP 通告，是本次运行实际出现过的工具名集合，不含次数。
+  const meteredTools = Object.keys(
     (finished?.tool_calls_by_name ?? failed?.tool_calls_by_name ?? {}) as Record<string, number>,
   ).sort()
   const modelTools = ((finished?.tool_names ?? []) as string[]).slice().sort()
@@ -402,7 +402,7 @@ function report(label: string, outcome: AttemptOutcome) {
       `根工具面:        ${String(started?.root_tools ?? '?')} 个`,
       `模型调用的工具:  ${modelTools.length > 0 ? modelTools.join(', ') : '(ACP 未通告)'}`,
       `委派类工具:      ${delegationTools.length > 0 ? delegationTools.join(', ') : '(未使用)'}`,
-      `Broker 路由:     ${brokerRoutes.length > 0 ? brokerRoutes.join(', ') : '(无)'}`,
+      `计量工具:        ${meteredTools.length > 0 ? meteredTools.join(', ') : '(无)'}`,
       `Evidence:        ${String(finished?.evidence_shown ?? failed?.broker_evidence_shown ?? 0)}`,
       `被拒的提交:      ${JSON.stringify(rejected)}`,
       `权限拒绝事件:    ${String(roleDenials.length)} 次`,

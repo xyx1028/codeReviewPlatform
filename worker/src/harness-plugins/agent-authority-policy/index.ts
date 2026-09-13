@@ -17,6 +17,7 @@
  */
 
 import z from '@deepseek-ai/schemastery'
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { installAgentIdentityRegistry, DELEGATION_TOOLS } from '../shared/agent-identity.js'
 import { brokerPost, BrokerChannelError } from '../shared/broker-client.js'
@@ -188,6 +189,7 @@ export function apply(ctx: Context, config: AgentAuthorityConfig): void {
     sessionId: string
     toolName: string
     reasonCode: string
+    correlationId: string
   }): void {
     void brokerPost<{ accepted?: boolean }>(channel, '/attempt/tool-audit', {
       taskId: config.taskId,
@@ -198,6 +200,17 @@ export function apply(ctx: Context, config: AgentAuthorityConfig): void {
       toolName: input.toolName,
       decision: 'DENY',
       reasonCode: input.reasonCode,
+      // V1.5：同一次 POST 顺带带上生命周期终态，不新增 Broker 路由（方案 §7.2）。
+      lifecycle: {
+        phase: 'TERMINAL',
+        outcome: 'DENIED',
+        correlationId: input.correlationId,
+        toolName: input.toolName,
+        occurredAt: new Date().toISOString(),
+        durationMs: 0,
+        reasonCode: input.reasonCode,
+        errorCode: input.reasonCode,
+      },
       entries: [
         {
           toolName: input.toolName,
@@ -227,6 +240,48 @@ export function apply(ctx: Context, config: AgentAuthorityConfig): void {
       })
   }
 
+  /**
+   * 一条工具生命周期上报。
+   *
+   * 复用现有的 `/attempt/tool-audit` 路由（V1.5 硬约束：不新增 Broker 路由，
+   * 否则 manifest 哈希改变 → 新 Worker 拒绝所有在途任务 → 必须排空所有活动批次）。
+   * `entries` 传空数组，现有审计行为完全不受影响。
+   *
+   * fail open：监控上报失败只写 stderr，不影响工具执行。
+   */
+  function postToolLifecycle(
+    identity: { agentCapability: string; agentId: string; sessionId: string },
+    lifecycle: Record<string, string | number | boolean | undefined>,
+  ): Promise<void> {
+    return brokerPost<{ accepted?: boolean }>(channel, '/attempt/tool-audit', {
+      taskId: config.taskId,
+      agentAttempt: config.agentAttempt,
+      agentCapability: identity.agentCapability,
+      agentId: identity.agentId,
+      sessionId: identity.sessionId,
+      toolName: lifecycle.toolName,
+      lifecycle,
+      entries: [],
+    })
+      .then(() => undefined)
+      .catch((err: unknown) => {
+        const code = err instanceof BrokerChannelError ? err.code : 'UNKNOWN'
+        process.stderr.write(
+          `[agent-authority-policy] tool lifecycle report failed: code=${code} ` +
+            `tool=${String(lifecycle.toolName)} phase=${String(lifecycle.phase)}\n`,
+        )
+      })
+  }
+
+  /** 把 TERMINAL 挂在 STARTED settle 之后，保证同一 correlation 在 socket 上不乱序。 */
+  function chainToolLifecycle(
+    started: Promise<void>,
+    identity: { agentCapability: string; agentId: string; sessionId: string },
+    lifecycle: Record<string, string | number | boolean | undefined>,
+  ): void {
+    void started.then(() => postToolLifecycle(identity, lifecycle))
+  }
+
   ctx.on(
     'tools/pre-execute',
     async function (exec, next) {
@@ -245,6 +300,9 @@ export function apply(ctx: Context, config: AgentAuthorityConfig): void {
         } as never
       }
 
+      // 一次工具调用生命周期的稳定随机 ID。绝不用命令、URL 或路径当 correlation。
+      const correlationId = randomUUID()
+
       // 平台工具的最终判定在 Broker（它持有令牌表）。这里仍然先拦一次：能在进入模型
       // 上下文之前拒绝的，就不要浪费一次往返和一次 tool result。
       if (!identity.tools.includes(toolName)) {
@@ -254,6 +312,7 @@ export function apply(ctx: Context, config: AgentAuthorityConfig): void {
           sessionId: identity.sessionId,
           toolName,
           reasonCode: toolName === 'submit_review_result' ? 'SUBMIT_ROOT_ONLY' : 'AGENT_ROLE_DENIED',
+          correlationId,
         })
         return {
           decision: 'deny',
@@ -270,7 +329,48 @@ export function apply(ctx: Context, config: AgentAuthorityConfig): void {
         )
       }
 
-      return next()
+      // 这是覆盖全部 30 个模型工具的唯一插桩点：25 个 harness origin 工具
+      // （bash / read / write / edit / grep / glob / web_search / workflow / job_* / subagent …）
+      // 在 Harness 进程内执行，根本不经过 Broker dispatch。只在 Broker 侧插桩的话，
+      // 监控台的"正在调用工具"只能看到 5 个平台快照工具 —— 而实现型 Agent 的绝大部分
+      // 时间恰恰花在 bash / edit / read 上。
+      //
+      // STARTED 不 await：给每次工具调用加一次同步 IPC 往返是不可接受的。但 TERMINAL 必须
+      // 挂在 STARTED settle 之后 —— Node 的 http agent 可能用不同连接，纯 fire-and-forget
+      // 会让同一个 correlation 的两条上报在 socket 上乱序。
+      const startedAt = new Date()
+      const startedPost = postToolLifecycle(identity, {
+        phase: 'STARTED',
+        correlationId,
+        toolName,
+        occurredAt: startedAt.toISOString(),
+      })
+      const t0 = Date.now()
+
+      try {
+        const result = await next()
+        chainToolLifecycle(startedPost, identity, {
+          phase: 'TERMINAL',
+          outcome: 'COMPLETED',
+          correlationId,
+          toolName,
+          occurredAt: new Date().toISOString(),
+          durationMs: Date.now() - t0,
+          ...describeToolResult(result),
+        })
+        return result
+      } catch (err) {
+        chainToolLifecycle(startedPost, identity, {
+          phase: 'TERMINAL',
+          outcome: 'FAILED',
+          correlationId,
+          toolName,
+          occurredAt: new Date().toISOString(),
+          durationMs: Date.now() - t0,
+          errorCode: stableToolErrorCode(err),
+        })
+        throw err
+      }
     },
     { global: true, prepend: true },
   )
@@ -293,6 +393,66 @@ export function apply(ctx: Context, config: AgentAuthorityConfig): void {
   ctx.effect(() => () => {
     // 身份表随进程消亡。Broker 侧的令牌在 attempt 收敛时统一撤销，不依赖这里。
   })
+}
+
+/**
+ * 从工具结果里抽出**安全的**诊断标量（方案 §6.5 的六个诊断扩展字段）。
+ *
+ * 判断标准是"这个字段能不能反推出源码或凭据"。这里只取整数、布尔和字节数：
+ * 命令文本、stdout/stderr 正文、文件路径、查询串一律不取。序列化只用来量长度，
+ * 结果本身绝不外传。
+ */
+function describeToolResult(result: unknown): Record<string, number | boolean | undefined> {
+  const out: Record<string, number | boolean | undefined> = {}
+  if (result === null || typeof result !== 'object') return out
+  const record = result as Record<string, unknown>
+
+  const exitCode = record.exitCode ?? record.exit_code
+  if (typeof exitCode === 'number' && Number.isFinite(exitCode)) out.exitCode = exitCode
+
+  if (typeof record.truncated === 'boolean') out.truncated = record.truncated
+
+  const hits = record.hits
+  if (Array.isArray(hits)) out.hitCount = hits.length
+  else if (typeof record.hitCount === 'number') out.hitCount = record.hitCount
+  else if (typeof record.matchCount === 'number') out.hitCount = record.matchCount
+
+  const files = record.files
+  if (out.hitCount === undefined && Array.isArray(files)) out.hitCount = files.length
+
+  const startLine = record.startLine ?? record.start_line
+  const endLine = record.endLine ?? record.end_line
+  if (typeof startLine === 'number' && typeof endLine === 'number' && endLine >= startLine) {
+    out.lineSpan = endLine - startLine + 1
+  } else if (typeof record.lineCount === 'number') {
+    out.lineSpan = record.lineCount
+  }
+
+  for (const key of ['output', 'stdout', 'content', 'text'] as const) {
+    const value = record[key]
+    if (typeof value === 'string') {
+      out.outputBytes = Buffer.byteLength(value, 'utf8')
+      break
+    }
+  }
+
+  try {
+    out.responseBytes = Buffer.byteLength(JSON.stringify(result) ?? '', 'utf8')
+  } catch {
+    // 循环引用等无法序列化的结果：不量长度，不影响工具本身。
+  }
+  return out
+}
+
+/**
+ * 稳定错误码。绝不把异常 message 当错误码 —— message 里可能带路径、命令和凭据，
+ * 而且它不可聚合。
+ */
+function stableToolErrorCode(err: unknown): string {
+  if (err instanceof BrokerChannelError) return err.code
+  const raw = (err as { code?: unknown } | null)?.code
+  if (typeof raw === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(raw)) return raw
+  return 'TOOL_EXECUTION_FAILED'
 }
 
 /**

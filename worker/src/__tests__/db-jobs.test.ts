@@ -520,6 +520,19 @@ describe('JobsDb canonical RPC contract', () => {
       },
     })
   })
+
+  it('recomputes one converged run rollup by id', async () => {
+    const db = new RecordingDb()
+    const jobs = new JobsDb(db)
+
+    await jobs.computeRunRollup('run-1')
+
+    expect(db.last()).toEqual({
+      fn: 'compute_analysis_run_rollup',
+      params: { p_agent_run_id: 'run-1' },
+      options: undefined,
+    })
+  })
 })
 
 describe('database error-code normalization', () => {
@@ -552,6 +565,19 @@ describe('database error-code normalization', () => {
       'EVIDENCE_ORIGIN_INVALID',
       'ATTEMPT_ALREADY_SEALED',
       'PROCESS_TREE_CLEANUP_FAILED',
+      // 0032 运行监控台
+      'RUNTIME_EVENT_FENCE_REJECTED',
+      'RUNTIME_EVENT_TYPE_UNKNOWN',
+      'RUNTIME_EVENT_SCOPE_MISMATCH',
+      'RUNTIME_EVENT_PHASE_MISMATCH',
+      'RUNTIME_EVENT_CORRELATION_REQUIRED',
+      'ROLLUP_RUN_NOT_TERMINAL',
+      'TREND_GROUP_BY_REQUIRED',
+      'TREND_GROUP_BY_INVALID',
+      'TREND_TERMINAL_STATUS_INVALID',
+      // 0031 冻结契约
+      'V4_HARNESS_MANIFEST_MISSING',
+      'V4_CAPABILITY_POLICY_MISSING',
     ]
 
     expect(KNOWN_DB_ERROR_CODES).toEqual(expectedCodes)

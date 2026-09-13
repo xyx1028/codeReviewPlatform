@@ -1,0 +1,15 @@
+{
+  // 前端测试文件的类型检查。
+  //
+  // 与 tsconfig.worker.test.json 同一个理由：tsconfig.app.json 刻意排除
+  // src/**/__tests__（浏览器构建不需要 node 类型），后果就是测试里的类型错误没人管。
+  // 这份配置只做检查、不产出文件，并且给测试补上 node 与 vitest 的类型 ——
+  // 目录一致性守卫要读迁移文件与 Worker 契约的源码文本。
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["vite/client", "node"]
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -405,8 +405,16 @@ export interface BatchWorkspace {
 // 不声明任何 locator/token/payload 字段，避免误以为这些数据前端可用。
 // ---------------------------------------------------------------------------
 
-/** Agent 运行整体状态。对应 analysis_agent_run.status。 */
-export type AgentRunStatus = 'RUNNING' | 'FINISHED' | 'FAILED' | 'CANCELLED'
+/**
+ * Agent 运行整体状态。逐字对应 `analysis_agent_run.status` 的 CHECK 约束。
+ *
+ * 注意：数据库里**没有** `CANCELLED`。用户取消落成 `FAILED` +
+ * `error_code = 'AGENT_TREE_CANCELLED'`，租约丢失落成 `FAILED` +
+ * `error_code = 'WORKER_LOST'`。`FINISHED` 只属于
+ * `analysis_agent_node.status`（见 {@link AgentNodeStatus}），不是 run 状态。
+ * 事件流有自己的词表（`ATTEMPT_CANCELLED` 等），不要试图写进 run 状态。
+ */
+export type AgentRunStatus = 'RUNNING' | 'COMMITTED' | 'FAILED'
 
 /** Agent Tree 单个节点状态。 */
 export type AgentNodeStatus = 'RUNNING' | 'FINISHED' | 'FAILED' | 'CANCELLED'
@@ -447,8 +455,13 @@ export interface AgentRunUsage {
   searches_run: number
   web_requests: number
   web_bytes: number
-  input_tokens: number
-  output_tokens: number
+  /**
+   * provider 上报的真实 token。**可为 null**：`commit_analysis_agent_usage` 是唯一
+   * 落库点，provider 不上报时它保持 null。界面必须显示“未上报”，不能显示 0 ——
+   * 0 与“没量到”是两件不同的事。
+   */
+  input_tokens: number | null
+  output_tokens: number | null
   agent_count: number
   max_depth_reached: number
 }
@@ -465,9 +478,21 @@ export interface AgentTreeNode {
   model_requests: number
   tool_calls: number
   evidence_produced: number
+  input_tokens?: number | null
+  output_tokens?: number | null
   error_code: string | null
   started_at: string | null
   finished_at: string | null
+  /**
+   * V1.5 当前活动投影（0032 起返回）。并发 Agent 各自一行，互不覆盖。
+   * `current_activity_status = 'RUNNING'` 且有 `current_tool_name` 才叫"正在调用工具"。
+   */
+  current_activity_scope?: RuntimeEventScope | null
+  current_activity_code?: string | null
+  current_activity_status?: string | null
+  current_tool_name?: string | null
+  current_activity_started_at?: string | null
+  current_activity_updated_at?: string | null
 }
 
 /** 按工具名 + 权限判定聚合的调用计数（不含任何工具正文）。 */
@@ -502,6 +527,264 @@ export interface EvidenceSummary {
   producer_agent_node_id: string | null
 }
 
+// ---------------------------------------------------------------------------
+// V1.5 真实运行监控台（见 V1.5 方案 §6.7 / §8.6）
+//
+// 安全约束：这些类型只映射 admin_list_active_analysis_batches /
+// get_analysis_runtime_console 返回的脱敏事实事件与投影。数据库永不返回展示文案 ——
+// 中文只存在于 src/lib/labels.ts。payload 只有白名单里的机器码与标量：没有 Prompt、
+// 没有工具参数/返回、没有命令、没有 stdout/stderr、没有 URL、没有绝对路径、没有 token。
+// 唯一的路径类字段是 repository_name，它是四仓枚举。
+//
+// 三个 AI 诊断 RPC 故意**没有**对应的前端类型：它们不授予 authenticated，浏览器拿不到
+// （方案 §1.2 / §6.10）。归因数据走数据库与结构化日志，取数通道是 scripts/runtime-report.mjs。
+// ---------------------------------------------------------------------------
+
+/** 事件作用域。逐字对应 analysis_runtime_event.scope 的 CHECK。 */
+export type RuntimeEventScope =
+  | 'JOB'
+  | 'TASK'
+  | 'ATTEMPT'
+  | 'AGENT'
+  | 'MODEL'
+  | 'TOOL'
+  | 'WORKFLOW'
+  | 'HARNESS_JOB'
+
+/**
+ * 生命周期相位。
+ *
+ * `STARTED` 表示该 correlation 尚未闭合 —— 这是「正在调用」的唯一判据，
+ * 不是从计数增长、工具名称或超时猜出来的。`null` 属于无生命周期的点事件。
+ */
+export type RuntimeEventPhase = 'STARTED' | 'TERMINAL'
+
+/** 事件 payload。只有白名单里的标量，不提供通用 JSON viewer 渲染。 */
+export interface RuntimeEventPayload {
+  agent_role?: AgentRole
+  provider?: AgentProvider
+  delegation_depth?: number
+  tool_name?: string
+  permission_verdict?: ToolPermissionVerdict
+  reason_code?: string
+  model_request_kind?: ModelRequestKind
+  repository_name?: string
+  attempt_number?: number
+  session_revision?: number
+  request_bytes?: number
+  response_bytes?: number
+  input_tokens?: number | null
+  output_tokens?: number | null
+  agent_count?: number
+  active_children?: number
+  duration_ms?: number
+  /** 这条 TERMINAL 由 800ms 折叠产生，没有独立的 STARTED 行。 */
+  collapsed?: boolean
+  exit_code?: number
+  output_bytes?: number
+  truncated?: boolean
+  hit_count?: number
+  line_span?: number
+  retry_index?: number
+  events_reported?: number
+  events_dropped?: number
+  resumed?: boolean
+}
+
+/** 模型请求分类。与 analysis_runtime_event payload 的 model_request_kind 同源。 */
+export type ModelRequestKind =
+  | 'loop'
+  | 'retry'
+  | 'compaction'
+  | 'session-title'
+  | 'ralph'
+  | 'other'
+
+/** 一条运行事实事件。按 scope 判别，不用 Record<string, unknown> 直接渲染。 */
+export interface RuntimeEvent {
+  event_id: number
+  /** 前端去重键。按它而不是按 event_id 去重，配合提交水位裁剪。 */
+  event_uuid: string
+  batch_id: string
+  job_id: string
+  task_id: string | null
+  agent_run_id: string | null
+  agent_node_id: string | null
+  worker_id: string | null
+  scope: RuntimeEventScope
+  event_type: string
+  activity_code: string | null
+  phase: RuntimeEventPhase | null
+  status: string | null
+  correlation_id: string | null
+  parent_correlation_id: string | null
+  error_code: string | null
+  duration_ms: number | null
+  payload: RuntimeEventPayload
+  occurred_at: string
+  received_at: string
+  /** occurred_at 超出容许偏差时为真；事件被保留并钳制，而不是丢弃。 */
+  clock_skewed: boolean
+}
+
+/** 一个 Agent 当前未闭合的工具/模型请求。这是「卡在哪」的直接答案。 */
+export interface RuntimeOpenCorrelation {
+  correlation_id: string
+  scope: RuntimeEventScope
+  event_type: string
+  activity_code: string | null
+  tool_name: string | null
+  model_request_kind: ModelRequestKind | null
+  started_at: string
+}
+
+/** Agent Tree 节点 + 当前活动投影。并发 Agent 各自独立，不互相覆盖。 */
+export interface RuntimeAgentSnapshot {
+  agent_node_id: string
+  agent_id: string
+  agent_role: AgentRole
+  provider: AgentProvider
+  delegation_depth: number
+  status: AgentNodeStatus
+  model_requests: number
+  tool_calls: number
+  evidence_produced: number
+  input_tokens: number | null
+  output_tokens: number | null
+  error_code: string | null
+  started_at: string | null
+  finished_at: string | null
+  current_activity_scope: RuntimeEventScope | null
+  current_activity_code: string | null
+  current_activity_status: string | null
+  current_correlation_id: string | null
+  current_tool_name: string | null
+  current_activity_started_at: string | null
+  current_activity_updated_at: string | null
+  open_correlations: RuntimeOpenCorrelation[]
+}
+
+/** 一次 Attempt 的运行摘要。run 级当前活动由 node 投影聚合，不落列。 */
+export interface RuntimeAttemptSnapshot {
+  agent_run_id: string
+  agent_attempt: number
+  status: AgentRunStatus
+  worker_id: string | null
+  model_label: string | null
+  error_code: string | null
+  started_at: string | null
+  committed_at: string | null
+  finished_at: string | null
+  cancel_requested_at: string | null
+  cancel_reason: string | null
+  sealed_at: string | null
+  session_revision: number | null
+  attempt_phase_code: string | null
+  attempt_phase_started_at: string | null
+  agent_count: number
+  max_depth_reached: number
+  model_requests: number
+  tool_calls: number
+  input_tokens: number | null
+  output_tokens: number | null
+  resume_count: number
+  agents: RuntimeAgentSnapshot[]
+}
+
+/**
+ * 一个需求任务的运行快照。
+ *
+ * 只有 `agent_status`：`retrieval_status` 与 `analysis_status` 是 0010 留下的另两套状态，
+ * DTO 刻意不返回它们，避免再次出现「界面显示 PENDING 其实在跑」。
+ */
+export interface RuntimeTaskSnapshot {
+  task_id: string
+  story_id: string
+  story_code: string
+  story_name: string
+  project_name: string | null
+  application_name: string | null
+  agent_status: StoryTaskStatus
+  agent_attempt: number
+  worker_id: string | null
+  lease_expires_at: string | null
+  heartbeat_at: string | null
+  error_code: string | null
+  started_at: string | null
+  finished_at: string | null
+  last_event_at: string | null
+  attempts: RuntimeAttemptSnapshot[]
+}
+
+/** get_analysis_runtime_console 的游标。 */
+export interface RuntimeConsoleCursor {
+  requested_after: number | null
+  /** 只推进到本次返回中已过提交水位的最大 id，不是表内 max(id)。 */
+  next_event_id: number | null
+  has_more: boolean
+  /** 游标早于保留期时为真：前端必须丢弃本地状态重新做全量快照。 */
+  requires_full_snapshot: boolean
+  server_time: string
+  /** 最老未过水位事件的滞后毫秒数；> 3000 时提示「确认延迟」。 */
+  watermark_lag_ms: number
+}
+
+export interface AnalysisRuntimeConsoleResponse {
+  batch: {
+    batch_id: string
+    batch_name: string
+    job_id: string | null
+    job_status: AnalysisJobStatus | null
+    total_stories: number
+    pending_stories: number
+    running_stories: number
+    succeeded_stories: number
+    failed_stories: number
+    last_event_id: number | null
+    last_event_at: string | null
+  }
+  tasks: RuntimeTaskSnapshot[]
+  events: RuntimeEvent[]
+  cursor: RuntimeConsoleCursor
+}
+
+/** admin_list_active_analysis_batches 的单个批次条目。 */
+export interface ActiveAnalysisBatch {
+  batch_id: string
+  batch_name: string
+  week_code: string | null
+  job_id: string
+  job_status: AnalysisJobStatus
+  requested_branch: string
+  worker_id: string | null
+  finalizer_worker_id: string | null
+  job_started_at: string | null
+  total_stories: number
+  pending_stories: number
+  running_stories: number
+  succeeded_stories: number
+  failed_stories: number
+  last_event_id: number | null
+  last_event_at: string | null
+  watermark_lag_ms: number
+}
+
+export interface ActiveAnalysisBatchList {
+  server_time: string
+  batches: ActiveAnalysisBatch[]
+}
+
+/**
+ * 数据新鲜度。五种故障**分别**展示，不合并成一个「异常」——
+ * 链路拥塞、长事务未提交和 Worker 掉线要采取的动作完全不同。
+ */
+export type RuntimeFreshness =
+  | 'LIVE'
+  | 'DELAYED'
+  | 'STALE'
+  | 'AWAITING_COMMIT'
+  | 'WORKER_OFFLINE'
+
 /** get_analysis_agent_run_detail 顶层返回。无运行记录时 RPC 返回 null。 */
 export interface AgentRunDetail {
   run_id: string
@@ -517,6 +800,9 @@ export interface AgentRunDetail {
   cancel_reason: string | null
   sealed_at: string | null
   error_code: string | null
+  /** V1.5 ATTEMPT 阶段投影（0032 起返回）。 */
+  attempt_phase_code?: string | null
+  attempt_phase_started_at?: string | null
   started_at: string | null
   committed_at: string | null
   finished_at: string | null

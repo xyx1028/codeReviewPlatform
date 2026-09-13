@@ -5,6 +5,11 @@
 
 import type { BranchName, RepositoryName } from '../git/repositories.js'
 import type { DbClient } from './client.js'
+import type {
+  RuntimeEventBatchResult,
+  RuntimeEventTarget,
+  RuntimeEventWire,
+} from '../monitoring/runtime-event-types.js'
 
 export interface ModelSnapshot {
   model_config_id: string
@@ -682,5 +687,65 @@ export class JobsDb {
       p_error_code: input.code,
       p_error_message: input.message,
     })
+  }
+
+  /**
+   * 一次往返写多条运行监控事件（0032 §6.6）。
+   *
+   * fencing 分层由数据库负责：无 task 的 JOB 阶段看 `analysis_job.worker_id` /
+   * `finalizer_worker_id` + lease，task 及以下看四要素，收敛路径（claim 已被清空）
+   * 看 `session_revision`。这里只负责把上下文原样传过去 —— 客户端不做任何"校验不了
+   * 就放行"的兜底。
+   */
+  async reportRuntimeEventBatch(
+    input: RuntimeEventTarget & { events: RuntimeEventWire[] },
+  ): Promise<RuntimeEventBatchResult> {
+    const data = await this.db.rpc<unknown>('report_analysis_runtime_event_batch', {
+      p_worker_id: input.workerId,
+      p_job_id: input.jobId,
+      p_task_id: input.taskId ?? null,
+      p_claim_token: input.claimToken ?? null,
+      p_agent_attempt: input.agentAttempt ?? null,
+      p_events: input.events,
+      p_session_revision: input.sessionRevision ?? null,
+    })
+    const row = unwrapMaybeObject<Partial<RuntimeEventBatchResult>>(data)
+    return {
+      accepted: Number(row?.accepted ?? 0),
+      duplicated: Number(row?.duplicated ?? 0),
+      dropped_unresolved_agent: Number(row?.dropped_unresolved_agent ?? 0),
+      dropped_invalid: Number(row?.dropped_invalid ?? 0),
+      max_event_id:
+        row?.max_event_id === null || row?.max_event_id === undefined
+          ? null
+          : Number(row.max_event_id),
+    }
+  }
+
+  /**
+   * 保留期清理。按批限量：一次删太多会持有长事务，把 §6.1.3 的游标水位卡住。
+   * 汇总表 `analysis_agent_run_rollup` 不参与清理。
+   */
+  async purgeRuntimeEvents(limit = 50000): Promise<number> {
+    const data = await this.db.rpc<number>('purge_analysis_runtime_events', {
+      p_limit: limit,
+    })
+    return typeof data === 'number' ? data : 0
+  }
+
+
+  /** Attempt 事件已经收敛后，按 run 精确重算长期 rollup。 */
+  async computeRunRollup(agentRunId: string): Promise<void> {
+    await this.db.rpc<unknown>('compute_analysis_run_rollup', {
+      p_agent_run_id: agentRunId,
+    })
+  }
+  /** 补算终态但汇总缺失（或 `rollup_version = 0`）的 attempt。 */
+  async backfillRunRollups(limit = 200): Promise<{ computed: number; failed: number }> {
+    const data = await this.db.rpc<unknown>('backfill_analysis_run_rollups', {
+      p_limit: limit,
+    })
+    const row = unwrapMaybeObject<{ computed?: number; failed?: number }>(data)
+    return { computed: Number(row?.computed ?? 0), failed: Number(row?.failed ?? 0) }
   }
 }

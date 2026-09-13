@@ -11,11 +11,17 @@
     "worker:dev": "tsx worker/src/index.ts",
     "worker:build": "npm run harness:manifest:check && tsc -p tsconfig.worker.json",
     "worker:typecheck": "tsc -p tsconfig.worker.test.json",
+    "web:typecheck": "tsc -p tsconfig.web.test.json",
     "worker:start": "node dist-worker/index.js",
     "worker:check-connectivity": "node dist-worker/connectivity-check.js",
     "harness:manifest:check": "node scripts/v4-harness-manifest.mjs check",
     "harness:manifest:new-migration": "node scripts/v4-harness-manifest.mjs generate-migration",
-    "test:worker": "npm run harness:manifest:check && vitest run worker"
+    "test:worker": "npm run harness:manifest:check && vitest run worker",
+    "test:web": "vitest run -c vitest.web.config.ts",
+    "test": "npm run harness:manifest:check && vitest run",
+    "monitor:attempt": "node scripts/runtime-report.mjs attempt",
+    "monitor:trend": "node scripts/runtime-report.mjs trend",
+    "monitor:findings": "node scripts/runtime-report.mjs findings"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",

@@ -38,6 +38,10 @@ import { rootLogger, type Logger } from './logger.js'
 import { finalizeJob } from './pipeline/finalize-job.js'
 import { prepareJob } from './pipeline/prepare-job.js'
 import { redactError } from './security/redaction.js'
+import {
+  buildRuntimeEventReporter,
+  type RuntimeEventReporterLike,
+} from './monitoring/runtime-event-reporter.js'
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -53,10 +57,15 @@ export interface WorkerRuntime {
 export async function prepareTaskRepositories(
   task: StoryTask,
   config: WorkerConfig,
+  /** 运行监控事件（TASK scope）。缺省不上报。 */
+  runtimeEvents?: RuntimeEventReporterLike,
 ): Promise<PreparedRepository[]> {
   const branch = task.job.requested_branch as BranchName
   const timeoutMs = task.model.request_timeout_ms
   const repositories: PreparedRepository[] = []
+  const startedMs = Date.now()
+  // 本地准备完成不含绝对路径：payload 只有耗时。
+  runtimeEvents?.report({ type: 'TASK_REPOSITORIES_STARTED', payload: {} })
 
   for (const snapshot of task.snapshots) {
     repositories.push(
@@ -75,6 +84,11 @@ export async function prepareTaskRepositories(
       ),
     )
   }
+  runtimeEvents?.report({
+    type: 'TASK_REPOSITORIES_READY',
+    durationMs: Date.now() - startedMs,
+    payload: { duration_ms: Date.now() - startedMs },
+  })
   return repositories
 }
 
@@ -93,6 +107,20 @@ export async function runStoryTask(
   })
   let repositories: PreparedRepository[] | null = null
   let runner: ReviewRunner | null = null
+  // 每个 attempt 一个 Reporter：fencing 上下文（claim token + attempt + revision）随它走。
+  const runtimeEvents = buildRuntimeEventReporter({
+    settings: config.runtimeEvents,
+    sink: jobsDb,
+    logger: log,
+    target: {
+      workerId: config.workerId,
+      jobId: task.job_id,
+      taskId: task.id,
+      claimToken: task.claim_token,
+      agentAttempt: task.agent_attempt,
+      sessionRevision: task.session_revision,
+    },
+  })
   const attempt = new AbortController()
   const abortAttempt = () => attempt.abort()
   if (options.signal?.aborted) abortAttempt()
@@ -159,7 +187,7 @@ export async function runStoryTask(
   }
 
   try {
-    repositories = await prepareTaskRepositories(task, config)
+    repositories = await prepareTaskRepositories(task, config, runtimeEvents)
     if (options.signal?.aborted) {
       await releaseForShutdown()
       return
@@ -191,6 +219,7 @@ export async function runStoryTask(
       isLeaseValid: () => lease.leaseHeld() && !cancelRequested,
       isCancelRequested: () => cancelRequested,
       abortReason: attemptEndReason,
+      runtimeEvents,
       commitReview: (input) =>
         jobsDb
           .saveAgentReviewResult({
@@ -291,6 +320,29 @@ export async function runStoryTask(
     options.signal?.removeEventListener('abort', abortAttempt)
     attempt.abort()
     lease.stop()
+    // 尽力 flush 一次后停止。close() 不会无限阻塞收敛；已封存的 run 拒绝写入是预期结果。
+    await runtimeEvents.close().catch(() => undefined)
+    if (task.agent_run_id) {
+      await jobsDb.computeRunRollup(task.agent_run_id).catch((error) =>
+        log.error('run_rollup_compute_failed', {
+          event: 'run_rollup_compute_failed',
+          error_message: redactError(error),
+        }),
+      )
+    }
+    const stats = runtimeEvents.snapshot()
+    if (stats.dropped > 0 || stats.silenced || stats.flushFailures > 0) {
+      log.warn('runtime_event_attempt_summary', {
+        event: 'runtime_event_attempt_summary',
+        reported: stats.reported,
+        dropped: stats.dropped,
+        dropped_unresolved_agent: stats.droppedUnresolvedAgent,
+        dropped_invalid: stats.droppedInvalid,
+        collapsed: stats.collapsed,
+        flush_failures: stats.flushFailures,
+        silenced: stats.silenced,
+      })
+    }
     repositories = null
     runner = null
   }
@@ -352,7 +404,19 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
         job_id: claim.job.id,
         batch_id: claim.job.batch_id,
       })
-      await prepareJob(jobsDb, config, claim, logger)
+      // JOB scope 的 fencing 令牌是 analysis_job.worker_id + status = 'PREPARING_CODE'，
+      // 不是 task 四要素（方案 §6.4）：这一阶段还没有任何 task claim。
+      const jobEvents = buildRuntimeEventReporter({
+        settings: config.runtimeEvents,
+        sink: jobsDb,
+        logger,
+        target: { workerId: config.workerId, jobId: claim.job.id },
+      })
+      try {
+        await prepareJob(jobsDb, config, claim, logger, undefined, jobEvents)
+      } finally {
+        await jobEvents.close().catch(() => undefined)
+      }
     } catch (error) {
       logger.error('prepare_job_error', {
         event: 'prepare_job_error',
@@ -445,6 +509,44 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
         maxTotalBytes: config.sessionVolumeMaxBytes,
         logger,
       })
+      // 运行监控事件的保留期清理与汇总补算。仓库没有 pg_cron，所以调度挂在这里
+      // （已有 10 分钟节流）。按批限量：一次删太多会持有长事务，把游标水位卡住。
+      // purge 绝不触及 analysis_agent_run_rollup —— 事件是可丢的细节，汇总是不可丢的基线。
+      if (config.runtimeEvents.enabled) {
+        void jobsDb
+          .purgeRuntimeEvents(50000)
+          .then((deleted) => {
+            if (deleted > 0) {
+              logger.info('runtime_event_purged', {
+                event: 'runtime_event_purged',
+                deleted,
+              })
+            }
+          })
+          .catch((error) =>
+            logger.error('runtime_event_purge_failed', {
+              event: 'runtime_event_purge_failed',
+              error_message: redactError(error),
+            }),
+          )
+        void jobsDb
+          .backfillRunRollups(200)
+          .then((result) => {
+            if (result.computed > 0 || result.failed > 0) {
+              logger.info('run_rollup_backfilled', {
+                event: 'run_rollup_backfilled',
+                computed: result.computed,
+                failed: result.failed,
+              })
+            }
+          })
+          .catch((error) =>
+            logger.error('run_rollup_backfill_failed', {
+              event: 'run_rollup_backfill_failed',
+              error_message: redactError(error),
+            }),
+          )
+      }
     } catch (error) {
       logger.error('periodic_cleanup_failed', {
         event: 'periodic_cleanup_failed',

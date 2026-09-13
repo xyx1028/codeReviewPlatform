@@ -45,6 +45,11 @@ import type { AgentAuthorityLedger, AgentIdentity } from './agent-authority-ledg
 import type { HierarchicalBudgetLedger, ModelRequestKind } from './hierarchical-budget-ledger.js'
 import type { EgressPolicy, EgressFetchResult } from '../web/egress-policy.js'
 import type { AttemptWorkspace } from '../workspace/attempt-workspace.js'
+import type {
+  RuntimeAgentProvider,
+  RuntimeAgentRole,
+  RuntimeEvent,
+} from '../../monitoring/runtime-event-types.js'
 
 /** 一条已验证证据，附带它的生产者。 */
 export interface AttributedEvidence extends VerifiedEvidence {
@@ -199,6 +204,14 @@ export interface AttemptControlBrokerOptions {
   ): Promise<void>
   /** 批量落工具审计。 */
   flushAudit?(entries: ToolAuditEntry[], decisions: PermissionDecisionEntry[]): Promise<void>
+  /**
+   * 转投一条运行监控事实事件（V1.5，方案 §7.2）。
+   *
+   * 缺省表示 Reporter 未装配（`RUNTIME_EVENTS_ENABLED=false` 或旧接线），此时插件
+   * 请求体里的 `lifecycle` / `correlationId` 字段被静默忽略，现有审计行为完全不变。
+   * 观测通道 fail open：这个回调抛出的异常不得影响工具执行或模型调用。
+   */
+  reportRuntimeEvent?(event: RuntimeEvent): void
   /** 保存 Artifact 元数据。 */
   saveArtifact?(input: {
     producerAgentId: string
@@ -271,6 +284,16 @@ export function startAttemptControlBroker(
   let configHash: string | null = null
   let sessionRevision = 1
   const toolCallsByName: Record<string, number> = {}
+  /** lifecycle 上报可能因 IPC 重试重复；同一 correlation 只计一次模型工具调用。 */
+  const countedToolCorrelations = new Set<string>()
+  /** 只有这五条路由直接代表 modelTools 中的 platform 工具。其余都是内部控制/观测。 */
+  const platformToolByRoute: Readonly<Record<string, string>> = {
+    '/attempt/search-code': 'search_snapshot_code',
+    '/attempt/find-files': 'find_snapshot_files',
+    '/attempt/read-code': 'read_snapshot_code',
+    '/attempt/list-commits': 'list_snapshot_commits',
+    '/attempt/submit-review': 'submit_review_result',
+  }
   /**
    * 被拒的提交码。**有上界**：一个反复冲撞提交权的子 Agent 能在一次 attempt 里累计上百次
    * （实测脚本化子 Agent 一轮就 64 次），而这个数组会进 `agent_attempt_finished` 日志。
@@ -322,6 +345,12 @@ export function startAttemptControlBroker(
         evidenceProduced: evidenceByAgent.get(identity.agentId) ?? 0,
       })),
     }
+  }
+
+  function recordToolCall(identity: AgentIdentity, toolName: string): void {
+    toolCalls++
+    toolCallsByAgent.set(identity.agentId, (toolCallsByAgent.get(identity.agentId) ?? 0) + 1)
+    toolCallsByName[toolName] = (toolCallsByName[toolName] ?? 0) + 1
   }
 
   function recordAudit(entry: ToolAuditEntry): void {
@@ -479,6 +508,24 @@ export function startAttemptControlBroker(
         tool_name: toolName ?? null,
         error_code: code,
       })
+      // 身份解析失败也必须留下模型请求终态：provider 没被联系，但"这次请求被拒了"
+      // 是归因里最有价值的一类事实。没有 identity，所以不带 agentId ——
+      // 事件仍然挂在 attempt 上。
+      if (route === '/attempt/reserve-model-request') {
+        const deniedCorrelation = readCorrelationId(body)
+        if (deniedCorrelation !== undefined) {
+          emitRuntimeEvent({
+            type: 'MODEL_REQUEST_DENIED',
+            correlationId: deniedCorrelation,
+            errorCode: code,
+            payload: {
+              model_request_kind: String(body.kind ?? 'other') as ModelRequestKind,
+              reason_code: code,
+              permission_verdict: 'DENY',
+            },
+          })
+        }
+      }
       respond(res, 403, {
         accepted: false,
         code,
@@ -488,11 +535,12 @@ export function startAttemptControlBroker(
     }
 
     const identity = authorized.identity
-    toolCalls++
-    toolCallsByAgent.set(identity.agentId, (toolCallsByAgent.get(identity.agentId) ?? 0) + 1)
-    // 按路由分桶：总次数看不出预算是花在检索还是花在反复提交上。
-    const bucket = route.replace(/^\/attempt\//, '') || 'unknown'
-    toolCallsByName[bucket] = (toolCallsByName[bucket] ?? 0) + 1
+    // toolCalls 的口径是“模型实际调用了多少工具”，不是“Broker 收了多少请求”。
+    // 五个 platform 工具在各自执行路由计数；Harness-origin 工具不经过执行路由，稍后由
+    // tool-audit lifecycle STARTED 计数。register/finish、预算、观测、Artifact 与 web egress
+    // 都是内部路由，不能污染 usage（web_fetch 自身也由 lifecycle 计数，避免双计）。
+    const platformToolName = platformToolByRoute[route]
+    if (platformToolName !== undefined) recordToolCall(identity, platformToolName)
 
     let responsePayload: unknown
     let status = 200
@@ -569,7 +617,7 @@ export function startAttemptControlBroker(
       agentId: identity.agentId,
       sessionId: identity.sessionId,
       toolCallId: typeof envelope.toolCallId === 'string' ? envelope.toolCallId : null,
-      toolName: toolName ?? bucket,
+      toolName: (toolName ?? route.replace(/^\/attempt\//, '')) || 'unknown',
       permissionVerdict: errorCode === null ? 'ALLOW' : 'DENY',
       errorCode,
       startedAt: startedAt.toISOString(),
@@ -692,6 +740,8 @@ export function startAttemptControlBroker(
       kind,
       count: typeof body.count === 'number' ? body.count : 1,
     })
+    const correlationId = readCorrelationId(body)
+    const retryIndex = typeof body.retryIndex === 'number' ? body.retryIndex : undefined
     if (!verdict.allowed) {
       recordDecision({
         agentId: identity.agentId,
@@ -700,6 +750,34 @@ export function startAttemptControlBroker(
         policyLayer: 'budget',
         decision: 'DENY',
         reasonCode: verdict.code ?? V4_ERROR_CODES.MODEL_BUDGET_EXHAUSTED,
+      })
+      // provider 确实没有被联系过：这一点由插件"不调用 next()"保证。
+      if (correlationId !== undefined) {
+        emitRuntimeEvent({
+          type: 'MODEL_REQUEST_DENIED',
+          agentId: identity.agentId,
+          correlationId,
+          errorCode: verdict.code ?? V4_ERROR_CODES.MODEL_BUDGET_EXHAUSTED,
+          payload: {
+            model_request_kind: kind,
+            agent_role: toRuntimeAgentRole(identity.role),
+            reason_code: verdict.code ?? V4_ERROR_CODES.MODEL_BUDGET_EXHAUSTED,
+            permission_verdict: 'DENY',
+          },
+        })
+      }
+      return verdict
+    }
+    if (correlationId !== undefined) {
+      emitRuntimeEvent({
+        type: 'MODEL_REQUEST_STARTED',
+        agentId: identity.agentId,
+        correlationId,
+        payload: {
+          model_request_kind: kind,
+          agent_role: toRuntimeAgentRole(identity.role),
+          retry_index: retryIndex,
+        },
       })
     }
     return verdict
@@ -711,11 +789,42 @@ export function startAttemptControlBroker(
       inputTokens: typeof body.inputTokens === 'number' ? body.inputTokens : null,
       outputTokens: typeof body.outputTokens === 'number' ? body.outputTokens : null,
     })
+
+    // 模型请求终态。插件在 metered() 的 finally 里无条件上报，即使 provider 不报 token ——
+    // 否则"模型请求已结束"就永远不可见。token 保持 null，不折成 0。
+    const correlationId = readCorrelationId(body)
+    if (correlationId !== undefined && body.phase === 'TERMINAL') {
+      const failed = body.failed === true
+      emitRuntimeEvent({
+        type: failed ? 'MODEL_REQUEST_FAILED' : 'MODEL_REQUEST_COMPLETED',
+        agentId: identity.agentId,
+        correlationId,
+        durationMs: typeof body.durationMs === 'number' ? body.durationMs : undefined,
+        errorCode: typeof body.errorCode === 'string' ? body.errorCode : undefined,
+        payload: {
+          model_request_kind: String(body.kind ?? 'other') as ModelRequestKind,
+          agent_role: toRuntimeAgentRole(identity.role),
+          retry_index: typeof body.retryIndex === 'number' ? body.retryIndex : undefined,
+          input_tokens: typeof body.inputTokens === 'number' ? body.inputTokens : null,
+          output_tokens: typeof body.outputTokens === 'number' ? body.outputTokens : null,
+          duration_ms: typeof body.durationMs === 'number' ? body.durationMs : undefined,
+        },
+      })
+    }
     return { accepted: true }
   }
 
   function ingestAudit(identity: AgentIdentity, body: Record<string, unknown>): unknown {
     const entries = Array.isArray(body.entries) ? body.entries : []
+
+    // 工具生命周期：`lifecycle` 是 V1.5 对这条现有路由的请求体扩展（方案 §7.2）。
+    // 不新增 Broker 路由是硬约束 —— scripts/v4-harness-manifest.mjs 把 brokerRoutes 纳入
+    // semanticManifest，新增一条路由就会改变 manifest 哈希，而 factory.ts 会让新 Worker
+    // 拒绝所有旧哈希的在途任务，也就是必须排空所有活动批次才能部署。
+    // semanticManifest 完全不涉及请求体形状，所以扩展 payload 是零代价的。
+    // `entries` 数组的现有审计行为不变。
+    ingestToolLifecycle(identity, body.lifecycle)
+
     let accepted = 0
     for (const raw of entries) {
       const entry = raw as Record<string, unknown>
@@ -780,6 +889,176 @@ export function startAttemptControlBroker(
       }
     }
     return { accepted: true, count: accepted }
+  }
+
+  /**
+   * 观测事件转投。fail open：Reporter 未装配或抛出时静默忽略，绝不影响工具执行、
+   * 模型调用、预算、租约或提交校验。
+   */
+  function emitRuntimeEvent(event: RuntimeEvent): void {
+    if (options.reportRuntimeEvent === undefined) return
+    try {
+      options.reportRuntimeEvent(event)
+    } catch {
+      // 监控失败不能放宽权限，也不能让业务失败。
+    }
+  }
+
+  /** correlation id 只接受非空字符串；它必须由产生方随机生成，不含命令、URL 或路径。 */
+  function readCorrelationId(body: Record<string, unknown>): string | undefined {
+    const raw = body.correlationId
+    if (typeof raw !== 'string') return undefined
+    const trimmed = raw.trim()
+    return trimmed === '' ? undefined : trimmed
+  }
+
+  function toRuntimeAgentRole(role: string): RuntimeAgentRole | undefined {
+    switch (role) {
+      case 'root-reviewer':
+      case 'research-child':
+      case 'implementation-child':
+      case 'critic-child':
+      case 'workflow-child':
+        return role
+      default:
+        return undefined
+    }
+  }
+
+  function toRuntimeAgentProvider(provider: string): RuntimeAgentProvider | undefined {
+    switch (provider) {
+      case 'root':
+      case 'spawn':
+      case 'fork':
+      case 'workflow':
+      case 'ralph':
+        return provider
+      default:
+        return undefined
+    }
+  }
+
+  function optionalNumber(value: unknown): number | undefined {
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+  }
+
+  /**
+   * 把 `/attempt/tool-audit` 请求体里的 `lifecycle` 字段翻译成工具生命周期事件。
+   *
+   * 插桩点在 `agent-authority-policy` 的 `tools/pre-execute`（覆盖全部 30 个模型工具，
+   * 包括 25 个根本不经过 Broker 的 harness origin 工具）。这里只做翻译，不做判定：
+   * 归属永远由 capability 令牌决定的 `identity` 说了算，不由上报内容决定。
+   */
+  function ingestToolLifecycle(identity: AgentIdentity, raw: unknown): void {
+    if (raw === null || typeof raw !== 'object') return
+    const lifecycle = raw as Record<string, unknown>
+    const correlationId =
+      typeof lifecycle.correlationId === 'string' && lifecycle.correlationId.trim() !== ''
+        ? lifecycle.correlationId.trim()
+        : undefined
+    if (correlationId === undefined) return
+
+    const toolName = String(lifecycle.toolName ?? '').trim()
+    if (toolName === '') return
+    const agentRole = toRuntimeAgentRole(identity.role)
+    const occurredAt =
+      typeof lifecycle.occurredAt === 'string' && !Number.isNaN(Date.parse(lifecycle.occurredAt))
+        ? new Date(lifecycle.occurredAt)
+        : undefined
+    const durationMs = optionalNumber(lifecycle.durationMs)
+    const errorCode =
+      typeof lifecycle.errorCode === 'string' && lifecycle.errorCode.trim() !== ''
+        ? lifecycle.errorCode.trim()
+        : undefined
+    const phase = String(lifecycle.phase ?? '')
+
+    if (phase === 'STARTED') {
+      // platform 工具已由它们的执行路由计数；其余 25 个 Harness-origin 工具只有这里能看到。
+      // 以 lifecycle correlation 去重，避免 IPC 重试把同一次调用重复写入 usage。
+      if (
+        contract.modelTools[toolName]?.origin === 'harness' &&
+        !countedToolCorrelations.has(correlationId)
+      ) {
+        countedToolCorrelations.add(correlationId)
+        recordToolCall(identity, toolName)
+      }
+      emitRuntimeEvent({
+        type: 'TOOL_CALL_STARTED',
+        agentId: identity.agentId,
+        correlationId,
+        occurredAt,
+        payload: {
+          tool_name: toolName,
+          agent_role: agentRole,
+          provider: toRuntimeAgentProvider(identity.provider),
+          request_bytes: optionalNumber(lifecycle.requestBytes),
+        },
+      })
+      return
+    }
+    if (phase !== 'TERMINAL') return
+
+    const outcome = String(lifecycle.outcome ?? 'COMPLETED')
+    if (outcome === 'DENIED') {
+      emitRuntimeEvent({
+        type: 'TOOL_CALL_DENIED',
+        agentId: identity.agentId,
+        correlationId,
+        occurredAt,
+        errorCode,
+        payload: {
+          tool_name: toolName,
+          agent_role: agentRole,
+          permission_verdict: 'DENY',
+          reason_code: String(lifecycle.reasonCode ?? errorCode ?? 'UNSPECIFIED'),
+        },
+      })
+      return
+    }
+
+    const terminalPayload = {
+      tool_name: toolName,
+      agent_role: agentRole,
+      duration_ms: durationMs,
+      exit_code: optionalNumber(lifecycle.exitCode),
+      output_bytes: optionalNumber(lifecycle.outputBytes),
+      response_bytes: optionalNumber(lifecycle.responseBytes),
+      truncated: typeof lifecycle.truncated === 'boolean' ? lifecycle.truncated : undefined,
+      hit_count: optionalNumber(lifecycle.hitCount),
+      line_span: optionalNumber(lifecycle.lineSpan),
+    }
+    if (outcome === 'FAILED') {
+      emitRuntimeEvent({
+        type: 'TOOL_CALL_FAILED',
+        agentId: identity.agentId,
+        correlationId,
+        occurredAt,
+        durationMs,
+        errorCode,
+        payload: terminalPayload,
+      })
+      return
+    }
+    if (outcome === 'CANCELLED') {
+      emitRuntimeEvent({
+        type: 'TOOL_CALL_CANCELLED',
+        agentId: identity.agentId,
+        correlationId,
+        occurredAt,
+        durationMs,
+        errorCode,
+        payload: terminalPayload,
+      })
+      return
+    }
+    emitRuntimeEvent({
+      type: 'TOOL_CALL_COMPLETED',
+      agentId: identity.agentId,
+      correlationId,
+      occurredAt,
+      durationMs,
+      payload: terminalPayload,
+    })
   }
 
   async function webEgress(

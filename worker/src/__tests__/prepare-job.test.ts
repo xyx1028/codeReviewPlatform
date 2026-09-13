@@ -5,6 +5,7 @@ import { prepareRepository } from '../git/prepare.js'
 import { GitError } from '../git/verify.js'
 import { Logger } from '../logger.js'
 import { prepareJob } from '../pipeline/prepare-job.js'
+import type { RuntimeEventReporterLike } from '../monitoring/runtime-event-reporter.js'
 
 const config: WorkerConfig = {
   supabaseUrl: 'https://project.supabase.co',
@@ -26,6 +27,13 @@ const config: WorkerConfig = {
   sessionRetentionDays: 7,
   sessionVolumeMaxBytes: 20 * 1024 * 1024 * 1024,
   orphanWorkspaceMaxAgeMs: 6 * 60 * 60 * 1000,
+  runtimeEvents: {
+    enabled: false,
+    flushMs: 800,
+    queueMax: 512,
+    batchMax: 64,
+    retentionDays: 30,
+  },
 }
 
 const claim: PreparationClaim = {
@@ -103,6 +111,58 @@ describe('prepareJob single Harness workflow', () => {
       'subject for tmanage-backend',
       'subject for tmanage-frontend',
     ])
+  })
+
+  it('flushes every repository event before snapshots advance the job fence', async () => {
+    const db = makeJobsDb()
+    const repositoryPreparer = vi.fn(async (repository) => ({
+      repository,
+      commitSha: 'b'.repeat(40),
+      commitSubject: null,
+      cached: false,
+      path: `/tmp/cache/${repository}`,
+    })) as unknown as typeof prepareRepository
+    const queued: string[] = []
+    const flushed: string[][] = []
+    const runtimeEvents = {
+      enabled: true,
+      report: (event) => queued.push(event.type),
+      flush: vi.fn(async () => {
+        flushed.push(queued.splice(0))
+      }),
+      close: async () => undefined,
+      snapshot: () => ({
+        reported: 0,
+        duplicated: 0,
+        dropped: 0,
+        droppedUnresolvedAgent: 0,
+        droppedInvalid: 0,
+        collapsed: 0,
+        flushFailures: 0,
+        queueDepth: queued.length,
+        silenced: false,
+        maxEventId: null,
+      }),
+      newCorrelationId: () => 'corr-preparation',
+    } satisfies RuntimeEventReporterLike
+
+    db.saveRepositorySnapshots.mockImplementation(async () => {
+      expect(flushed.flat()).toEqual([
+        'REPOSITORY_PREPARE_STARTED',
+        'REPOSITORY_PREPARE_COMPLETED',
+        'REPOSITORY_PREPARE_STARTED',
+        'REPOSITORY_PREPARE_COMPLETED',
+        'REPOSITORY_PREPARE_STARTED',
+        'REPOSITORY_PREPARE_COMPLETED',
+        'REPOSITORY_PREPARE_STARTED',
+        'REPOSITORY_PREPARE_COMPLETED',
+      ])
+    })
+
+    await prepareJob(db.jobsDb, config, claim, silentLogger(), repositoryPreparer, runtimeEvents)
+
+    expect(runtimeEvents.flush).toHaveBeenCalled()
+    expect(db.saveRepositorySnapshots).toHaveBeenCalledTimes(1)
   })
 
   it('stops at the first repository failure and records it on the claimed job', async () => {

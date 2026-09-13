@@ -2,8 +2,10 @@ import type { Session } from '@supabase/supabase-js'
 import { requireSupabase } from './supabase'
 import type { FieldMapping } from './excel'
 import type {
+  ActiveAnalysisBatchList,
   AdminUserListItem,
   AgentRunDetail,
+  AnalysisRuntimeConsoleResponse,
   AiCodeEvidence,
   AiEvidenceInput,
   AiImportRecord,
@@ -724,4 +726,41 @@ export async function adminGetV4CapabilityPolicy() {
   const client = requireSupabase()
   const { data, error } = await client.rpc('admin_get_v4_capability_policy')
   return unwrap<V4CapabilityPolicy>({ data, error })
+}
+
+// ---------------------------------------------------------------------------
+// V1.5 真实运行监控台（见 V1.5 方案 §6.7 / §8.1）
+//
+// 权限边界：
+//   * admin_list_active_analysis_batches 内部 ensure_admin()；
+//   * get_analysis_runtime_console 内部 ensure_manage_review_batch(batch)，
+//     **不是** ensure_view_review_batch —— 后者只校验角色不校验归属（§6.7）。
+//
+// 三个 AI 诊断 RPC 故意没有前端封装：它们不授予 authenticated，浏览器根本拿不到。
+// 归因与趋势走数据库与结构化日志，取数通道是 scripts/runtime-report.mjs（§1.2 / §8.5）。
+// ---------------------------------------------------------------------------
+
+/** ADMIN 只读：正在准备代码、分析需求或汇总结果的批次，含事件链路健康度。 */
+export async function adminListActiveAnalysisBatches() {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_list_active_analysis_batches')
+  return unwrap<ActiveAnalysisBatchList>({ data, error })
+}
+
+/**
+ * 批次运行监控台。
+ *
+ * `sinceEventId` 为空时返回完整快照（batch/job/task/attempt/agent 投影 + 最近 200 条事件）；
+ * 非空时只返回 `id > cursor` 且**已过提交水位**的最多 500 条事件与受影响的 task 投影。
+ *
+ * 调用方必须按 `cursor.next_event_id` 推进，绝不能自己取 `max(event_id)`：
+ * 后者会永久跳过那些 id 更小、提交更晚的事件（§6.1.3）。
+ */
+export async function getAnalysisRuntimeConsole(batchId: string, sinceEventId: number | null) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('get_analysis_runtime_console', {
+    p_batch_id: batchId,
+    p_since_event_id: sinceEventId,
+  })
+  return unwrap<AnalysisRuntimeConsoleResponse>({ data, error })
 }

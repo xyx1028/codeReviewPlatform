@@ -193,13 +193,6 @@ export function WorkerManagementPage({ isAdmin }: { isAdmin: boolean }) {
         <Tag color="blue">每 5 秒刷新</Tag>
       </div>
 
-      <Alert
-        type="info"
-        showIcon
-        title="Worker 负责执行自动 AI 分析"
-        description="这里展示当前在线 Worker、工作状态以及正在处理的代码评审批次。所有 Worker 均执行统一的 DeepSeek Harness Agent 链路；数据库按槽位、任务租约和模型并发限制分配任务。Worker 超过 20 秒没有心跳后将不再计入在线数量。"
-      />
-
       <Row gutter={[16, 16]}>
         <Col xs={12} lg={4}><Card><Statistic title="在线 Worker" value={overview?.online_count ?? 0} /></Card></Col>
         <Col xs={12} lg={4}><Card><Statistic title="工作中" value={activeWorkerCount} /></Card></Col>

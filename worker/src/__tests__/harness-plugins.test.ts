@@ -18,6 +18,7 @@
 
 import { describe, it, expect } from 'vitest'
 import {
+  ModelRequestOutcome,
   RequestClassifier,
   denialChunk,
   tokensFromChunk,
@@ -123,5 +124,33 @@ describe('tokensFromChunk', () => {
       usage: { inputTokens: -5, outputTokens: 'lots' },
     } as unknown as StreamChunk
     expect(tokensFromChunk(chunk)).toEqual({ inputTokens: null, outputTokens: null })
+  })
+})
+
+describe('ModelRequestOutcome', () => {
+  it('没有正常 finish 的流默认失败，防止 iterator throw 被记成 COMPLETED', () => {
+    const outcome = new ModelRequestOutcome()
+    expect(outcome.failed).toBe(true)
+  })
+
+  it('明确的正常 finish 才转成成功', () => {
+    const outcome = new ModelRequestOutcome()
+    outcome.observe({ type: 'finish', reason: { kind: 'stop' } } as unknown as StreamChunk)
+    expect(outcome.failed).toBe(false)
+  })
+
+  it('error / aborted finish 与正常 finish 后再抛错都保持失败', () => {
+    const errored = new ModelRequestOutcome()
+    errored.observe({ type: 'finish', reason: { kind: 'error' } } as unknown as StreamChunk)
+    expect(errored.failed).toBe(true)
+
+    const aborted = new ModelRequestOutcome()
+    aborted.observe({ type: 'finish', reason: { kind: 'aborted' } } as unknown as StreamChunk)
+    expect(aborted.failed).toBe(true)
+
+    const thrown = new ModelRequestOutcome()
+    thrown.observe({ type: 'finish', reason: { kind: 'stop' } } as unknown as StreamChunk)
+    thrown.observeThrown()
+    expect(thrown.failed).toBe(true)
   })
 })

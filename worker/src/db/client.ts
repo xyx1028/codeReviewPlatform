@@ -57,6 +57,20 @@ export const KNOWN_DB_ERROR_CODES = [
   'EVIDENCE_ORIGIN_INVALID',
   'ATTEMPT_ALREADY_SEALED',
   'PROCESS_TREE_CLEANUP_FAILED',
+  // 0032 运行监控台。漏登记会让 Reporter 拿到裸 SQLSTATE，识别不出 fencing 被拒。
+  'RUNTIME_EVENT_FENCE_REJECTED',
+  'RUNTIME_EVENT_TYPE_UNKNOWN',
+  'RUNTIME_EVENT_SCOPE_MISMATCH',
+  'RUNTIME_EVENT_PHASE_MISMATCH',
+  'RUNTIME_EVENT_CORRELATION_REQUIRED',
+  'ROLLUP_RUN_NOT_TERMINAL',
+  'TREND_GROUP_BY_REQUIRED',
+  'TREND_GROUP_BY_INVALID',
+  'TREND_TERMINAL_STATUS_INVALID',
+  // 0031 冻结契约。它们由 analysis_job / analysis_agent_run 的 before-insert 触发器抛出，
+  // 对 Worker 是"这条写入路径不该走"的明确信号，不是可重试的抖动。
+  'V4_HARNESS_MANIFEST_MISSING',
+  'V4_CAPABILITY_POLICY_MISSING',
 ] as const
 
 export type KnownDbErrorCode = (typeof KNOWN_DB_ERROR_CODES)[number]

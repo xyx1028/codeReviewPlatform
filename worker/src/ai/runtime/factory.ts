@@ -17,6 +17,10 @@ import { SnapshotStore } from '../snapshot/snapshot-store.js'
 import type { CoveragePolicy } from '../snapshot/search-coverage-ledger.js'
 import { checkoutPinnedCommit } from '../../git/prepare.js'
 import { DeepSeekHarnessAcpEngine } from './deepseek-harness-acp-engine.js'
+import {
+  NullRuntimeEventReporter,
+  type RuntimeEventReporterLike,
+} from '../../monitoring/runtime-event-reporter.js'
 
 /** Environment variable through which one attempt receives its model key. */
 export const AGENT_MODEL_API_KEY_ENV = 'REVIEW_MODEL_API_KEY'
@@ -39,6 +43,11 @@ export interface BuildDeepSeekHarnessReviewInput {
   /** 本次 abort 的真实原因；由调度侧提供，供收敛审计区分取消来源。 */
   abortReason?(): AttemptEndReason
   commitReview(input: CommitReviewInput): Promise<CommitReviewResult>
+  /**
+   * 运行监控事件上报。缺省等价于关闭（`RUNTIME_EVENTS_ENABLED=false` 或旧接线），
+   * 此时全部插桩点走 NullRuntimeEventReporter，现有分析流程一字不改。
+   */
+  runtimeEvents?: RuntimeEventReporterLike
 }
 
 /** Coverage required before an attempt may claim a story is not implemented. */
@@ -93,10 +102,24 @@ export async function buildDeepSeekHarnessReview(
     throw new Error('DeepSeek Harness review requires prepared repositories')
   }
 
+  const runtimeEvents = input.runtimeEvents ?? new NullRuntimeEventReporter()
+  /**
+   * 契约校验失败只上报稳定错误码，绝不上报 secret 或 config 内容（方案 §7.6）。
+   * 这条事件是"新 Worker 拒绝执行旧哈希在途任务"在监控台唯一可见的证据。
+   */
+  const rejectContract = (code: string, message: string): never => {
+    runtimeEvents.report({
+      type: 'RUNTIME_CONTRACT_REJECTED',
+      errorCode: code,
+      payload: { reason_code: code },
+    })
+    throw new V4GovernanceError(code as never, message)
+  }
+
   const manifest = loadCapabilityContract()
   const currentContractHash = contractHash(manifest)
   if (input.task.capability_contract_hash === null) {
-    throw new V4GovernanceError(
+    rejectContract(
       V4_ERROR_CODES.SESSION_FORMAT_UNSUPPORTED,
       'claimed V4 task has no frozen Harness manifest hash',
     )
@@ -105,13 +128,13 @@ export async function buildDeepSeekHarnessReview(
     input.task.capability_contract_hash !== undefined &&
     input.task.capability_contract_hash !== currentContractHash
   ) {
-    throw new V4GovernanceError(
+    rejectContract(
       V4_ERROR_CODES.SESSION_FORMAT_UNSUPPORTED,
       `task requires Harness manifest ${input.task.capability_contract_hash}, worker has ${currentContractHash}`,
     )
   }
   if (input.task.harness_version === null) {
-    throw new V4GovernanceError(
+    rejectContract(
       V4_ERROR_CODES.SESSION_FORMAT_UNSUPPORTED,
       'claimed V4 task has no frozen Harness version',
     )
@@ -120,7 +143,7 @@ export async function buildDeepSeekHarnessReview(
     input.task.harness_version !== undefined &&
     input.task.harness_version !== manifest.harnessVersion
   ) {
-    throw new V4GovernanceError(
+    rejectContract(
       V4_ERROR_CODES.SESSION_FORMAT_UNSUPPORTED,
       `task requires Harness ${input.task.harness_version}, worker has ${manifest.harnessVersion}`,
     )
@@ -141,7 +164,7 @@ export async function buildDeepSeekHarnessReview(
   })
   const { policy, frozenPolicyHash, breakers } = resolveAttemptPolicy(input.task)
   if (input.task.policy_hash === null) {
-    throw new V4GovernanceError(
+    rejectContract(
       V4_ERROR_CODES.AGENT_IDENTITY_INVALID,
       'claimed V4 task has no frozen policy hash',
     )
@@ -150,7 +173,7 @@ export async function buildDeepSeekHarnessReview(
     input.task.policy_hash !== undefined &&
     input.task.policy_hash !== frozenPolicyHash
   ) {
-    throw new V4GovernanceError(
+    rejectContract(
       V4_ERROR_CODES.AGENT_IDENTITY_INVALID,
       `frozen policy hash ${input.task.policy_hash} does not match Worker canonical hash ${frozenPolicyHash}`,
     )
@@ -161,6 +184,10 @@ export async function buildDeepSeekHarnessReview(
       breakers,
     })
   }
+
+  // manifest / contract / policy 三个哈希全部对上。这是启动 Harness 之前最后一道
+  // 结构性校验，通过之后才允许 spawn。
+  runtimeEvents.report({ type: 'RUNTIME_CONTRACT_VERIFIED', payload: {} })
 
   const claim = {
     taskId: input.task.id,
@@ -211,6 +238,15 @@ export async function buildDeepSeekHarnessReview(
     abortReason: input.abortReason,
     commitReview: input.commitReview,
     checkoutPinned: checkoutPinnedCommit,
+    runtimeEvents,
+    runtimeContext: {
+      jobId: input.task.job_id,
+      batchId: input.task.job.batch_id,
+      agentRunId: input.task.agent_run_id,
+      harnessVersionFrozen: input.task.harness_version ?? null,
+      capabilityContractHashFrozen: input.task.capability_contract_hash ?? null,
+      policyVersion: input.task.policy_version,
+    },
     db: {
       registerAgentNode: (identity) =>
         input.jobsDb.registerAgentNode({

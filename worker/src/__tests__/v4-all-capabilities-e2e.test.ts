@@ -48,7 +48,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { DeepSeekHarnessAcpEngine } from '../ai/runtime/deepseek-harness-acp-engine.js'
 import { SnapshotStore } from '../ai/snapshot/snapshot-store.js'
 import { normalizeCapabilityPolicy } from '../ai/policy/v4-capability-policy.js'
@@ -330,6 +330,10 @@ describe.skipIf(!ENABLED)('V4 governed root-runtime smoke E2E (real dsh process)
       const nodes: AgentIdentity[] = []
       const artifacts: Array<{ workspacePath: string; artifactType: string; sizeBytes: number }> = []
       const checkpoints: Array<{ sessionId: string; sessionRevision: number }> = []
+      const usageCommits: Array<{
+        usage: Record<string, number | null>
+        perAgent: Array<Record<string, string | number | null>>
+      }> = []
 
       const engine = new DeepSeekHarnessAcpEngine({
         taskId: 'e2e-task',
@@ -398,7 +402,10 @@ describe.skipIf(!ENABLED)('V4 governed root-runtime smoke E2E (real dsh process)
           },
           recordProfile: async () => undefined,
           reserveBudget: async () => ({ allowed: true, scope: null }),
-          commitUsage: async () => true,
+          commitUsage: async (usage, perAgent) => {
+            usageCommits.push({ usage, perAgent })
+            return true
+          },
           requestAttemptCancel: async () => true,
           loadResumableAttempt: async () => null,
         },
@@ -458,22 +465,25 @@ describe.skipIf(!ENABLED)('V4 governed root-runtime smoke E2E (real dsh process)
         const buildLog = artifacts.find((entry) => entry.workspacePath.endsWith('build.log'))
         expect(buildLog?.artifactType, `artifacts: ${JSON.stringify(artifacts)}`).toBe('BUILD_LOG')
 
-        // ---- 16/22. Session checkpoint 落在持久卷上，且不在 attempt 临时目录里 ----
-        expect(
-          checkpoints,
-          `session volume: ${JSON.stringify(collectFiles(sessionRoot))}`,
-        ).toHaveLength(1)
-        // Harness 写的是 <slug>/<sessionId>/session.v3.jsonl[.zstd]。断言按真实布局来，
-        // 而不是按"应该叫 <sessionId>.jsonl"的想象。
+        // ---- 16/22. 已提交 Session 保留在持久卷，但不再登记为“可恢复” checkpoint ----
+        // submit_review_result 已烧毁 claim；成功结果无需恢复，继续写 checkpoint 只会得到
+        // TASK_LEASE_LOST。失败/取消 attempt 的 checkpoint 由 session wiring 测试覆盖。
+        expect(checkpoints).toHaveLength(0)
+        expect(usageCommits).toHaveLength(1)
+        expect(usageCommits[0]!.usage.model_requests).toBe(model.requestCount())
+        expect(usageCommits[0]!.usage.tool_calls).toBe(11)
+        expect(usageCommits[0]!.perAgent).toHaveLength(1)
+        expect(Number(usageCommits[0]!.perAgent[0]!.tool_calls)).toBe(11)
+
+        // Harness 写的是 <slug>/<sessionId>/session.v3.jsonl[.zstd]。Session 文件仍长期保留，
+        // 只是已提交的 run 不再把它暴露成 resume candidate。
         const sessionFiles = collectFiles(sessionRoot).filter((path) => path.includes('.jsonl'))
         expect(sessionFiles.length).toBeGreaterThan(0)
 
         // profile 把编码设成 none，所以日志是明文 —— 平台的完整性检查才能逐行验证已提交
-        // 前缀，运维也能在事故里直接读它。写成压缩形态时这两件事都不成立，而且早先的
-        // 逐行 JSON 解析会把**每一个**真实会话都判成不可恢复。
-        const located = sessionRegistryFor(sessionRoot).locateFor(
-          checkpoints[0]!.sessionId,
-        )
+        // 前缀，运维也能在事故里直接读它。
+        const harnessSessionId = basename(dirname(sessionFiles[0]!))
+        const located = sessionRegistryFor(sessionRoot).locateFor(harnessSessionId)
         expect(located, `session volume: ${JSON.stringify(sessionFiles)}`).not.toBeNull()
         expect(located!.compressed).toBe(false)
         expect(located!.formatVersion).toMatch(/^v\d+$/)

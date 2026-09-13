@@ -89,6 +89,7 @@ import { hashFile } from './lib/hash'
 import { aiVerdictLabels, aiVerdictOptions, analysisJobStatusLabels, batchStatusLabels, humanReviewLabels, humanReviewOptions, resolveAnalysisError, storyTaskStatusLabels } from './lib/labels'
 import { aiFillPrompt } from './lib/prompt'
 import { WorkerManagementPage } from './pages/WorkerManagementPage'
+import { RuntimeMonitoringPage } from './pages/RuntimeMonitoringPage'
 import { AgentRunDetailPage } from './pages/AgentRunDetailPage'
 import { HarnessPolicyPage } from './pages/HarnessPolicyPage'
 import { ProfilePage } from './pages/ProfilePage'
@@ -365,17 +366,19 @@ function Shell({ session }: { session: Session }) {
     ? '/profile'
     : location.pathname.startsWith('/users')
       ? '/users'
-      : location.pathname.startsWith('/workers')
-        ? '/workers'
-        : location.pathname.startsWith('/harness-policy')
-          ? '/harness-policy'
-          : location.pathname.startsWith('/models')
-            ? '/models'
-            : location.pathname.startsWith('/model-operation-log')
-              ? '/model-operation-log'
-              : location.pathname.startsWith('/operation-log')
-                ? '/operation-log'
-                : '/batches'
+      : location.pathname.startsWith('/monitoring')
+        ? '/monitoring'
+        : location.pathname.startsWith('/workers')
+          ? '/workers'
+          : location.pathname.startsWith('/harness-policy')
+            ? '/harness-policy'
+            : location.pathname.startsWith('/models')
+              ? '/models'
+              : location.pathname.startsWith('/model-operation-log')
+                ? '/model-operation-log'
+                : location.pathname.startsWith('/operation-log')
+                  ? '/operation-log'
+                  : '/batches'
   const menuItems = [
     { key: '/batches', label: <Link to="/batches">代码评审</Link> },
     {
@@ -387,7 +390,9 @@ function Shell({ session }: { session: Session }) {
       ],
     },
     { key: '/profile', label: <Link to="/profile">个人中心</Link> },
-    ...(isAdmin ? [{ key: '/workers', label: <Link to="/workers">后台任务监控</Link> }] : []),
+    // 导航仅 ADMIN 显示，但这不是安全边界：服务端 ensure_admin() 才是。
+    ...(isAdmin ? [{ key: '/monitoring', label: <Link to="/monitoring">Agent 运行监控</Link> }] : []),
+    ...(isAdmin ? [{ key: '/workers', label: <Link to="/workers">调度中心</Link> }] : []),
     ...(isAdmin ? [{ key: '/harness-policy', label: <Link to="/harness-policy">默认能力策略</Link> }] : []),
     ...(isAdmin ? [{ key: '/models', label: <Link to="/models">模型管理</Link> }] : []),
     ...(isAdmin ? [{ key: '/users', label: <Link to="/users">用户管理</Link> }] : []),
@@ -440,6 +445,7 @@ function Shell({ session }: { session: Session }) {
                 />
               )}
             />
+            <Route path="/monitoring" element={<RuntimeMonitoringPage isAdmin={isAdmin} />} />
             <Route path="/workers" element={<WorkerManagementPage isAdmin={isAdmin} />} />
             <Route path="/harness-policy" element={<HarnessPolicyPage isAdmin={isAdmin} />} />
             <Route path="/models" element={<ModelConfigPage isAdmin={isAdmin} />} />
@@ -665,14 +671,6 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
   return (
     <Space direction="vertical" size="large" className="page-stack">
       <PageTitle title="模型管理" extra={<Button type="primary" onClick={openCreate}>新增模型</Button>} />
-      <Card>
-        <Alert
-          type="info"
-          showIcon
-          title="安全说明"
-          description="API Key 通过 admin-model-config Edge Function 加密写入 Supabase Vault，前端与数据库普通表都不返回密钥。编辑时不回显旧 Key，留空表示不轮换；未被批次或分析任务引用的模型可以删除，已引用模型需先删除选择了该模型的代码评审批次。"
-        />
-      </Card>
       <Table rowKey="id" loading={modelsQuery.isLoading} columns={columns} dataSource={modelsQuery.data ?? []} pagination={false} />
       <Modal
         title={editing ? `编辑模型：${editing.display_name}` : '新增模型'}
@@ -809,9 +807,6 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
   return (
     <Space direction="vertical" size="large" className="page-stack">
       <PageTitle title="用户管理" />
-      <Card>
-        <Alert type="info" showIcon title="角色说明" description="管理员可以管理所有批次并管理用户；审核者可以创建和管理自己创建的批次；查看者只查看数据。" />
-      </Card>
       <Table rowKey="id" loading={usersQuery.isLoading} columns={columns} dataSource={usersQuery.data ?? []} />
     </Space>
   )

@@ -22,5 +22,8 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // 测试文件不进浏览器构建的类型检查：它们用 node:fs 读迁移文件做漂移守卫，
+  // 而 app 的 types 只有 vite/client。它们由 tsconfig.web.test.json 单独检查。
+  "exclude": ["src/**/__tests__/**"]
 }

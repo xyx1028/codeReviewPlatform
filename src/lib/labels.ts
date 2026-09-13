@@ -9,6 +9,7 @@ import type {
   BatchStatus,
   EvidenceOrigin,
   HumanReviewResult,
+  RuntimeFreshness,
   ToolPermissionVerdict,
 } from '../types'
 
@@ -432,12 +433,15 @@ export function resolveAnalysisError(
 // 只服务于只读展示，不影响“开始 AI 分析”单按钮启动流程。
 // ---------------------------------------------------------------------------
 
-/** Agent 运行整体状态文案 + 配色（配色沿用 antd Tag 语义色）。 */
+/**
+ * Agent 运行整体状态文案 + 配色（配色沿用 antd Tag 语义色）。
+ *
+ * 只有三态：数据库没有 run 级 CANCELLED，取消落成 FAILED + AGENT_TREE_CANCELLED。
+ */
 export const agentRunStatusMeta: Record<AgentRunStatus, { label: string; color: string }> = {
   RUNNING: { label: '运行中', color: 'processing' },
-  FINISHED: { label: '已完成', color: 'green' },
+  COMMITTED: { label: '已提交', color: 'green' },
   FAILED: { label: '失败', color: 'red' },
-  CANCELLED: { label: '已取消', color: 'default' },
 }
 
 /** Agent Tree 节点状态文案 + 配色。 */
@@ -505,4 +509,204 @@ export const artifactVerificationMeta: Record<ArtifactVerificationStatus, { labe
   UNVERIFIED: { label: '未校验', color: 'default' },
   VERIFIED: { label: '已校验', color: 'green' },
   REJECTED: { label: '已拒绝', color: 'red' },
+}
+
+// ---------------------------------------------------------------------------
+// V1.5 真实运行监控台：activity_code / event_type / error_code 三张中文映射表
+//
+// 数据库与 RPC 永不返回展示文案（V1.5 方案 §1.2）：中文只存在于这里。这既是 i18n
+// 要求，也是 AI 可解析的前提 —— 同一个机器码，人看中文、AI 看码。
+//
+// 未知码一律显示原始码而不是空白：上线后 Worker 可能先发布新事件类型，前端晚一步。
+// 空白会让运维以为「什么都没发生」，而真实情况是「发生了我们还没翻译的事」。
+// ---------------------------------------------------------------------------
+
+/** activity_code → 中文。这是任务矩阵与 Agent 卡片上「正在……」那一句的唯一来源。 */
+export const runtimeActivityLabels: Record<string, string> = {
+  JOB_PREPARING_CODE: '正在准备代码',
+  REPOSITORY_PREPARING: '正在拉取仓库',
+  JOB_PROCESSING: '正在分析需求',
+  JOB_FINALIZING: '正在汇总结果',
+  JOB_QUEUED: '排队中',
+  JOB_SUCCEEDED: '已完成',
+  JOB_FAILED: '已失败',
+  TASK_RUNNING: '需求任务运行中',
+  TASK_REPOSITORIES_PREPARING: '正在准备本地仓库',
+  TASK_REPOSITORIES_READY: '本地仓库已就绪',
+  TASK_RELEASED: '任务已释放',
+  ATTEMPT_STARTING: '尝试启动中',
+  VERIFYING_PINS: '正在校验固定 Commit',
+  SESSION_PREPARING: '正在准备会话槽位',
+  WORKSPACE_PREPARING: '正在准备 Workspace',
+  BROKER_STARTING: '正在启动控制面',
+  PROFILE_FREEZING: '正在冻结 Profile',
+  HARNESS_STARTING: '正在启动 Harness 进程',
+  SESSION_RESUMING: '正在恢复会话',
+  MODEL_ORCHESTRATION: '模型编排中',
+  AGENT_RUNNING: 'Agent 运行中',
+  AGENT_FINISHED: 'Agent 已完成',
+  AGENT_FAILED: 'Agent 失败',
+  AGENT_CANCELLED: 'Agent 已取消',
+  MODEL_REQUESTING: '正在请求模型',
+  TOOL_RUNNING: '正在调用工具',
+  ATTEMPT_CONVERGING: '正在收敛',
+  RESULT_COMMITTED: '结论已提交',
+  ATTEMPT_FAILED: '尝试失败',
+  ATTEMPT_CANCELLING: '正在取消',
+  ATTEMPT_LEASE_LOST: '租约已丢失',
+}
+
+/** event_type → 中文。时间线默认显示中文，技术码可展开。 */
+export const runtimeEventTypeLabels: Record<string, string> = {
+  JOB_PREPARATION_STARTED: '批次开始准备代码',
+  REPOSITORY_PREPARE_STARTED: '开始拉取仓库',
+  REPOSITORY_PREPARE_COMPLETED: '仓库准备完成',
+  REPOSITORY_PREPARE_FAILED: '仓库准备失败',
+  JOB_SNAPSHOTS_FROZEN: '四仓快照已冻结',
+  JOB_FINALIZATION_STARTED: '批次开始汇总',
+  JOB_RETRIED: '批次已重试',
+  JOB_SUCCEEDED: '批次成功',
+  JOB_FAILED: '批次失败',
+  TASK_CLAIMED: '需求任务已被领取',
+  TASK_REPOSITORIES_STARTED: '开始准备本地仓库',
+  TASK_REPOSITORIES_READY: '本地仓库已就绪',
+  TASK_RELEASED_FOR_SHUTDOWN: 'Worker 关停释放了任务',
+  ATTEMPT_STARTED: '尝试已开始',
+  RUNTIME_CONTRACT_VERIFIED: '能力契约校验通过',
+  RUNTIME_CONTRACT_REJECTED: '能力契约校验拒绝',
+  PINS_VERIFIED: '固定 Commit 已校验',
+  SESSION_SLOT_ACQUIRED: '会话槽位已获取',
+  WORKSPACE_READY: 'Workspace 已就绪',
+  BROKER_READY: '控制面已就绪',
+  PROFILE_FROZEN: 'Profile 已冻结',
+  HARNESS_PROCESS_STARTED: 'Harness 进程已启动',
+  SESSION_RESUMED: '会话已恢复',
+  ACP_TURN_STARTED: '模型回合已开始',
+  ATTEMPT_INSTRUMENTATION_REPORTED: '插桩自检已上报',
+  PROCESS_TREE_CLEANUP_FAILED: '进程树回收失败',
+  ATTEMPT_COMMITTED: '结论已提交',
+  ATTEMPT_FAILED: '尝试失败',
+  CANCEL_REQUESTED: '已请求取消',
+  LEASE_LOST: '租约丢失',
+  ROOT_AGENT_REGISTERED: '根 Agent 已登记',
+  AGENT_REGISTERED: '子 Agent 已登记',
+  AGENT_FINISHED: 'Agent 已完成',
+  AGENT_FAILED: 'Agent 失败',
+  AGENT_CANCELLED: 'Agent 已取消',
+  MODEL_REQUEST_STARTED: '模型请求开始',
+  MODEL_REQUEST_COMPLETED: '模型请求结束',
+  MODEL_REQUEST_FAILED: '模型请求失败',
+  MODEL_REQUEST_DENIED: '模型请求被拒',
+  TOOL_CALL_STARTED: '工具调用开始',
+  TOOL_CALL_COMPLETED: '工具调用完成',
+  TOOL_CALL_FAILED: '工具调用失败',
+  TOOL_CALL_DENIED: '工具调用被拒',
+  TOOL_CALL_CANCELLED: '工具调用被取消',
+}
+
+/**
+ * error_code / reason_code → 中文。
+ *
+ * 只收平台自己定义的稳定码。provider 原文错误不会到这里（数据库侧就把不合规的码
+ * 归一成 UNKNOWN_ERROR），所以这张表不需要兜底任何自由文本。
+ */
+export const runtimeErrorCodeLabels: Record<string, string> = {
+  AGENT_TREE_CANCELLED: 'Agent Tree 已取消',
+  AGENT_IDENTITY_INVALID: 'Agent 身份无效',
+  AGENT_ROLE_DENIED: '角色策略拒绝',
+  AGENT_NO_SUBMISSION: '未提交结论',
+  AGENT_TURN_INCOMPLETE: '模型回合未完成',
+  AGENT_ATTEMPT_FAILED: '尝试失败',
+  AGENT_TREE_LIMIT_EXCEEDED: '超出 Agent Tree 上限',
+  SUBMIT_ROOT_ONLY: '仅根 Agent 可提交',
+  MODEL_BUDGET_EXHAUSTED: '模型预算耗尽',
+  TOOL_BUDGET_EXHAUSTED: '工具预算耗尽',
+  TOOL_EXECUTION_FAILED: '工具执行失败',
+  WORKSPACE_POLICY_DENIED: 'Workspace 策略拒绝',
+  WEB_EGRESS_DENIED: 'Web 出口拒绝',
+  SESSION_FENCED: '会话已被接管',
+  SESSION_FORMAT_UNSUPPORTED: '会话格式不受支持',
+  SESSION_RECOVERY_FAILED: '会话恢复失败',
+  ATTEMPT_ALREADY_SEALED: '尝试已封存',
+  ATTEMPT_SEALED: '尝试收敛时被闭合',
+  ATTEMPT_COMMITTED: '提交时被闭合',
+  PROCESS_TREE_CLEANUP_FAILED: '进程树回收失败',
+  WORKER_LOST: 'Worker 心跳丢失',
+  WORKER_SHUTDOWN: 'Worker 关停',
+  USER_CANCELLED: '用户取消',
+  LEASE_LOST: '租约丢失',
+  BUDGET_EXHAUSTED: '预算耗尽',
+  SESSION_UNRECOVERABLE: '会话不可恢复',
+  JOB_INTERNAL_ERROR: '批次内部错误',
+  REPOSITORY_PREPARE_FAILED: '仓库准备失败',
+  RUNTIME_EVENT_FENCE_REJECTED: '监控事件被 fencing 拒绝',
+  UNKNOWN_ERROR: '未知错误',
+}
+
+/** 未知码显示原始码，绝不显示空白。 */
+export function runtimeActivityLabel(code: string | null | undefined): string {
+  if (code === null || code === undefined || code === '') return '—'
+  return runtimeActivityLabels[code] ?? code
+}
+
+export function runtimeEventTypeLabel(code: string | null | undefined): string {
+  if (code === null || code === undefined || code === '') return '—'
+  return runtimeEventTypeLabels[code] ?? code
+}
+
+export function runtimeErrorCodeLabel(code: string | null | undefined): string | null {
+  if (code === null || code === undefined || code === '') return null
+  return runtimeErrorCodeLabels[code] ?? code
+}
+
+/** 模型请求分类文案。`retry` / `compaction` 是「非有效推进」的两个桶。 */
+export const modelRequestKindLabels: Record<string, string> = {
+  loop: 'Agent 轮次',
+  retry: '重试',
+  compaction: '上下文压缩',
+  'session-title': '会话标题',
+  ralph: 'Ralph 循环',
+  other: '其它',
+}
+
+/** 数据新鲜度五档。三种故障分别展示，不合并。 */
+export const runtimeFreshnessMeta: Record<
+  RuntimeFreshness,
+  { label: string; color: string; hint: string }
+> = {
+  LIVE: { label: '实时', color: 'green', hint: '最近事件在 5 秒内到达。' },
+  DELAYED: { label: '延迟', color: 'orange', hint: '事件链路拥塞：5~15 秒。' },
+  STALE: {
+    label: '陈旧',
+    color: 'red',
+    hint: '任务仍在运行但超过 15 秒没有事件：事件链路异常。',
+  },
+  AWAITING_COMMIT: {
+    label: '确认延迟',
+    color: 'gold',
+    hint: '有长事务未提交：事件已到但尚未过提交水位，游标不会越过它。',
+  },
+  WORKER_OFFLINE: {
+    label: 'Worker 离线',
+    color: 'volcano',
+    hint: 'Worker 心跳超过 20 秒：这是 Worker 侧问题，不是监控链路问题。',
+  },
+}
+
+/** 分析任务状态文案 + 配色（监控台的批次列表用）。 */
+export const analysisJobStatusMeta: Record<string, { label: string; color: string }> = {
+  QUEUED: { label: '排队中', color: 'default' },
+  PREPARING_CODE: { label: '准备代码', color: 'cyan' },
+  PROCESSING: { label: '分析中', color: 'processing' },
+  FINALIZING: { label: '汇总结果', color: 'geekblue' },
+  SUCCEEDED: { label: '已完成', color: 'green' },
+  FAILED: { label: '失败', color: 'red' },
+}
+
+/** 需求任务状态文案 + 配色。监控台只认 agent_status，不认另两套历史状态列。 */
+export const storyTaskStatusMeta: Record<string, { label: string; color: string }> = {
+  PENDING: { label: '等待', color: 'default' },
+  RUNNING: { label: '运行中', color: 'processing' },
+  SUCCEEDED: { label: '成功', color: 'green' },
+  FAILED: { label: '失败', color: 'red' },
 }

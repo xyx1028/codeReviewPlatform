@@ -837,3 +837,259 @@ order by a.created_at;
 ```
 
 > `storage_locator` 为宿主路径属敏感字段，仅在受控排障查看，不得转贴到普通日志/工单。
+
+---
+
+# 16. V1.5 真实运行监控台运维
+
+> 适用基线：迁移已应用到 `0032_analysis_runtime_monitoring.sql`。
+> 执行方案：`代码评审平台/V1.5-加入agent运行监控体系/代码评审平台-V1.5真实运行监控台-最终执行方案.md`。
+>
+> 与第 15 节的关系：V4 的运维面（Session 卷、熔断、孤儿检查、错误码表）全部照旧。
+> 本章只补运行监控这条**旁路**的运维面。它是旁路的含义很具体：事件链路整条挂掉，
+> 分析任务照常跑完 —— 监控事件不参与 lease heartbeat、预算控制或提交校验。
+> 因此**监控故障不是生产事故**，不要因为监控台显示不出来就去重启在跑的 attempt。
+
+## 16.1 新增环境变量
+
+| 变量 | 必填 | 默认值 | 说明 |
+|---|---|---|---|
+| `RUNTIME_EVENTS_ENABLED` | 否 | `true` | 关闭后 Worker 完全不上报，现有分析流程不受任何影响。只接受明确的真假值：拼错（`ture`）会让 Worker 启动即报 `ConfigError`，而不是被当成 `false` 静默关掉监控。 |
+| `RUNTIME_EVENT_FLUSH_MS` | 否 | `800` | Reporter 定时 flush 间隔，范围 50–10000。**同时是工具生命周期的折叠窗口**：在这个窗口内闭合的工具只落一条 TERMINAL，不会出现「正在调用」态。 |
+| `RUNTIME_EVENT_QUEUE_MAX` | 否 | `512` | 单 attempt 队列上限，范围 32–20000。溢出时按优先级丢弃并计数。 |
+| `RUNTIME_EVENT_BATCH_MAX` | 否 | `64` | 单批最大事件数，范围 1–500。 |
+| `RUNTIME_EVENT_RETENTION_DAYS` | 否 | `30` | 事件保留天数，范围 1–365。必须与数据库 `analysis_runtime_event.retention_until` 的默认值一致。 |
+
+调大 `RUNTIME_EVENT_FLUSH_MS` 的唯一正当理由是事件量压不住（见 16.6）。代价是：窗口内
+完成的工具全部看不到「正在调用」，只出现在已完成历史里。调小到 50–200ms 会让事件量接近
+「每工具 2 行」，除排查插桩问题外不要这么做。
+
+## 16.2 保留期清理与汇总补算的调度归属
+
+仓库**没有 pg_cron**，也没有任何数据库侧定时器。清理与补算挂在 Worker 的
+`runPeriodicCleanup()` 上（`worker/src/index.ts`，已有 10 分钟节流），与孤儿 Workspace
+回收、Session 卷保留期共用同一个节流窗口：
+
+| 动作 | 调用 | 频率 | 语义 |
+|---|---|---|---|
+| 事件保留期清理 | `purge_analysis_runtime_events(50000)` | ≤ 每 10 分钟一次/副本 | 只删 `retention_until < now()` **且所属 Job 已终态**的事件，按 `p_limit` 限量 |
+| 汇总补算 | `backfill_analysis_run_rollups(200)` | 同上 | 补算 `rollup_version = 0`（终态事务里汇总失败）或缺行的 attempt |
+
+两条硬约束：
+
+1. **按批限量不是性能优化，是正确性要求。** 一次删几百万行会持有一个长事务，而
+   `get_analysis_runtime_console` 的游标水位是 `pg_snapshot_xmin`：长事务会把水位钉住，
+   前端于是看到「确认延迟」并停止推进游标。50000 是在本地实测下单批 100ms 级的量。
+2. **`analysis_agent_run_rollup` 永不参与清理。** 事件是可丢的细节（30 天），汇总是不可丢
+   的基线 —— 跨月的「优化前后对比」只能靠它。`purge_analysis_runtime_events` 里没有任何
+   触及它的语句，`0032` 的测试对此有断言。
+
+如果要改成运维侧定时任务（例如把 Worker 的这段关掉、用外部 cron 调 RPC），必须**二选一**，
+不要两边都开：两个调用者同时分批删同一批行只会互相锁等。改动时同步更新这张表。
+
+## 16.3 三级停写手段
+
+按影响面从小到大，事故时**从上往下**用：
+
+| 级别 | 动作 | 影响 | 恢复 |
+|---|---|---|---|
+| 1 | 让管理员不访问 `/monitoring` | 只停读，事件继续写 | 无需操作 |
+| 2 | `RUNTIME_EVENTS_ENABLED=false` + 滚动重启 Worker | 停止产生**新**事件，历史事件与投影保留；保住新 Worker 的其他修复 | 改回 `true` 再滚动重启 |
+| 3 | `revoke execute on function public.report_analysis_runtime_event_batch(text,uuid,uuid,uuid,integer,jsonb,integer) from service_role;` | 数据库侧硬停写 | `grant execute ... to service_role;` |
+
+第 3 级的关键行为：Worker 会识别 `42501 / insufficient_privilege` 并**自动进入静默模式** ——
+停止上报、清空队列、每 5 分钟最多记一条 `runtime_event_silenced`。它不会持续刷错误日志，
+也不会因为上报失败影响工具执行或模型调用。看到 `runtime_event_silenced` 就说明有人执行了
+第 3 级（或权限配置出错），需要立刻确认是不是预期动作。
+
+**回滚自由度**：首版没有改 `v4-capability-contract.json`，manifest 哈希不变，所以新旧 Worker
+可以混跑同一批次。回退 Worker 镜像不需要排空活动批次。这条自由度在 Phase 3（Workflow/Job
+实例树）落地后会消失 —— 那次变更会改哈希，必须配排空窗口。
+
+## 16.4 告警项与判据
+
+Worker 侧结构化日志（经 `worker/src/logger.ts`，字段已脱敏）：
+
+| 日志事件 | 级别 | 含义 | 处理动作 |
+|---|---|---|---|
+| `runtime_event_silenced` | error | 权限被回收或配置异常，已停止上报 | **立即告警**。确认是不是有人执行了 16.3 第 3 级 |
+| `runtime_event_dropped` | warn | 队列溢出丢弃了事件（含 event_type 与队列深度） | **立即告警**。丢弃会让归因偏小；先看是否需要调大 `RUNTIME_EVENT_QUEUE_MAX` |
+| `runtime_event_queue_high` | warn | 队列超过上限 80% | 观察。持续出现说明 flush 跟不上产出 |
+| `runtime_event_flush_failed` | warn | 单批上报失败（带第几次重试与稳定错误码） | 偶发忽略；连续出现查数据库连通性 |
+| `runtime_event_attempt_summary` | warn | attempt 收敛时有丢弃/静默/整批失败 | 与上面几条合并看 |
+| `runtime_event_tool_drift` | warn | ACP 侧观测到的工具调用数 > 插件上报数 | **插桩漏洞信号**。说明 `tools/pre-execute` 漏了某条路径，或上报被丢。只用来发现问题，不要用它补数据 |
+| `attempt_rollup` | info | 每次 attempt 终态一行自包含归因 | 不告警。它是数据库汇总失败时的备份通道，字段名与 `analysis_agent_run_rollup` 列名逐字一致 |
+| `runtime_event_purged` / `run_rollup_backfilled` | info | 清理与补算的行数 | 不告警。连续多轮 `failed > 0` 才查 |
+
+数据库侧聚合（手工查询或做成 ADMIN 只读 RPC）：
+
+```sql
+-- (1) 活动 task 超过 15 秒没有事件，但 Worker 心跳仍在线 → 事件链路异常
+select task.id, task.worker_id, max(event.occurred_at) as last_event_at
+from public.analysis_story_task task
+join public.analysis_job job on job.id = task.job_id
+left join public.analysis_runtime_event event on event.task_id = task.id
+join public.analysis_worker_heartbeat hb on hb.worker_id = task.worker_id
+where task.agent_status = 'RUNNING'
+  and job.status = 'PROCESSING'
+  and hb.last_seen_at >= now() - interval '20 seconds'
+group by task.id, task.worker_id
+having coalesce(max(event.occurred_at), 'epoch'::timestamptz) < now() - interval '15 seconds';
+
+-- (2) 事件到达延迟 p95（received_at - occurred_at）。> 5 秒持续 5 分钟 → 数据库或网络拥塞
+select percentile_cont(0.95) within group (
+         order by extract(epoch from (received_at - occurred_at)) * 1000
+       ) as receive_lag_p95_ms
+from public.analysis_runtime_event
+where received_at >= now() - interval '5 minutes';
+
+-- (3) 提交水位滞后。> 30 秒 → 有长事务，游标逃生阀已生效
+select coalesce(
+         (extract(epoch from (now() - min(received_at))) * 1000)::bigint, 0
+       ) as watermark_lag_ms
+from public.analysis_runtime_event
+where xact_id >= pg_snapshot_xmin(pg_current_snapshot())::text::bigint;
+
+-- (4) 未闭合超过 5 分钟的 correlation，且 run 已终态
+--     → §6.2 规则 5 的清理有漏洞（终态时应当补写 TOOL_CALL_CANCELLED）
+select started.agent_run_id, started.correlation_id, started.occurred_at,
+       started.payload ->> 'tool_name' as tool_name
+from public.analysis_runtime_event started
+join public.analysis_agent_run run on run.id = started.agent_run_id
+where started.phase = 'STARTED'
+  and started.occurred_at < now() - interval '5 minutes'
+  and run.status <> 'RUNNING'
+  and not exists (
+    select 1 from public.analysis_runtime_event terminal
+    where terminal.agent_run_id = started.agent_run_id
+      and terminal.correlation_id = started.correlation_id
+      and terminal.phase = 'TERMINAL'
+  );
+
+-- (5) 表容量与最早事件。增长超出 16.6 的测算预算 → 运维告警
+select count(*) as rows, min(received_at) as oldest, max(received_at) as newest,
+       pg_size_pretty(pg_total_relation_size('public.analysis_runtime_event')) as size
+from public.analysis_runtime_event;
+
+-- (6) 清理连续失败的信号：终态 Job 仍有大量过期事件
+select count(*) as expired_rows_on_terminal_jobs
+from public.analysis_runtime_event event
+join public.analysis_job job on job.id = event.job_id
+where event.retention_until < now() - interval '1 day'
+  and job.status in ('SUCCEEDED', 'FAILED');
+
+-- (7) 汇总待补算积压：rollup_version = 0 或缺行
+select count(*) as pending_rollups
+from public.analysis_agent_run run
+left join public.analysis_agent_run_rollup rollup on rollup.agent_run_id = run.id
+where run.status in ('COMMITTED', 'FAILED')
+  and (rollup.agent_run_id is null or rollup.rollup_version = 0);
+```
+
+告警阈值汇总：`runtime_event_dropped > 0` 立即；`runtime_event_silenced` 立即；
+receive lag p95 > 5 秒持续 5 分钟；watermark lag > 30 秒；未闭合 correlation > 5 分钟且 run
+已终态；`pending_rollups` 连续两个小时不下降。
+
+## 16.5 AI 诊断取数（只读）
+
+三个诊断 RPC **不授予 `authenticated`**，浏览器拿不到；取数通道是仓库内的只读 CLI：
+
+```bash
+npm run monitor:attempt  -- --task <task_id> [--attempt N] [--format md|json]
+npm run monitor:trend    -- --group-by model_label,policy_hash --since 30d
+npm run monitor:findings -- --since 7d
+```
+
+约束（都是硬要求）：
+
+- 默认连**本地** Supabase。`SUPABASE_URL` 指向非本地地址时脚本直接报错，除非显式加
+  `--remote`；`--remote` 还要在 TTY 里输入 `yes` 二次确认。
+- 凭据从环境变量或既有 `.env.local` / `.docker/worker.env` 读取，**绝不打印**。
+- 输出前做一次敏感模式扫描（Bearer / JWT / `sk-` / URL / 宿主机绝对路径 / `.jsonl`），
+  命中即拒绝输出并报错。命中说明数据库 payload allowlist 出现回归，先查
+  `analysis_runtime_event_payload` 与插桩点，**不要绕过这个检查**。
+- 输出开头固定打印 `instrumentation_health`（`events_dropped` / `unattributed_pct` /
+  `timeline_truncated`）：先说清这份数据能不能采信，再看结论。
+
+`attempt` 子命令还会返回机器可读的 `instrumentation_gaps`，明确列出**没有插桩**的部分
+（Worker→Supabase RPC 往返、Harness 内部编排、被折叠的快工具 STARTED、Phase 3 之前的
+Workflow/Job 实例树）。它们全部落在 `unattributed_ms` 里 —— 看到 `unattributed_pct` 偏高
+先对照这张清单，而不是怀疑归因算错。
+
+## 16.6 事件量与切分区时机
+
+`0032` **不建分区**，但保留了 `event_day` 列（由钳制后的 `occurred_at` 确定性推导，对重试
+稳定）。不分区的原因是分区表的唯一约束必须包含分区键，`unique (event_uuid)` 建不出来，而
+退成 `unique (event_uuid, received_at)` 会让幂等彻底失效。
+
+单批次事件量估算（已按 800ms 折叠规则）：
+
+```text
+事件数 ≈ 需求数 × (
+    Attempt 阶段事件 ~12
+  + Agent 注册/终态 × 2 × Agent 数
+  + 工具事件：快工具 × 1 + 慢工具 × 2
+  + 模型事件：模型请求数 × 2
+) + Job 层事件 ~10
+```
+
+用生产数据校准（不要用估算值做容量决策）：
+
+```sql
+-- 每次 attempt 的实际工具调用数与慢调用占比
+select agent_run_id,
+       count(*) as tool_calls,
+       count(*) filter (where duration_ms >= 800) as slow_calls
+from public.analysis_tool_audit
+group by agent_run_id
+order by tool_calls desc
+limit 50;
+
+-- 慢调用整体占比：> 40% 说明折叠收益低，考虑调大 RUNTIME_EVENT_FLUSH_MS
+select round(
+         100.0 * count(*) filter (where duration_ms >= 800) / greatest(count(*), 1), 1
+       ) as slow_pct
+from public.analysis_tool_audit;
+
+-- 每次 attempt 的模型请求数与 Agent 数
+select agent_attempt, model_requests, agent_count
+from public.analysis_agent_run
+where status in ('COMMITTED', 'FAILED')
+order by model_requests desc
+limit 50;
+```
+
+切分区的触发条件：**单日事件超过 100 万，或表行数接近 5000 万**。届时另开一个 contract
+migration 做「建分区表 → 搬数据 → 改名切换」，需要停机窗口。因为 `event_day` 已经在，那次
+迁移把约束换成 `unique (event_uuid, event_day)` 即可，**不需要改任何 Worker 或前端代码**。
+
+把实测到的数字写回本节，不要让它长期停留在「估算」状态。
+
+## 16.7 上线顺序与验收
+
+必须 expand-first：
+
+1. 备份数据库，记录当前迁移版本与 `v4_harness_manifest` 的 `is_active` 行。
+2. 测试环境顺序应用到 `0032`，跑 `supabase/tests/0032_analysis_runtime_monitoring_test.sql`
+   与 `0031_manifest_freeze_and_worker_overview_test.sql`，确认两个成功标记。
+3. 用**旧 Worker**跑一个小批次，证明 expand 向后兼容（旧 Worker 不上报事件，业务不受影响）。
+4. 构建新 Worker：`npm run worker:build`（内含 `harness:manifest:check`），确认输出的
+   manifest 哈希**与部署前一致**。不一致就说明有人改了契约，停止发布。
+5. 先滚动部署 1 个副本，跑单需求 smoke，逐项核对：
+   - 事件链路：`analysis_runtime_event` 有 `JOB_* / TASK_CLAIMED / ATTEMPT_* / AGENT_* / TOOL_* / MODEL_*`；
+   - 时间线里能看到 `bash` / `edit` / `grep` 这类 harness origin 工具，**不只是 5 个平台快照工具**；
+   - node 投影 `current_activity_*` 在跑的时候非空、终态后被清空；
+   - `open_correlations` 能显示卡住的工具；
+   - `analysis_agent_run.tool_calls` **没有**因为监控上报被放大（对比同规模的历史 attempt）；
+   - 敏感字段扫描：跑一次 `npm run monitor:attempt`，脚本自带扫描，命中即失败。
+6. 滚动部署其余副本，观察 16.4 的全部告警项。
+7. 部署前端 `/monitoring`（导航仅 ADMIN）。
+8. 执行权限验收：非创建者 REVIEWER 与 VIEWER 调用 `get_analysis_runtime_console` 必须被
+   服务端拒绝（`batch management permission required`）；非 ADMIN 调用
+   `admin_list_active_analysis_batches` 必须报 `ADMIN role required`。
+9. 稳定后再考虑 Phase 3（Workflow/Job 实例树，**需要独立 manifest 迁移与排空窗口**）与
+   Phase 5（Realtime，独立灰度）。首版不依赖它们。
+
+回滚：前端回退到无 `/monitoring` 的版本即可（事件表保留，不做 destructive down migration）；
+Worker 用 16.3 第 2 级；数据库用第 3 级。页面看到 `last_event_at` 陈旧时显示「监控数据已暂停」，
+**不得把任务判定为失败**。

@@ -16,6 +16,7 @@
  */
 
 import z from '@deepseek-ai/schemastery'
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { isAgentLoopRequest, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { agentIdentityRegistry } from '../shared/agent-identity.js'
@@ -52,6 +53,8 @@ export type ModelRequestKind = 'loop' | 'retry' | 'compaction' | 'session-title'
  */
 export class RequestClassifier {
   private readonly failedSessions = new Set<string>()
+  /** 每个 session 连续失败的次数：直接看出重试深度（payload.retry_index）。 */
+  private readonly retryDepth = new Map<string, number>()
 
   classify(input: {
     isLoopRequest: boolean
@@ -65,10 +68,21 @@ export class RequestClassifier {
     return 'loop'
   }
 
+  /** 当前请求是这个 session 的第几次重试。0 表示首次。 */
+  retryIndex(sessionId: string | undefined): number {
+    if (sessionId === undefined) return 0
+    return this.retryDepth.get(sessionId) ?? 0
+  }
+
   observeFinish(sessionId: string | undefined, failed: boolean): void {
     if (sessionId === undefined) return
-    if (failed) this.failedSessions.add(sessionId)
-    else this.failedSessions.delete(sessionId)
+    if (failed) {
+      this.failedSessions.add(sessionId)
+      this.retryDepth.set(sessionId, (this.retryDepth.get(sessionId) ?? 0) + 1)
+    } else {
+      this.failedSessions.delete(sessionId)
+      this.retryDepth.delete(sessionId)
+    }
   }
 }
 
@@ -84,6 +98,22 @@ function isFailureFinish(chunk: StreamChunk): boolean {
   if (chunk.type !== 'finish') return false
   const kind = (chunk as { reason?: { kind?: string } }).reason?.kind
   return kind === 'error' || kind === 'aborted'
+}
+
+/**
+ * provider 流只有明确的正常 finish 才算成功。默认失败可覆盖 iterator throw、调用方提前
+ * return 和协议缺失 finish；看到 finish 后按 reason 修正，后续若再抛错则重新置为失败。
+ */
+export class ModelRequestOutcome {
+  failed = true
+
+  observe(chunk: StreamChunk): void {
+    if (chunk.type === 'finish') this.failed = isFailureFinish(chunk)
+  }
+
+  observeThrown(): void {
+    this.failed = true
+  }
 }
 
 /**
@@ -138,9 +168,15 @@ export function apply(ctx: Context, config: UsageReporterConfig): void {
         sessionId,
       })
 
+      // 一次模型请求生命周期的稳定随机 ID。四个上报点共用同一个值，所以 STARTED 与
+      // TERMINAL 必然配得上（方案 §7.5：STARTED 与 TERMINAL 由同一方生成 correlation）。
+      const correlationId = randomUUID()
+      const retryIndex = classifier.retryIndex(sessionId)
+
       // 预留必须在 next() 之前完成，所以这里必然是一次 await。llm/stream 返回
       // AsyncIterable，于是把预留放进生成器的第一步 —— 这仍然早于任何 provider 调用。
       return (async function* metered() {
+        const requestStartedAt = Date.now()
         // 解析失败的**原因**必须留痕。此前这里是 `.catch(() => null)`，只写一行
         // `IDENTITY_UNRESOLVED` 就把错误扔了 —— 于是"后台委派为什么静默失败"完全无法诊断，
         // 排查时只能靠猜。身份解析失败是结构性问题，不是噪声。
@@ -186,6 +222,10 @@ export function apply(ctx: Context, config: UsageReporterConfig): void {
               sessionId: identity.sessionId,
               kind,
               count: 1,
+              // V1.5：Broker 在 verdict 通过时产生 MODEL_REQUEST_STARTED，被拒时产生
+              // MODEL_REQUEST_DENIED。不新增路由，只扩展请求体（方案 §7.2）。
+              correlationId,
+              retryIndex,
             },
           )
           verdict = response.status === 200 ? response.body : { allowed: false, code: 'BROKER_DENIED' }
@@ -214,7 +254,7 @@ export function apply(ctx: Context, config: UsageReporterConfig): void {
           return
         }
 
-        let failed = false
+        const outcome = new ModelRequestOutcome()
         let inputTokens: number | null = null
         let outputTokens: number | null = null
         try {
@@ -229,29 +269,42 @@ export function apply(ctx: Context, config: UsageReporterConfig): void {
                 outputTokens = (outputTokens ?? 0) + tokens.outputTokens
               }
             }
-            if (isFailureFinish(chunk)) failed = true
+            outcome.observe(chunk)
             yield chunk
           }
+        } catch (err) {
+          outcome.observeThrown()
+          throw err
         } finally {
-          classifier.observeFinish(sessionId, failed)
-          if (inputTokens !== null || outputTokens !== null) {
-            void brokerPost(channel, '/attempt/report-usage', {
-              taskId: config.taskId,
-              agentAttempt: config.agentAttempt,
-              agentCapability: identity.agentCapability,
-              agentId: identity.agentId,
-              sessionId: identity.sessionId,
-              inputTokens,
-              outputTokens,
-            }).catch((err: unknown) => {
-              // token 用量上报失败会让库里的 usage 偏小，成本核对随之失真。留痕而不是吞掉。
-              always(
-                `USAGE_REPORT_FAILED ${JSON.stringify({
-                  cause: (err as { code?: string })?.code ?? 'UNKNOWN',
-                })}`,
-              )
-            })
-          }
+          classifier.observeFinish(sessionId, outcome.failed)
+          // 无条件上报生命周期终态。
+          //
+          // 这里原来被 `if (inputTokens !== null || outputTokens !== null)` 包住：provider
+          // 不报 token 时**完全不发** /attempt/report-usage，于是"模型请求已结束"这件事在
+          // 平台侧根本不存在 —— 监控台会永远显示一个已经返回的请求还在跑。token 仍然可以
+          // 是 null（null 与 0 是两件不同的事），但终态必须发。
+          void brokerPost(channel, '/attempt/report-usage', {
+            taskId: config.taskId,
+            agentAttempt: config.agentAttempt,
+            agentCapability: identity.agentCapability,
+            agentId: identity.agentId,
+            sessionId: identity.sessionId,
+            inputTokens,
+            outputTokens,
+            correlationId,
+            phase: 'TERMINAL',
+            kind,
+            retryIndex,
+            durationMs: Date.now() - requestStartedAt,
+            failed: outcome.failed,
+          }).catch((err: unknown) => {
+            // token 用量上报失败会让库里的 usage 偏小，成本核对随之失真。留痕而不是吞掉。
+            always(
+              `USAGE_REPORT_FAILED ${JSON.stringify({
+                cause: (err as { code?: string })?.code ?? 'UNKNOWN',
+              })}`,
+            )
+          })
         }
       })()
     },

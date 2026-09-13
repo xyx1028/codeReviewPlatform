@@ -36,6 +36,23 @@ export interface WorkerConfig {
   sessionVolumeMaxBytes: number
   /** 孤儿 Workspace 的最大存活时长。 */
   orphanWorkspaceMaxAgeMs: number
+  /**
+   * 运行监控事件上报（方案 §7.9）。
+   *
+   * `enabled = false` 时 Worker 完全不上报，现有分析流程不受任何影响 —— 这是三级停写
+   * 手段里的第二级（第一级是前端不访问 /monitoring，第三级是数据库 revoke execute）。
+   */
+  runtimeEvents: {
+    enabled: boolean
+    /** 定时 flush 间隔（毫秒）。同时是 §7.3 工具折叠的窗口。 */
+    flushMs: number
+    /** 单 Attempt 队列上限。溢出按优先级丢弃并计数。 */
+    queueMax: number
+    /** 单批最大事件数。 */
+    batchMax: number
+    /** 事件保留天数。与数据库 retention_until 默认值保持一致。 */
+    retentionDays: number
+  }
 }
 
 export class ConfigError extends Error {
@@ -75,8 +92,22 @@ function intInRange(env: Env, key: string, fallback: number, min: number, max: n
   return value
 }
 
-function validUrl(value: string, key: string): string {
-  try {
+/**
+ * 布尔开关。只接受明确的真假值：一个拼错的 `RUNTIME_EVENTS_ENABLED=ture` 必须报错，
+ * 而不是被当成 false 静默关掉监控。
+ */
+function boolFlag(env: Env, key: string, fallback: boolean): boolean {
+  const raw = env[key]
+  if (raw === undefined || raw.trim() === '') return fallback
+  const value = raw.trim().toLowerCase()
+  if (value === 'true' || value === '1' || value === 'yes') return true
+  if (value === 'false' || value === '0' || value === 'no') return false
+  throw new ConfigError(
+    `environment variable ${key} must be true or false, got: ${raw}`,
+  )
+}
+
+function validUrl(value: string, key: string): string {  try {
     new URL(value)
   } catch {
     throw new ConfigError(`environment variable ${key} must be a valid URL: ${value}`)
@@ -182,5 +213,13 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
       60 * 1000,
       7 * 24 * 60 * 60 * 1000,
     ),
+    runtimeEvents: {
+      enabled: boolFlag(env, 'RUNTIME_EVENTS_ENABLED', true),
+      // 800ms 默认值来自方案 §7.1：必须 ≤1 秒，否则"正在调用"来不及被看见。
+      flushMs: intInRange(env, 'RUNTIME_EVENT_FLUSH_MS', 800, 50, 10000),
+      queueMax: intInRange(env, 'RUNTIME_EVENT_QUEUE_MAX', 512, 32, 20000),
+      batchMax: intInRange(env, 'RUNTIME_EVENT_BATCH_MAX', 64, 1, 500),
+      retentionDays: intInRange(env, 'RUNTIME_EVENT_RETENTION_DAYS', 30, 1, 365),
+    },
   }
 }

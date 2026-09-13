@@ -11,6 +11,7 @@ import {
   artifactTypeLabels,
   artifactVerificationMeta,
   evidenceOriginMeta,
+  runtimeActivityLabel,
   toolPermissionVerdictMeta,
 } from '../lib/labels'
 import type { AgentRunStatus, AgentTreeNode, ArtifactSummary, EvidenceSummary, ToolSummaryRow } from '../types'
@@ -28,6 +29,14 @@ function formatBytes(bytes: number) {
   const exponent = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)))
   const value = bytes / 1024 ** exponent
   return `${value.toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`
+}
+
+/**
+ * Token 未上报与 0 是两件不同的事：provider 没报量时数据库保持 null，
+ * 界面必须说“未上报”，不能显示一个看起来像真实测量的 0。
+ */
+function formatTokens(value: number | null | undefined) {
+  return value === null || value === undefined ? '未上报' : value.toLocaleString()
 }
 
 /**
@@ -130,6 +139,39 @@ export function AgentRunDetailPage({ canManage }: { canManage: boolean }) {
     { title: '模型请求', dataIndex: 'model_requests', width: 100 },
     { title: '工具调用', dataIndex: 'tool_calls', width: 100 },
     { title: '产出证据', dataIndex: 'evidence_produced', width: 100 },
+    {
+      // V1.5 当前活动投影：只在 current_activity_status = 'RUNNING' 时才敢说"正在……"。
+      // 这一列的数据源是后端事实事件更新的投影，不是从计数增长或工具名猜的。
+      title: '当前真实活动',
+      key: 'current_activity',
+      width: 200,
+      render: (_value, node) => {
+        if (node.current_activity_status !== 'RUNNING') {
+          return (
+            <Text type="secondary">
+              {node.status === 'RUNNING' ? '当前无未闭合活动' : '已结束'}
+            </Text>
+          )
+        }
+        const activity = runtimeActivityLabel(node.current_activity_code)
+        const startedAt = node.current_activity_started_at
+        const elapsed =
+          startedAt === null || startedAt === undefined
+            ? null
+            : Math.max(0, Math.round((Date.now() - new Date(startedAt).getTime()) / 1000))
+        return (
+          <Space direction="vertical" size={0}>
+            <Text>
+              {activity}
+              {node.current_tool_name ? `：${node.current_tool_name}` : ''}
+            </Text>
+            {elapsed === null ? null : (
+              <Text type="secondary">已持续 {elapsed}s</Text>
+            )}
+          </Space>
+        )
+      },
+    },
     {
       title: '耗时',
       key: 'duration',
@@ -261,6 +303,15 @@ export function AgentRunDetailPage({ canManage }: { canManage: boolean }) {
           {detail.committed_at ? <Text type="secondary">提交时间：{new Date(detail.committed_at).toLocaleString()}</Text> : null}
           {detail.finished_at ? <Text type="secondary">结束时间：{new Date(detail.finished_at).toLocaleString()}</Text> : null}
           {detail.sealed_at ? <Text type="secondary">封存时间：{new Date(detail.sealed_at).toLocaleString()}</Text> : null}
+          {/* V1.5 ATTEMPT 阶段投影：它是快照的一部分，不需要游标。 */}
+          {detail.attempt_phase_code ? (
+            <Text type="secondary">
+              当前阶段：{runtimeActivityLabel(detail.attempt_phase_code)}
+              {detail.attempt_phase_started_at
+                ? ` · 自 ${new Date(detail.attempt_phase_started_at).toLocaleString()}`
+                : ''}
+            </Text>
+          ) : null}
         </Space>
       </Card>
 
@@ -274,8 +325,8 @@ export function AgentRunDetailPage({ canManage }: { canManage: boolean }) {
           <Col xs={12} md={6}><Statistic title="压缩请求" value={usage.compaction_requests} /></Col>
           <Col xs={12} md={6}><Statistic title="工具调用" value={usage.tool_calls} /></Col>
           <Col xs={12} md={6}><Statistic title="检索次数" value={usage.searches_run} /></Col>
-          <Col xs={12} md={6}><Statistic title="输入 Token" value={usage.input_tokens} /></Col>
-          <Col xs={12} md={6}><Statistic title="输出 Token" value={usage.output_tokens} /></Col>
+          <Col xs={12} md={6}><Statistic title="输入 Token" value={formatTokens(usage.input_tokens)} /></Col>
+          <Col xs={12} md={6}><Statistic title="输出 Token" value={formatTokens(usage.output_tokens)} /></Col>
           <Col xs={12} md={6}><Statistic title="Web 请求" value={usage.web_requests} /></Col>
           <Col xs={12} md={6}><Statistic title="Web 字节" value={formatBytes(usage.web_bytes)} /></Col>
         </Row>

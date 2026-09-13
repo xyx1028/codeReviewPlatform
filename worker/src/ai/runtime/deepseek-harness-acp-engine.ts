@@ -41,6 +41,7 @@ import {
 import {
   startAttemptControlBroker,
   type AttemptControlHandle,
+  type BrokerUsageSnapshot,
   type CommitReviewInput,
   type CommitReviewResult,
   type PermissionDecisionEntry,
@@ -86,6 +87,12 @@ import type {
   ReviewUsage,
 } from './contracts.js'
 import { ReviewExecutionAbortedError, ReviewExecutionError } from './errors.js'
+import {
+  NullRuntimeEventReporter,
+  type RuntimeEventReporterLike,
+} from '../../monitoring/runtime-event-reporter.js'
+import type { RuntimeEvent } from '../../monitoring/runtime-event-types.js'
+import { AttemptAttributionTracker } from '../../monitoring/runtime-attribution.js'
 
 /**
  * 平台自有工具的名字。
@@ -226,6 +233,20 @@ export interface DeepSeekHarnessAcpEngineOptions {
   /** Injected in tests to avoid spawning a real Harness process. */
   startProcess?: typeof startAcpProcess
   runTurn?: typeof runSingleAcpTurn
+  /**
+   * 运行监控事件上报（V1.5）。缺省等价于关闭：所有插桩点走 NullRuntimeEventReporter，
+   * 现有分析流程一字不改。
+   */
+  runtimeEvents?: RuntimeEventReporterLike
+  /** attempt 归因日志需要的 Job 上下文。缺省时日志里这些字段为 null。 */
+  runtimeContext?: {
+    jobId?: string | null
+    batchId?: string | null
+    agentRunId?: string | null
+    harnessVersionFrozen?: string | null
+    capabilityContractHashFrozen?: string | null
+    policyVersion?: number | null
+  }
 }
 
 export class DeepSeekHarnessAcpEngine implements ReviewRunner {
@@ -243,8 +264,33 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
 
     if (input.signal.aborted) throw new ReviewExecutionAbortedError()
 
+    // ---- 运行监控插桩 ------------------------------------------------------
+    //
+    // 事件同时进两条通道：Reporter（落数据库，供人的监控台增量拉取）与 Tracker
+    // （进程内独立算归因，随终态落一行 attempt_rollup 日志，作为数据库汇总失败时的
+    // 备份通道）。两条通道共用同一份事实，所以不会出现"界面说正常、日志说有问题"。
+    const events = this.options.runtimeEvents ?? new NullRuntimeEventReporter()
+    const attribution = new AttemptAttributionTracker()
+    const attemptStartedMs = Date.now()
+    attribution.observeAttemptStarted(attemptStartedMs)
+    /** 观测 fail open：插桩绝不改变业务结果。 */
+    const emit = (event: RuntimeEvent): void => {
+      try {
+        attribution.observe(event)
+        events.report(event)
+      } catch {
+        // 监控失败不能放宽权限、预算、root-only、证据或 lease 校验。
+      }
+    }
+
     // Fail before spawning anything if a pinned commit is not present locally.
+    const pinsStartedMs = Date.now()
     await this.options.snapshots.verifyPins()
+    emit({
+      type: 'PINS_VERIFIED',
+      payload: { duration_ms: Date.now() - pinsStartedMs },
+      durationMs: Date.now() - pinsStartedMs,
+    })
 
     const identity = mintRootIdentity(this.options.taskId, this.options.agentAttempt)
     const authority = new AgentAuthorityLedger({
@@ -254,7 +300,13 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       rootAgentId: identity.rootAgentId,
       rootSessionId: identity.rootSessionId,
       persistNode: this.options.db
-        ? (node) => this.options.db!.registerAgentNode(node)
+        ? (node) => {
+            // Agent 注册成功的时刻就是 agent_idle_ms 窗口的起点。用 persistNode 而不是
+            // 事件流：AGENT_REGISTERED 由数据库触发器原子写（数据库是 lineage 的唯一
+            // 仲裁），Worker 侧看不到那条事件。
+            attribution.observeAgentRegistered(node.agentId)
+            return this.options.db!.registerAgentNode(node)
+          }
         : undefined,
     })
     const budget = new HierarchicalBudgetLedger({
@@ -294,6 +346,8 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
     // Agent 侧观测到的工具调用（含未到达 Broker 的），turn 抛错时也可用。
     const agentToolCalls: Record<string, number> = {}
     let endReason: AttemptEndReason = 'ATTEMPT_FAILED'
+    /** 终态稳定错误码。attempt_rollup 日志与数据库汇总用同一个值。 */
+    let terminalErrorCode: string | null = null
     // fencing revision。恢复时由数据库推进，否则是本次 attempt claim 时的初值。
     let sessionRevision = this.options.sessionRevision ?? 1
 
@@ -306,7 +360,9 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         logger: log,
       })
       sessionSlot = sessionRegistry.acquire()
+      emit({ type: 'SESSION_SLOT_ACQUIRED', payload: {} })
 
+      const workspaceStartedMs = Date.now()
       workspace = AttemptWorkspace.create({
         attemptsRoot: this.options.attemptsRoot,
         // 目录名按 task+attempt 确定性派生：Harness 的 session/resume 校验 cwd 一致性。
@@ -326,6 +382,33 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       if (this.options.checkoutPinned) {
         for (const pin of this.options.snapshots.pins()) {
           workspace.materializeReadOnly(pin.repository, this.options.checkoutPinned)
+        }
+      }
+      // 同步调用，没有 await 间隙可插"开始"，所以只报完成（方案 §6.3）。
+      emit({
+        type: 'WORKSPACE_READY',
+        payload: { duration_ms: Date.now() - workspaceStartedMs },
+        durationMs: Date.now() - workspaceStartedMs,
+      })
+
+      const persistCollectedArtifacts = async (): Promise<void> => {
+        if (!this.options.db || !workspace) return
+        for (const artifact of workspace.collectArtifacts()) {
+          await this.options.db
+            .saveArtifact({
+              producerAgentId: identity.rootAgentId,
+              artifactType: inferArtifactType(artifact.relativePath),
+              workspacePath: artifact.relativePath,
+              contentHash: artifact.contentHash,
+              sizeBytes: artifact.sizeBytes,
+            })
+            .catch((err) =>
+              log.error('save_artifact_failed', {
+                event: 'save_artifact_failed',
+                workspace_path: artifact.relativePath,
+                error_message: redactError(err),
+              }),
+            )
         }
       }
 
@@ -351,7 +434,23 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         budget,
         egress,
         workspace,
-        commitReview: this.options.commitReview,
+        commitReview: async (review) => {
+          // save_agent_review_result 会烧毁 task claim。usage、分 Agent 计量和自动扫描到的
+          // Artifact 都依赖该 claim，必须在正式提交前完成；失败/取消路径仍由 finally 兜底。
+          if (this.options.db) {
+            const usageCommitted = await this.options.db.commitUsage(
+              usageForDatabase(review.usage),
+              perAgentUsageForDatabase(review.usage),
+            )
+            if (!usageCommitted) {
+              const error = new Error('task lease was lost before review submission')
+              Object.assign(error, { code: 'TASK_LEASE_LOST' })
+              throw error
+            }
+          }
+          await persistCollectedArtifacts()
+          return this.options.commitReview(review)
+        },
         isLeaseValid: this.options.isLeaseValid,
         // 子节点落库由 ledger 的 persistNode 唯一负责（先落库、再铸令牌）。这里不再重复
         // 传一遍：同一次注册写两次 register_analysis_agent_node，虽然 RPC 幂等，但等于把
@@ -366,7 +465,11 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         saveArtifact: this.options.db
           ? (artifact) => this.options.db!.saveArtifact(artifact)
           : undefined,
+        // 插件侧的工具/模型生命周期经现有路由的请求体扩展抵达这里，再转投 Reporter。
+        reportRuntimeEvent: emit,
       })
+      // Unix socket 已在监听：这是明确的 await 边界。
+      emit({ type: 'BROKER_READY', payload: {} })
 
       profile = materializeAttemptProfile({
         taskId: this.options.taskId,
@@ -416,9 +519,12 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         rootSessionId: identity.rootSessionId,
         treeDigest: authority.treeDigest(),
       })
+      // 落库成功才算冻结：recordProfile 失败时上面已经抛出，不会走到这里。
+      emit({ type: 'PROFILE_FROZEN', payload: {} })
       // 根节点由平台创建，不经过模型的 register_agent 路由，因此必须在启动 Harness 前
       // 显式持久化。只有数据库确认 root identity 后，进程才获得执行机会。
       await this.options.db?.registerAgentNode(authority.root)
+      attribution.observeAgentRegistered(authority.root.agentId)
 
       log.info('agent_attempt_started', {
         event: 'agent_attempt_started',
@@ -452,6 +558,8 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         // rlimit 由后代继承，所以设在 dsh 上就等于设在 Shell 与 Jobs 起的每个进程上。
         ulimits: workspace.shellSpec().limits,
       })
+      // 同步 spawn：只报完成。它同时是 setup_ms 的右边界（方案 §6.9.2）。
+      emit({ type: 'HARNESS_PROCESS_STARTED', payload: {} })
 
       // ---- Session 恢复判定 -------------------------------------------------
       //
@@ -472,6 +580,10 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         resumeSessionId = resume.decision.session.sessionId
         sessionRevision = resume.decision.session.sessionRevision
         broker.setSessionRevision(sessionRevision)
+        emit({
+          type: 'SESSION_RESUMED',
+          payload: { session_revision: sessionRevision, resumed: true },
+        })
         log.info('agent_attempt_resuming_session', {
           event: 'agent_attempt_resuming_session',
           session_revision: sessionRevision,
@@ -484,8 +596,10 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         ledger: authority,
         logger: log,
         markNodeTerminal: this.options.db
-          ? (agentId, status, errorCode) =>
-              this.options.db!.markAgentTerminal(agentId, status, errorCode)
+          ? (agentId, status, errorCode) => {
+              attribution.observeAgentTerminal(agentId)
+              return this.options.db!.markAgentTerminal(agentId, status, errorCode)
+            }
           : null,
         // Workflow / 子 Agent / Jobs 都由 Harness 在进程内持有，平台唯一的合作式取消入口
         // 是让 ACP 客户端发 session/cancel —— abort 这个 controller 正是这个动作。
@@ -521,6 +635,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       const runTurn = this.options.runTurn ?? runSingleAcpTurn
       let turn
       try {
+        emit({ type: 'ACP_TURN_STARTED', payload: {} })
         turn = await runTurn(
           {
             process: child,
@@ -550,39 +665,21 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         input.signal.removeEventListener('abort', revokeOnAbort)
       }
 
-      // Artifact 登记：平台扫描 artifacts/，自己算 hash 和大小。
-      //
-      // 放在 checkpoint 之前、提交之后判定之前：Artifact 是"建议这样改"的产物，即使这次
-      // attempt 最终没能提交结论，已经生成的补丁和测试报告仍然有价值，运维和用户需要能看到。
-      if (this.options.db) {
-        for (const artifact of workspace.collectArtifacts()) {
-          await this.options.db
-            .saveArtifact({
-              producerAgentId: identity.rootAgentId,
-              artifactType: inferArtifactType(artifact.relativePath),
-              workspacePath: artifact.relativePath,
-              contentHash: artifact.contentHash,
-              sizeBytes: artifact.sizeBytes,
-            })
-            .catch((err) =>
-              log.error('save_artifact_failed', {
-                event: 'save_artifact_failed',
-                // 路径是 workspace 相对路径，不含宿主布局，可以记。
-                workspace_path: artifact.relativePath,
-                error_message: redactError(err),
-              }),
-            )
-        }
-      }
+      const committed = broker.committed()
 
-      // Session checkpoint：turn 结束后落一次 locator + hash，供重启后恢复。
-      if (sessionSlot && this.options.db) {
+      // 提交路径已在 commitReview wrapper 中、claim 仍有效时登记 Artifact；未提交路径
+      // 仍在 turn 结束后扫描，保留失败 attempt 产生的补丁和构建日志。
+      if (committed === null) await persistCollectedArtifacts()
+
+      // Session checkpoint 只服务于“未提交 attempt 的重启恢复”。成功提交已经烧毁 claim，
+      // 再写必然 TASK_LEASE_LOST，而且已提交会话永远不应恢复。
+      if (committed === null && sessionSlot && this.options.db) {
         // 路径由 registry 在持久卷上实际找到，不是拼出来的。
         const location = sessionSlot.locate(turn.sessionId)
         const described = location === null ? null : sessionRegistry.describe(location)
         if (described === null) {
           // 会话没落盘就没有可恢复的东西。这不是故障（例如 turn 在第一次持久化之前就结束），
-          // 但必须记下来：它同时意味着"这次 attempt 重启后只能从零开始"。
+          // 但必须记下来：它同时意味着“这次 attempt 重启后只能从零开始”。
           log.info('session_checkpoint_skipped', {
             event: 'session_checkpoint_skipped',
             session_id: turn.sessionId,
@@ -615,7 +712,6 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       }
 
       const usage = this.usage(broker)
-      const committed = broker.committed()
       const brokerUsage = broker.usage()
 
       log.info('agent_attempt_finished', {
@@ -677,6 +773,11 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         // "预算耗尽…返回稳定错误码"，§7.8.6 也把它列为独立的收敛触发。
         const budgetDenied = brokerUsage.deniedModelRequests > 0
         endReason = budgetDenied ? 'BUDGET_EXHAUSTED' : 'ATTEMPT_FAILED'
+        terminalErrorCode = budgetDenied
+          ? V4_ERROR_CODES.MODEL_BUDGET_EXHAUSTED
+          : turn.stopReason === 'end_turn'
+            ? 'AGENT_NO_SUBMISSION'
+            : 'AGENT_TURN_INCOMPLETE'
         return {
           taskId: this.options.taskId,
           storyCode: this.options.story.code,
@@ -695,6 +796,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       }
 
       endReason = 'COMMITTED'
+      terminalErrorCode = null
       return {
         taskId: this.options.taskId,
         storyCode: this.options.story.code,
@@ -754,6 +856,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
               : input.signal.aborted
                 ? (this.options.abortReason?.() ?? 'USER_CANCELLED')
                 : 'ATTEMPT_FAILED'
+      terminalErrorCode = code
 
       // 子进程 stderr 是唯一能说明"模型/适配器到底报了什么"的来源。以前这里只记
       // 字节数，等于把它扔了：一次 attempt 失败在平台侧完全不可诊断。这里记录经过
@@ -788,33 +891,12 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         usage: broker ? this.usage(broker) : undefined,
       }
     } finally {
-      // 真实 usage 必须在**每条**终态路径上落库，而不只是提交成功那条：失败、取消、预算
-      // 耗尽的 attempt 一样烧了模型请求和 token，只在 save_agent_review_result 里带 usage
-      // 会让这些花费在库里显示为 0，成本告警与配额核对随之失真。RPC 单调更新，重复安全。
-      if (broker && this.options.db) {
+      // 成功路径在 submit_review_result 烧毁 claim 前已经落 usage；失败、取消、预算耗尽
+      // 没有提交入口，仍由这里记录真实消耗。RPC 单调更新，重试安全。
+      if (broker && this.options.db && broker.committed() === null) {
         const finalUsage = broker.usage()
         await this.options.db
-          .commitUsage(
-            {
-              model_requests: finalUsage.modelRequests,
-              retry_requests: finalUsage.retryRequests,
-              compaction_requests: finalUsage.compactionRequests,
-              tool_calls: finalUsage.toolCalls,
-              evidence_shown: finalUsage.evidenceShown,
-              searches_run: finalUsage.searchesRun,
-              web_requests: finalUsage.webRequests,
-              web_bytes: finalUsage.webBytes,
-              // provider 没报 token 时保持 null，不臆造 0。
-              input_tokens: finalUsage.inputTokens,
-              output_tokens: finalUsage.outputTokens,
-            },
-            finalUsage.perAgent.map((agent) => ({
-              agent_id: agent.agentId,
-              model_requests: agent.modelRequests,
-              tool_calls: agent.toolCalls,
-              evidence_produced: agent.evidenceProduced,
-            })),
-          )
+          .commitUsage(usageForDatabase(finalUsage), perAgentUsageForDatabase(finalUsage))
           .catch((err) =>
             log.error('commit_agent_usage_failed', {
               event: 'commit_agent_usage_failed',
@@ -833,7 +915,86 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
           error_code: V4_ERROR_CODES.PROCESS_TREE_CLEANUP_FAILED,
           surviving_pids: drained.survivingPids.length,
         })
+        emit({
+          type: 'PROCESS_TREE_CLEANUP_FAILED',
+          errorCode: V4_ERROR_CODES.PROCESS_TREE_CLEANUP_FAILED,
+          payload: { reason_code: 'PROCESS_TREE_CLEANUP_FAILED' },
+        })
       }
+
+      // ---- 观测收敛 ---------------------------------------------------------
+      //
+      // 必须在返回之前完成：调用方随后会走 save_agent_review_result / fail_agent_review，
+      // 后者会推进 session_revision，之后本 attempt 的任何事件写入都会被 §6.4.1 的
+      // fencing 正确拒绝。所以"尽力 flush 一次"的时机就是这里。
+      const reporterStats = events.snapshot()
+      emit({
+        type: 'ATTEMPT_INSTRUMENTATION_REPORTED',
+        payload: {
+          events_reported: reporterStats.reported,
+          events_dropped: reporterStats.dropped,
+        },
+      })
+      await events.flush().catch(() => undefined)
+
+      const finalReporterStats = events.snapshot()
+      const finalBrokerUsage = broker?.usage() ?? null
+      const committedAtEnd = broker?.committed() ?? null
+      const contract = loadCapabilityContract()
+      // 自包含的归因日志。它不依赖数据库汇总成功、不依赖事件还没被 30 天保留期清掉，
+      // 字段名与 analysis_agent_run_rollup 的列名逐字一致（方案 §13.1）。
+      const rollup = attribution.summarize({
+        agent_run_id: this.options.runtimeContext?.agentRunId ?? null,
+        task_id: this.options.taskId,
+        job_id: this.options.runtimeContext?.jobId ?? null,
+        batch_id: this.options.runtimeContext?.batchId ?? null,
+        agent_attempt: this.options.agentAttempt,
+        worker_id: this.options.workerId,
+        terminal_status: committedAtEnd !== null ? 'COMMITTED' : 'FAILED',
+        terminal_error_code: terminalErrorCode,
+        end_reason: endReason === 'COMMITTED' ? null : endReason,
+        resumed: sessionRevision > (this.options.sessionRevision ?? 1),
+        resume_count: Math.max(0, sessionRevision - (this.options.sessionRevision ?? 1)),
+        fingerprint: {
+          model_label: this.options.route.displayName,
+          policy_hash: policyHash,
+          profile_config_hash: profile?.configHash ?? null,
+          harness_version: contract.harnessVersion,
+          capability_contract_hash: contractHash(contract),
+          prompt_version: AGENT_REVIEW_PROMPT_VERSION,
+          policy_version: policy.version,
+        },
+        agent_count: authority.totalCount(),
+        max_depth: authority.maxDepthReached(),
+        input_tokens: finalBrokerUsage?.inputTokens ?? null,
+        output_tokens: finalBrokerUsage?.outputTokens ?? null,
+        evidence_count: null,
+        artifact_count: workspace?.collectArtifacts().length ?? 0,
+        rejected_submissions: finalBrokerUsage?.rejectedSubmissionTotal ?? 0,
+        reporter: finalReporterStats,
+        finishedAtMs: Date.now(),
+      })
+      log.info('attempt_rollup', {
+        ...rollup,
+        job_id: rollup.job_id ?? undefined,
+        batch_id: rollup.batch_id ?? undefined,
+        open_correlations_at_end: attribution.openCorrelationCount(),
+      })
+
+      // 交叉校验：Agent 侧观测到的工具调用与插件上报的生命周期数对不上，说明
+      // tools/pre-execute 漏了、或者上报被丢。只用它发现问题，不用它补数据（§7.7）。
+      for (const [toolName, observed] of Object.entries(agentToolCalls)) {
+        const reported = rollup.tool_calls_by_name[toolName] ?? 0
+        if (reported < observed) {
+          log.warn('runtime_event_tool_drift', {
+            event: 'runtime_event_tool_drift',
+            tool_name: toolName,
+            observed,
+            reported,
+          })
+        }
+      }
+
       broker?.revoke('the attempt has finished')
       if (child) {
         await child.terminate().catch(() => undefined)
@@ -951,6 +1112,33 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       outputTokens: snapshot.outputTokens,
     }
   }
+}
+
+function usageForDatabase(usage: BrokerUsageSnapshot): Record<string, number | null> {
+  return {
+    model_requests: usage.modelRequests,
+    retry_requests: usage.retryRequests,
+    compaction_requests: usage.compactionRequests,
+    tool_calls: usage.toolCalls,
+    evidence_shown: usage.evidenceShown,
+    searches_run: usage.searchesRun,
+    web_requests: usage.webRequests,
+    web_bytes: usage.webBytes,
+    // provider 没报 token 时保持 null，不臆造 0。
+    input_tokens: usage.inputTokens,
+    output_tokens: usage.outputTokens,
+  }
+}
+
+function perAgentUsageForDatabase(
+  usage: BrokerUsageSnapshot,
+): Array<Record<string, string | number | null>> {
+  return usage.perAgent.map((agent) => ({
+    agent_id: agent.agentId,
+    model_requests: agent.modelRequests,
+    tool_calls: agent.toolCalls,
+    evidence_produced: agent.evidenceProduced,
+  }))
 }
 
 /**
