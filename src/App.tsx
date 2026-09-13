@@ -86,7 +86,7 @@ import { downloadAiTemplate, inferFieldMapping, parseAiWorkbook, parseSourceRows
 import type { FieldMapping, SourceFieldKey } from './lib/excel'
 import { parseBaselineCommit } from './lib/baseline'
 import { hashFile } from './lib/hash'
-import { aiVerdictLabels, aiVerdictOptions, analysisErrorCodeMeta, analysisJobStatusLabels, batchStatusLabels, humanReviewLabels, humanReviewOptions, storyTaskStatusLabels } from './lib/labels'
+import { aiVerdictLabels, aiVerdictOptions, analysisJobStatusLabels, batchStatusLabels, humanReviewLabels, humanReviewOptions, resolveAnalysisError, storyTaskStatusLabels } from './lib/labels'
 import { aiFillPrompt } from './lib/prompt'
 import { WorkerManagementPage } from './pages/WorkerManagementPage'
 import { AgentRunDetailPage } from './pages/AgentRunDetailPage'
@@ -1333,11 +1333,12 @@ function AutoAnalysisSection({
     configuredModelName ??
     ''
 
-  const errorMeta = job?.error_code ? analysisErrorCodeMeta[job.error_code] : undefined
+  const resolvedError = resolveAnalysisError(job?.error_code, job?.error_message)
+  const errorMeta = resolvedError.meta
   const retryable =
     job?.status === 'FAILED' &&
     job.execution_engine === 'deepseek-harness-acp' &&
-    errorMeta?.retryable === true
+    errorMeta.retryable
 
   return (
     <Card title="自动 AI 分析" className="auto-analysis-card">
@@ -1526,17 +1527,32 @@ function AutoAnalysisSection({
               className="mt-md"
               type="error"
               showIcon
-              title={`分析失败${job.error_code ? `（${job.error_code}）` : ''}`}
+              title={`分析失败：${errorMeta.title}`}
               description={
-                <Space direction="vertical">
-                  <Text>{errorMeta?.message ?? job.error_message ?? '任务失败，请查看错误码。'}</Text>
-                  <Text type="secondary">
-                    {errorMeta
-                      ? errorMeta.retryable
-                        ? '该错误可重试：将复用原 Commit 快照。'
-                        : '该错误不建议自动重试，请先处理根因（如分支/密钥）。'
-                      : ''}
+                <Space direction="vertical" className="full-width" size="small">
+                  <Text>
+                    <Text strong>原因：</Text>
+                    {errorMeta.reason}
                   </Text>
+                  <Text>
+                    <Text strong>处理建议：</Text>
+                    {errorMeta.suggestion}
+                  </Text>
+                  <Tag color={retryable ? 'green' : 'orange'}>
+                    {retryable ? '处理根因后可按原 Commit 重试' : '不建议直接重试'}
+                  </Tag>
+                  <details>
+                    <summary>技术详情</summary>
+                    <Space direction="vertical" size={4} className="mt-sm">
+                      <Text type="secondary">
+                        错误码：<Text code>{resolvedError.code}</Text>
+                        {resolvedError.originalCode && resolvedError.originalCode !== resolvedError.code
+                          ? <>（数据库原始码：<Text code>{resolvedError.originalCode}</Text>）</>
+                          : null}
+                      </Text>
+                      <Text code copyable>{job.error_message ?? '无额外技术信息'}</Text>
+                    </Space>
+                  </details>
                   {canManage ? (
                     <Button
                       danger

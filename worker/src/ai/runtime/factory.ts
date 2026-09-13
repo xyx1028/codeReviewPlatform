@@ -12,6 +12,7 @@ import {
   policyHash as hashCapabilityPolicy,
   type V4CapabilityPolicy,
 } from '../policy/v4-capability-policy.js'
+import { V4_ERROR_CODES, V4GovernanceError } from '../policy/v4-errors.js'
 import { SnapshotStore } from '../snapshot/snapshot-store.js'
 import type { CoveragePolicy } from '../snapshot/search-coverage-ledger.js'
 import { checkoutPinnedCommit } from '../../git/prepare.js'
@@ -95,25 +96,33 @@ export async function buildDeepSeekHarnessReview(
   const manifest = loadCapabilityContract()
   const currentContractHash = contractHash(manifest)
   if (input.task.capability_contract_hash === null) {
-    throw new Error('SESSION_FORMAT_UNSUPPORTED: claimed V4 task has no frozen Harness manifest hash')
+    throw new V4GovernanceError(
+      V4_ERROR_CODES.SESSION_FORMAT_UNSUPPORTED,
+      'claimed V4 task has no frozen Harness manifest hash',
+    )
   }
   if (
     input.task.capability_contract_hash !== undefined &&
     input.task.capability_contract_hash !== currentContractHash
   ) {
-    throw new Error(
-      `SESSION_FORMAT_UNSUPPORTED: task requires Harness manifest ${input.task.capability_contract_hash}, worker has ${currentContractHash}`,
+    throw new V4GovernanceError(
+      V4_ERROR_CODES.SESSION_FORMAT_UNSUPPORTED,
+      `task requires Harness manifest ${input.task.capability_contract_hash}, worker has ${currentContractHash}`,
     )
   }
   if (input.task.harness_version === null) {
-    throw new Error('SESSION_FORMAT_UNSUPPORTED: claimed V4 task has no frozen Harness version')
+    throw new V4GovernanceError(
+      V4_ERROR_CODES.SESSION_FORMAT_UNSUPPORTED,
+      'claimed V4 task has no frozen Harness version',
+    )
   }
   if (
     input.task.harness_version !== undefined &&
     input.task.harness_version !== manifest.harnessVersion
   ) {
-    throw new Error(
-      `SESSION_FORMAT_UNSUPPORTED: task requires Harness ${input.task.harness_version}, worker has ${manifest.harnessVersion}`,
+    throw new V4GovernanceError(
+      V4_ERROR_CODES.SESSION_FORMAT_UNSUPPORTED,
+      `task requires Harness ${input.task.harness_version}, worker has ${manifest.harnessVersion}`,
     )
   }
 
@@ -132,14 +141,18 @@ export async function buildDeepSeekHarnessReview(
   })
   const { policy, frozenPolicyHash, breakers } = resolveAttemptPolicy(input.task)
   if (input.task.policy_hash === null) {
-    throw new Error('AGENT_IDENTITY_INVALID: claimed V4 task has no frozen policy hash')
+    throw new V4GovernanceError(
+      V4_ERROR_CODES.AGENT_IDENTITY_INVALID,
+      'claimed V4 task has no frozen policy hash',
+    )
   }
   if (
     input.task.policy_hash !== undefined &&
     input.task.policy_hash !== frozenPolicyHash
   ) {
-    throw new Error(
-      `AGENT_IDENTITY_INVALID: frozen policy hash ${input.task.policy_hash} does not match Worker canonical hash ${frozenPolicyHash}`,
+    throw new V4GovernanceError(
+      V4_ERROR_CODES.AGENT_IDENTITY_INVALID,
+      `frozen policy hash ${input.task.policy_hash} does not match Worker canonical hash ${frozenPolicyHash}`,
     )
   }
   if (breakers.length > 0) {
