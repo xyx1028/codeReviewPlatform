@@ -1490,7 +1490,13 @@ function AutoAnalysisSection({
           <Table<AnalysisStoryTaskWithStory>
             rowKey="id"
             size="small"
-            pagination={false}
+            pagination={{
+              size: 'small',
+              defaultPageSize: 10,
+              showSizeChanger: true,
+              pageSizeOptions: [10, 20, 50],
+              showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 个需求`,
+            }}
             loading={storyTasksQuery.isLoading}
             locale={{ emptyText: '逐需求任务准备中' }}
             dataSource={storyTasks}
@@ -1499,7 +1505,9 @@ function AutoAnalysisSection({
               {
                 title: 'Agent 状态',
                 dataIndex: 'agent_status',
-                width: 120,
+                width: 140,
+                filters: Object.entries(storyTaskStatusLabels).map(([value, text]) => ({ value, text })),
+                onFilter: (value, task) => task.agent_status === value,
                 render: (status: AnalysisStoryTaskWithStory['agent_status']) => (
                   <Tag color={status === 'SUCCEEDED' ? 'green' : status === 'FAILED' ? 'red' : status === 'RUNNING' ? 'processing' : 'default'}>
                     {storyTaskStatusLabels[status] ?? status}
