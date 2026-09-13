@@ -32,6 +32,7 @@ import type {
   UserProfile,
   UserRole,
   V4CapabilityPolicy,
+  V4CapabilityPolicyEditable,
 } from '../types'
 
 export interface CreateBatchInput {
@@ -721,10 +722,48 @@ export async function requestAttemptCancel(taskId: string, reason = 'USER_CANCEL
   return unwrap<boolean>({ data, error })
 }
 
-/** ADMIN 只读：读取平台统一的默认能力策略（普通启动流程不展示任何开关）。 */
-export async function adminGetV4CapabilityPolicy() {
+/** ADMIN：读取所选模型的新 Job 将冻结的完整 V4 策略。 */
+export async function adminGetV4CapabilityPolicy(modelConfigId: string) {
   const client = requireSupabase()
-  const { data, error } = await client.rpc('admin_get_v4_capability_policy')
+  const { data, error } = await client.rpc('admin_get_v4_capability_policy', {
+    p_model_config_id: modelConfigId,
+  })
+  return unwrap<V4CapabilityPolicy>({ data, error })
+}
+
+/** ADMIN：更新所选模型的 V4 运行资源限额；安全能力字段不在 RPC 入参中。 */
+export async function adminUpdateV4CapabilityPolicy(
+  modelConfigId: string,
+  policy: V4CapabilityPolicyEditable,
+) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_update_v4_capability_policy', {
+    p_model_config_id: modelConfigId,
+    p_sandbox_command_timeout_ms: policy.sandbox.commandTimeoutMs,
+    p_sandbox_max_processes: policy.sandbox.maxProcessesPerAttempt,
+    p_workspace_max_bytes: policy.sandbox.maxWorkspaceBytes,
+    p_workspace_max_files: policy.sandbox.maxWorkspaceFiles,
+    p_max_agents_per_attempt: policy.agents.maxAgentsPerAttempt,
+    p_max_delegation_depth: policy.agents.maxDelegationDepth,
+    p_max_concurrent_children: policy.agents.maxConcurrentChildren,
+    p_workflow_max_concurrent_steps: policy.workflow.maxConcurrentSteps,
+    p_workflow_max_runtime_ms: policy.workflow.maxRuntimeMs,
+    p_max_concurrent_jobs_per_owner: policy.jobs.maxConcurrentJobsPerOwner,
+    p_jobs_max_runtime_ms: policy.jobs.maxRuntimeMs,
+    p_max_parallel_tool_calls: policy.parallelTools.maxPerStep,
+    p_agent_max_total_requests: policy.modelBudget.maxTotalRequests,
+    p_agent_max_root_requests: policy.modelBudget.maxRootRequests,
+    p_agent_max_child_requests: policy.modelBudget.maxChildRequests,
+    p_agent_max_retry_requests: policy.modelBudget.maxRetryRequests,
+    p_agent_max_compaction_requests: policy.modelBudget.maxCompactionRequests,
+    p_agent_max_ralph_rounds: policy.modelBudget.maxRalphRounds,
+    p_web_max_requests_per_attempt: policy.web.maxRequestsPerAttempt,
+    p_web_max_response_bytes: policy.web.maxResponseBytes,
+    p_web_max_total_bytes: policy.web.maxTotalBytes,
+    p_web_allowed_domains: policy.web.allowedDomains,
+    p_session_checkpoint_every_events: policy.session.checkpointEveryEvents,
+    p_session_retention_days: policy.session.retentionDays,
+  })
   return unwrap<V4CapabilityPolicy>({ data, error })
 }
 

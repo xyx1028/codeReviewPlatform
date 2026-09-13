@@ -813,9 +813,9 @@ export interface AgentRunDetail {
   evidence: EvidenceSummary[]
 }
 
-// --- 默认能力策略（admin_get_v4_capability_policy 返回，仅 ADMIN 只读展示） ---
+// --- 默认能力策略（ADMIN 按模型配置资源限额；安全能力保持只读） ---
 
-/** 20 个能力开关，默认全部开启。这个页面只读展示，普通启动流程不提供任何开关。 */
+/** 20 个能力开关由 Harness contract 固定为开启，不允许通过运营配置修改。 */
 export interface V4Capabilities {
   instructions: boolean
   skills: boolean
@@ -910,4 +910,26 @@ export interface V4CapabilityPolicy {
   modelBudget: V4ModelBudgetPolicy
   web: V4WebPolicy
   session: V4SessionPolicy
+}
+
+
+/** ADMIN 可编辑的运行资源限额；不包含 Harness contract 锁定的能力与安全字段。 */
+export interface V4CapabilityPolicyEditable {
+  sandbox: Pick<
+    V4SandboxPolicy,
+    'commandTimeoutMs' | 'maxProcessesPerAttempt' | 'maxWorkspaceBytes' | 'maxWorkspaceFiles'
+  >
+  agents: Pick<
+    V4AgentsPolicy,
+    'maxAgentsPerAttempt' | 'maxDelegationDepth' | 'maxConcurrentChildren'
+  >
+  workflow: V4WorkflowPolicy
+  jobs: V4JobsPolicy
+  parallelTools: Pick<V4ParallelToolsPolicy, 'maxPerStep'>
+  modelBudget: V4ModelBudgetPolicy
+  web: Pick<
+    V4WebPolicy,
+    'maxRequestsPerAttempt' | 'maxResponseBytes' | 'maxTotalBytes' | 'allowedDomains'
+  >
+  session: Pick<V4SessionPolicy, 'checkpointEveryEvents' | 'retentionDays'>
 }
