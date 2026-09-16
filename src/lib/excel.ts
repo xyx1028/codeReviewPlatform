@@ -23,11 +23,17 @@ import type {
  */
 export const templateVersion = '1.2'
 
-/** 映射界面的字段顺序与显示名，key 的顺序就是界面上的排列顺序。 */
+/**
+ * 映射界面的字段顺序与显示名，key 的顺序就是界面上的排列顺序。
+ *
+ * 这里只写平台侧的实体字段名，不写「负责人（开发人员）」这种带来源列的复合名：
+ * 来源列是每次导入按映射动态决定的，映射界面上紧挨着的下拉框已经显示了它，
+ * 校验提示则由 describeField() 动态补上。
+ */
 export const sourceFieldLabels: Record<SourceFieldKey, string> = {
   story_code: '用户故事编码',
   story_name: '用户故事名称',
-  owners_text: '负责人（开发人员）',
+  owners_text: '负责人',
   requirement_handlers: '需求人员',
   test_handlers: '测试人员',
   project_name: '所属项目',
@@ -229,6 +235,20 @@ export function inferFieldMapping(headers: string[]): FieldMapping {
   return mapping
 }
 
+/**
+ * 校验提示里同时点出实体字段名和它实际映射到的 Excel 列名。
+ *
+ * 两者经常不同名：新版导出把「所属项目」映射到「关联特性」列、「负责人」映射到「开发人员」列。
+ * 只报实体字段名的话，用户拿着提示回去翻自己的文件会找不到对应的列。
+ * 两者同名时（旧版导出的多数列）就不重复说了。
+ */
+function describeField(field: SourceFieldKey, mapping: FieldMapping): string {
+  const label = sourceFieldLabels[field]
+  const column = mapping[field]
+  if (!column) return `${label}（未映射任何 Excel 列）`
+  return column === label ? label : `${label}（对应列「${column}」）`
+}
+
 export function parseSourceRows(
   rows: Record<string, unknown>[],
   mapping: FieldMapping,
@@ -252,12 +272,12 @@ export function parseSourceRows(
     const storyName = cellText(mapped('story_name'))
     const ownersText = cellText(mapped('owners_text'))
 
-    if (!storyCode) issues.push({ level: 'error', row: rowNumber, message: '用户故事编码为空' })
-    if (!storyName) issues.push({ level: 'error', row: rowNumber, message: '用户故事名称为空' })
+    if (!storyCode) issues.push({ level: 'error', row: rowNumber, message: `${describeField('story_code', mapping)}为空` })
+    if (!storyName) issues.push({ level: 'error', row: rowNumber, message: `${describeField('story_name', mapping)}为空` })
     if (storyCode && seen.has(storyCode)) issues.push({ level: 'error', row: rowNumber, message: `当前文件内重复需求编码：${storyCode}` })
-    if (!ownersText) issues.push({ level: 'warning', row: rowNumber, message: '负责人（开发人员）为空' })
+    if (!ownersText) issues.push({ level: 'warning', row: rowNumber, message: `${describeField('owners_text', mapping)}为空` })
     if (!cellText(mapped('project_name'))) {
-      issues.push({ level: 'warning', row: rowNumber, message: '所属项目为空' })
+      issues.push({ level: 'warning', row: rowNumber, message: `${describeField('project_name', mapping)}为空` })
     }
 
     if (!storyCode || !storyName) return

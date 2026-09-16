@@ -135,20 +135,35 @@ describe('parseSourceRows', () => {
     expect(issues.filter((issue) => issue.level === 'error')).toEqual([])
   })
 
-  it('开发人员为空时给出负责人告警，且不再提「应用」', () => {
-    const { issues } = parseSourceRows([{ ...row, 开发人员: '' }], mapping, 3)
-    expect(issues).toContainEqual({ level: 'warning', row: 3, message: '负责人（开发人员）为空' })
+  it('提示会点出实体字段实际映射到的 Excel 列名', () => {
+    // 用户拿着提示回去翻文件，必须能找到是哪一列——「所属项目」在新格式里是「关联特性」列。
+    const { issues } = parseSourceRows([{ ...row, 关联特性: '', 开发人员: '' }], mapping, 3)
+    expect(issues).toContainEqual({ level: 'warning', row: 3, message: '所属项目（对应列「关联特性」）为空' })
+    expect(issues).toContainEqual({ level: 'warning', row: 3, message: '负责人（对应列「开发人员」）为空' })
     expect(issues.some((issue) => issue.message.includes('应用'))).toBe(false)
+  })
+
+  it('实体字段与 Excel 列同名时不重复说列名', () => {
+    const legacyMapping = inferFieldMapping(legacyHeaders)
+    const { issues } = parseSourceRows([{ 用户故事编码: 'PRJ-1', 用户故事名称: 'n', 负责人: '' }], legacyMapping)
+    expect(issues).toContainEqual({ level: 'warning', row: 2, message: '负责人为空' })
+    expect(issues).toContainEqual({ level: 'warning', row: 2, message: '所属项目为空' })
+  })
+
+  it('字段完全没映射时提示说清楚是未映射', () => {
+    const { issues } = parseSourceRows([{ 名称: 'n', 编码: 'US-1' }], { story_code: '编码', story_name: '名称' }, 3)
+    expect(issues).toContainEqual({ level: 'warning', row: 3, message: '负责人（未映射任何 Excel 列）为空' })
+    expect(issues).toContainEqual({ level: 'warning', row: 3, message: '所属项目（未映射任何 Excel 列）为空' })
   })
 
   it('行号按第一条数据的真实 Excel 行号起算', () => {
     const { issues } = parseSourceRows([{ ...row, 编码: '' }], mapping, 3)
-    expect(issues).toContainEqual({ level: 'error', row: 3, message: '用户故事编码为空' })
+    expect(issues).toContainEqual({ level: 'error', row: 3, message: '用户故事编码（对应列「编码」）为空' })
   })
 
   it('单表头文件的行号仍从第 2 行起算', () => {
     const { issues } = parseSourceRows([{ ...row, 编码: '' }], mapping)
-    expect(issues).toContainEqual({ level: 'error', row: 2, message: '用户故事编码为空' })
+    expect(issues).toContainEqual({ level: 'error', row: 2, message: '用户故事编码（对应列「编码」）为空' })
   })
 
   it('旧格式导入的需求，需求人员和测试人员为 null', () => {

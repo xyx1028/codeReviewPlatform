@@ -133,6 +133,95 @@ function isSupportedDefaultBranch(branch: string | null): branch is DefaultBranc
   return branch === 'feature_dev' || branch === 'feature_sit' || branch === 'release'
 }
 
+// 发布周期：年/月/日三个下拉拼接为 YYYYMMDD（例如 20260918）
+type WeekCodeParts = { year?: number; month?: number; day?: number }
+
+type CreateBatchFormValues = Omit<CreateBatchInput, 'week_code'> & { week_code_parts?: WeekCodeParts }
+
+const WEEK_CODE_YEAR_BACK = 2
+const WEEK_CODE_YEAR_FORWARD = 3
+
+function pad2(value: number) {
+  return String(value).padStart(2, '0')
+}
+
+function daysInMonth(year: number, month: number) {
+  return new Date(year, month, 0).getDate()
+}
+
+function buildWeekCode(parts: WeekCodeParts) {
+  const { year, month, day } = parts
+  if (!year || !month || !day) return undefined
+  return `${year}${pad2(month)}${pad2(day)}`
+}
+
+function WeekCodeSelect({
+  value,
+  onChange,
+  disabled,
+}: {
+  value?: WeekCodeParts
+  onChange?: (next: WeekCodeParts) => void
+  disabled?: boolean
+}) {
+  const parts = value ?? {}
+
+  const yearOptions = useMemo(() => {
+    const currentYear = new Date().getFullYear()
+    const years: number[] = []
+    for (let year = currentYear - WEEK_CODE_YEAR_BACK; year <= currentYear + WEEK_CODE_YEAR_FORWARD; year += 1) {
+      years.push(year)
+    }
+    return years.map((year) => ({ value: year, label: `${year} 年` }))
+  }, [])
+
+  const monthOptions = useMemo(
+    () => Array.from({ length: 12 }, (_item, index) => ({ value: index + 1, label: `${index + 1} 月` })),
+    [],
+  )
+
+  const dayOptions = useMemo(() => {
+    const total = parts.year && parts.month ? daysInMonth(parts.year, parts.month) : 31
+    return Array.from({ length: total }, (_item, index) => ({ value: index + 1, label: `${index + 1} 日` }))
+  }, [parts.year, parts.month])
+
+  const update = (next: WeekCodeParts) => {
+    // 切换年月后如果原来的日期不存在（例如 2 月 30 日），清空日选择。
+    const maxDay = next.year && next.month ? daysInMonth(next.year, next.month) : 31
+    const normalized: WeekCodeParts = next.day && next.day > maxDay ? { ...next, day: undefined } : next
+    onChange?.(normalized)
+  }
+
+  return (
+    <Space.Compact block>
+      <Select
+        placeholder="年"
+        className="week-code-select-year"
+        disabled={disabled}
+        value={parts.year}
+        options={yearOptions}
+        onChange={(year: number) => update({ ...parts, year })}
+      />
+      <Select
+        placeholder="月"
+        className="week-code-select-part"
+        disabled={disabled}
+        value={parts.month}
+        options={monthOptions}
+        onChange={(month: number) => update({ ...parts, month })}
+      />
+      <Select
+        placeholder="日"
+        className="week-code-select-part"
+        disabled={disabled}
+        value={parts.day}
+        options={dayOptions}
+        onChange={(day: number) => update({ ...parts, day })}
+      />
+    </Space.Compact>
+  )
+}
+
 function issueColor(level: ValidationIssue['level']) {
   if (level === 'error') return 'red'
   if (level === 'warning') return 'gold'
@@ -814,7 +903,7 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
 
 function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boolean; canManageBatch: (batch: ReviewBatch) => boolean }) {
   const [open, setOpen] = useState(false)
-  const [form] = Form.useForm<CreateBatchInput>()
+  const [form] = Form.useForm<CreateBatchFormValues>()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { message, modal } = AntApp.useApp()
@@ -907,25 +996,34 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
         tableLayout="fixed"
       />
       <Modal title="创建每周评审批次" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={createMutation.isPending}>
-        <Form form={form} layout="vertical" onFinish={(values) => createMutation.mutate(values)}>
+        <Form
+          form={form}
+          layout="vertical"
+          onFinish={({ week_code_parts, ...rest }) => {
+            const weekCode = buildWeekCode(week_code_parts ?? {})
+            if (!weekCode) return
+            createMutation.mutate({ ...rest, week_code: weekCode })
+          }}
+        >
           <Form.Item name="name" label="评审描述" rules={[{ required: true, message: '请输入评审描述' }]}>
             <Input placeholder="2026 年第 36 周需求评审" />
           </Form.Item>
           <Form.Item
-            name="week_code"
+            name="week_code_parts"
             label="发布周期"
-            normalize={(value) => typeof value === 'string' ? value.trim() : value}
+            required
+            extra="选择年、月、日，自动拼接成 20260918 这种格式"
             rules={[
-              { required: true, message: '请输入发布周期' },
               {
-                validator: async (_rule, value) => {
-                  if (!value) return
-                  if (batchesQuery.data?.some((batch) => batch.week_code === value)) throw new Error('发布周期已存在，请换一个')
+                validator: async (_rule, value?: WeekCodeParts) => {
+                  const weekCode = buildWeekCode(value ?? {})
+                  if (!weekCode) throw new Error('请选择完整的发布周期（年 / 月 / 日）')
+                  if (batchesQuery.data?.some((batch) => batch.week_code === weekCode)) throw new Error('发布周期已存在，请换一个')
                 },
               },
             ]}
           >
-            <Input placeholder="2026-W36" />
+            <WeekCodeSelect />
           </Form.Item>
           <Form.Item name="default_branch" label="代码基线" rules={[{ required: true, message: '请选择代码基线' }]}>
             <Select placeholder="选择代码基线" options={defaultBranchOptions} />

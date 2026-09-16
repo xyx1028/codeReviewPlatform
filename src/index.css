@@ -264,6 +264,15 @@ a {
   width: 180px;
 }
 
+/* 发布周期年/月/日下拉：年份稍宽，月日等宽 */
+.week-code-select-year {
+  width: 44%;
+}
+
+.week-code-select-part {
+  width: 28%;
+}
+
 .ant-descriptions-item-content {
   white-space: pre-wrap;
 }
