@@ -548,6 +548,13 @@ function Shell({ session }: { session: Session }) {
   )
 }
 
+/**
+ * 模型页只管"接入"：端点、密钥、并发闸门、平台侧超时和 token 窗口。
+ *
+ * Agent 的请求预算（总量、根/子 Agent、重试、压缩、Ralph 轮次）不在这里：
+ * 它们属于 V4 能力策略，唯一入口是「默认能力策略」页，保存后随新建 Job 冻结。
+ * 早先这里也有重试和压缩两项，和策略页写的是同一列，后保存的会覆盖先保存的。
+ */
 interface ModelFormValues {
   display_name: string
   base_url: string
@@ -556,9 +563,6 @@ interface ModelFormValues {
   request_timeout_seconds: number
   context_window: number
   max_output_tokens: number
-  agent_max_model_requests: number
-  agent_max_retry_requests: number
-  agent_max_compaction_requests: number
   api_key?: string
 }
 
@@ -581,9 +585,6 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
         request_timeout_ms: Math.round(values.request_timeout_seconds * 1000),
         context_window: values.context_window,
         max_output_tokens: values.max_output_tokens,
-        agent_max_model_requests: values.agent_max_model_requests,
-        agent_max_retry_requests: values.agent_max_retry_requests,
-        agent_max_compaction_requests: values.agent_max_compaction_requests,
         // 留空表示不轮换密钥；编辑时永不回显旧值
         api_key: values.api_key && values.api_key.length ? values.api_key : null,
       }
@@ -650,9 +651,6 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
       request_timeout_seconds: 180,
       context_window: 131072,
       max_output_tokens: 8192,
-      agent_max_model_requests: 120,
-      agent_max_retry_requests: 6,
-      agent_max_compaction_requests: 4,
     })
     setOpen(true)
   }
@@ -668,9 +666,6 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
       request_timeout_seconds: Math.round(record.request_timeout_ms / 1000),
       context_window: record.context_window ?? 131072,
       max_output_tokens: record.max_output_tokens ?? 8192,
-      agent_max_model_requests: record.agent_max_model_requests ?? 120,
-      agent_max_retry_requests: record.agent_max_retry_requests ?? 6,
-      agent_max_compaction_requests: record.agent_max_compaction_requests ?? 4,
       api_key: '',
     })
     setOpen(true)
@@ -797,10 +792,20 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
           >
             <Input.Password autoComplete="new-password" placeholder={editing ? '不修改请留空' : '仅密码方式输入'} />
           </Form.Item>
-          <Form.Item name="max_parallel_tasks" label="最大并发需求数（1~20）" rules={[{ required: true, message: '请输入最大并发需求数' }]}>
+          <Form.Item
+            name="max_parallel_tasks"
+            label="最大并发需求数（1~20）"
+            rules={[{ required: true, message: '请输入最大并发需求数' }]}
+            extra="同一模型同时在分析的需求数上限，实时生效。Agent 内部的并发（子 Agent、并行工具）在「默认能力策略」里配置。"
+          >
             <InputNumber min={1} max={20} className="full-width" />
           </Form.Item>
-          <Form.Item name="request_timeout_seconds" label="请求超时（10~600 秒）" rules={[{ required: true, message: '请输入请求超时秒数' }]}>
+          <Form.Item
+            name="request_timeout_seconds"
+            label="平台请求超时（10~600 秒）"
+            rules={[{ required: true, message: '请输入请求超时秒数' }]}
+            extra="用于 Git 准备、Worker 与 Agent 之间的通信和连通性测试；Agent 执行单条命令的超时是「默认能力策略」里的沙箱命令超时。"
+          >
             <InputNumber min={10} max={600} className="full-width" />
           </Form.Item>
           <Form.Item
@@ -817,28 +822,12 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
           >
             <InputNumber min={256} max={262144} step={256} className="full-width" />
           </Form.Item>
-          <Form.Item
-            name="agent_max_model_requests"
-            label="每次尝试的模型请求上限"
-            rules={[{ required: true, message: '请输入模型请求上限' }]}
-            extra="Agent 自主检索会多轮调用模型；超过上限时本次尝试会被拒绝并失败，不会静默继续。"
-          >
-            <InputNumber min={1} max={500} className="full-width" />
-          </Form.Item>
-          <Form.Item
-            name="agent_max_retry_requests"
-            label="重试请求上限"
-            rules={[{ required: true, message: '请输入重试请求上限' }]}
-          >
-            <InputNumber min={0} max={100} className="full-width" />
-          </Form.Item>
-          <Form.Item
-            name="agent_max_compaction_requests"
-            label="上下文压缩请求上限"
-            rules={[{ required: true, message: '请输入压缩请求上限' }]}
-          >
-            <InputNumber min={0} max={100} className="full-width" />
-          </Form.Item>
+          <Alert
+            type="info"
+            showIcon
+            title="模型请求预算在「默认能力策略」里配置"
+            description="总请求、根 / 子 Agent、重试、压缩和 Ralph 轮次上限按模型维护，保存后随新建 Job 冻结；在这里重复一份会互相覆盖，所以只保留一个入口。"
+          />
         </Form>
       </Modal>
     </Space>
@@ -2472,7 +2461,14 @@ const modelAuditFieldLabels: Record<string, string> = {
   base_url: 'Base URL',
   model_name: 'Model',
   max_parallel_tasks: '最大并发需求数',
-  request_timeout_ms: '请求超时',
+  request_timeout_ms: '平台请求超时',
+  context_window: '上下文窗口',
+  max_output_tokens: '单次最大输出',
+  // 这三列在新建模型时会入本审计表；之后只能由「默认能力策略」页改动，
+  // 那条路径记的是 v4_capability_policy_audit，不会出现在这里。
+  agent_max_model_requests: '模型请求上限（仅旧 Job 兜底）',
+  agent_max_retry_requests: '重试请求上限',
+  agent_max_compaction_requests: '压缩请求上限',
   retrieval_prompt_version: '检索提示词版本',
   analysis_prompt_version: '分析提示词版本',
   enabled: '启用状态',

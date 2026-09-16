@@ -56,13 +56,16 @@ function corsHeaders(req: Request): Record<string, string> {
   return headers
 }
 
-/** Harness 上下文与预算配置。 */
+/**
+ * Harness 的 token 窗口配置。
+ *
+ * 请求次数预算（agent_max_*_requests）刻意不在这里：它们与「默认能力策略」页写的是
+ * ai_model_config 的同一批列，两个写入口会互相覆盖，且策略页那条路径才带预算一致性
+ * 校验与审计。本函数不再接收也不再转发这些字段。
+ */
 interface AgentSettings {
   context_window?: number
   max_output_tokens?: number
-  agent_max_model_requests?: number
-  agent_max_retry_requests?: number
-  agent_max_compaction_requests?: number
 }
 
 interface CreatePayload extends AgentSettings {
@@ -239,9 +242,7 @@ async function handleCreate(userId: string, p: CreatePayload): Promise<Response>
     p_request_timeout_ms: p.request_timeout_ms ?? 180000,
     p_context_window: p.context_window ?? 131072,
     p_max_output_tokens: p.max_output_tokens ?? 8192,
-    p_agent_max_model_requests: p.agent_max_model_requests ?? 120,
-    p_agent_max_retry_requests: p.agent_max_retry_requests ?? 6,
-    p_agent_max_compaction_requests: p.agent_max_compaction_requests ?? 4,
+    // agent_max_*_requests 不传：让 RPC 的列默认值生效，之后由「默认能力策略」页调整。
   })
 
   if (error) {
@@ -284,9 +285,8 @@ async function handleUpdate(userId: string, p: UpdatePayload): Promise<Response>
     p_request_timeout_ms: p.request_timeout_ms ?? null,
     p_context_window: p.context_window ?? null,
     p_max_output_tokens: p.max_output_tokens ?? null,
-    p_agent_max_model_requests: p.agent_max_model_requests ?? null,
-    p_agent_max_retry_requests: p.agent_max_retry_requests ?? null,
-    p_agent_max_compaction_requests: p.agent_max_compaction_requests ?? null,
+    // agent_max_*_requests 不传：RPC 里这些参数默认 null，coalesce 会保留现值，
+    // 不会把「默认能力策略」页刚保存的预算冲掉。
   })
 
   if (error) {

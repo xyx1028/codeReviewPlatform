@@ -320,6 +320,9 @@ export function HarnessPolicyPage({ isAdmin }: { isAdmin: boolean }) {
                   <EditableStatistic editing={editing} title="Ralph 轮次上限" value={policy.modelBudget.maxRalphRounds} name={['modelBudget', 'maxRalphRounds']} min={0} max={256} />
                 </Col>
               </Row>
+              <Text type="secondary">
+                请求次数预算只在这里维护。上下文窗口与单次最大输出属于模型接入参数，在「模型管理」页配置。
+              </Text>
             </Card>
 
             <Card title="并行工具 / 工作流 / Jobs">

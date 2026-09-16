@@ -143,16 +143,49 @@ export function onAuthChange(callback: (session: Session | null) => void) {
   return client.auth.onAuthStateChange((_event, session) => callback(session)).data.subscription
 }
 
+/**
+ * Supabase Auth 抛的是英文原文（例如 `email rate limit exceeded`），直接弹给用户既看不懂、
+ * 也不知道下一步该干什么。按 GoTrue 的错误码翻译成可行动的中文，未收录的错误码保留原文。
+ */
+const authErrorMessages: Record<string, string> = {
+  // 内置邮件服务是全项目 2 封/小时，注册高峰期第三个人开始就会撞上，得配自定义 SMTP 才能放开。
+  over_email_send_rate_limit: '验证邮件发送已达上限（Supabase 内置邮件服务每小时只允许 2 封），请稍后重试或联系管理员配置自定义 SMTP。',
+  over_request_rate_limit: '操作过于频繁，请稍后再试。',
+  user_already_exists: '该邮箱已注册，请直接登录或找回密码。',
+  email_exists: '该邮箱已注册，请直接登录或找回密码。',
+  invalid_credentials: '邮箱或密码不正确。',
+  email_not_confirmed: '邮箱还没验证，请先点开验证邮件里的链接。',
+  weak_password: '密码强度不够，请换一个更复杂的密码。',
+  signup_disabled: '当前未开放注册，请联系管理员创建账号。',
+  email_address_invalid: '邮箱地址无效，请检查后重试。',
+  email_address_not_authorized: '该邮箱不在允许注册的范围内，请联系管理员。',
+}
+
+function authErrorMessage(error: unknown): string {
+  const fallback = error instanceof Error ? error.message : '操作失败，请稍后重试'
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '')
+    : ''
+  if (authErrorMessages[code]) return authErrorMessages[code]
+  // 老版本 GoTrue 只给英文文案、不给错误码，按关键词兜底。
+  const normalized = fallback.toLowerCase()
+  if (normalized.includes('email rate limit exceeded')) return authErrorMessages.over_email_send_rate_limit
+  if (normalized.includes('already registered')) return authErrorMessages.user_already_exists
+  if (normalized.includes('invalid login credentials')) return authErrorMessages.invalid_credentials
+  if (normalized.includes('email not confirmed')) return authErrorMessages.email_not_confirmed
+  return fallback
+}
+
 export async function signIn(email: string, password: string) {
   const client = requireSupabase()
   const { error } = await client.auth.signInWithPassword({ email, password })
-  if (error) throw error
+  if (error) throw new Error(authErrorMessage(error))
 }
 
 export async function signUp(email: string, password: string) {
   const client = requireSupabase()
   const { error } = await client.auth.signUp({ email, password })
-  if (error) throw error
+  if (error) throw new Error(authErrorMessage(error))
 }
 
 export async function signOut() {
@@ -523,12 +556,15 @@ export interface ModelConfigInput {
   model_name: string
   max_parallel_tasks: number
   request_timeout_ms: number
-  /** DeepSeek Harness Agent 的上下文与请求预算。 */
+  /**
+   * DeepSeek Harness Agent 的 token 窗口。
+   *
+   * 请求次数预算（总量 / 根 / 子 Agent / 重试 / 压缩 / Ralph）不在这里：
+   * 它们由 admin_update_v4_capability_policy 维护（「默认能力策略」页），
+   * 和这里写同一张表的同一行，两个入口会互相覆盖。
+   */
   context_window?: number
   max_output_tokens?: number
-  agent_max_model_requests?: number
-  agent_max_retry_requests?: number
-  agent_max_compaction_requests?: number
   /** 明文 API Key。仅在新增或轮换时提供；留空表示不修改现有密钥。 */
   api_key?: string | null
 }

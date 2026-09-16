@@ -258,16 +258,28 @@ heartbeat 每 30 秒续租。lease 丢失后 Broker revoke；后续工具、提�
 
 ## 8. 模型预算与并发
 
-模型配置默认：
+配置分两处，互不重叠：
 
-| 字段 | 默认值 |
-|---|---:|
-| `context_window` | 131072 |
-| `max_output_tokens` | 8192 |
-| `agent_max_model_requests` | 120 |
-| `agent_max_retry_requests` | 6 |
-| `agent_max_compaction_requests` | 4 |
-| `max_parallel_tasks` | 4 |
+**「模型管理」页（模型接入）**
+
+| 字段 | 默认值 | 作用 |
+|---|---:|---|
+| `context_window` | 131072 | 传给 `llm-pi-ai` 的上下文窗口 |
+| `max_output_tokens` | 8192 | 传给 `llm-pi-ai` 的单次输出上限 |
+| `max_parallel_tasks` | 4 | 同一模型的并发 Task 闸门，claim 时实时读取 |
+| `request_timeout_ms` | 180000 | 平台侧超时：Broker IPC、Git 准备、连通性测试。**不是**模型 HTTP 超时 |
+
+**「默认能力策略」页（V4 policy，按模型维护，随新建 Job 冻结）**
+
+请求次数预算全部在这里：`maxTotalRequests` / `maxRootRequests` / `maxChildRequests` /
+`maxRetryRequests` / `maxCompactionRequests` / `maxRalphRounds`，另有沙箱、Agent Tree、
+并行工具、Workflow / Jobs、Web allowlist 和 Session 限额。
+
+`ai_model_config.agent_max_model_requests` 不再由任何页面维护：0027 之后新建的 Job 一定
+带完整 policy snapshot，这一列只在 snapshot 缺失（0027 之前创建、仍在途的 Job）时用于
+`fallbackPolicyFromModel` 兜底。`agent_max_retry_requests` / `agent_max_compaction_requests`
+两列仍是 `build_v4_capability_policy` 的取值来源，但唯一写入口是策略页——策略页那条路径
+带「分项不超过总量」校验和 `v4_capability_policy_audit` 审计。
 
 model-budget-governor 在 provider 请求前计量普通、retry 和 compaction 请求。预算耗尽会让当前 attempt 以稳定错误结束，不会绕过上限继续调用。
 

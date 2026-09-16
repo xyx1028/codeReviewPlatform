@@ -74,6 +74,13 @@ export interface AiModelConfigSummary {
   /** 仅 admin_list_model_configs 返回。 */
   context_window?: number
   max_output_tokens?: number
+  /**
+   * 请求次数预算，模型页只读不写。
+   *
+   * 写入口只有「默认能力策略」页（admin_update_v4_capability_policy）：retry / compaction
+   * 两列是 build_v4_capability_policy 的取值来源，agent_max_model_requests 只剩兜底用途
+   * （0027 之前创建、仍在途的 Job 没有 policy snapshot 时用它拼最小预算）。
+   */
   agent_max_model_requests?: number
   agent_max_retry_requests?: number
   agent_max_compaction_requests?: number
