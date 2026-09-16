@@ -117,7 +117,7 @@ describe('parseSourceRows', () => {
     发布窗口: 'R20260918',
   }
 
-  it('负责人取开发人员，需求人员和测试人员各自单列', () => {
+  it('开发人员 / 需求人员 / 测试人员各自落到独立字段', () => {
     const { stories, issues } = parseSourceRows([row], mapping, 3)
     expect(stories).toHaveLength(1)
     expect(stories[0]).toMatchObject({
@@ -135,24 +135,25 @@ describe('parseSourceRows', () => {
     expect(issues.filter((issue) => issue.level === 'error')).toEqual([])
   })
 
-  it('提示会点出实体字段实际映射到的 Excel 列名', () => {
-    // 用户拿着提示回去翻文件，必须能找到是哪一列——「所属项目」在新格式里是「关联特性」列。
+  it('实体字段与 Excel 列同名时不重复说列名', () => {
+    // 新格式下「开发人员」字段正好映射到同名的「开发人员」列，不该啰嗦成「开发人员（对应列「开发人员」）」。
     const { issues } = parseSourceRows([{ ...row, 关联特性: '', 开发人员: '' }], mapping, 3)
+    expect(issues).toContainEqual({ level: 'warning', row: 3, message: '开发人员为空' })
+    // 「所属项目」映射到的是「关联特性」列，必须点出来，否则用户回去翻文件找不到。
     expect(issues).toContainEqual({ level: 'warning', row: 3, message: '所属项目（对应列「关联特性」）为空' })
-    expect(issues).toContainEqual({ level: 'warning', row: 3, message: '负责人（对应列「开发人员」）为空' })
     expect(issues.some((issue) => issue.message.includes('应用'))).toBe(false)
   })
 
-  it('实体字段与 Excel 列同名时不重复说列名', () => {
+  it('旧格式里开发人员映射自「负责人」列，提示会点出列名', () => {
     const legacyMapping = inferFieldMapping(legacyHeaders)
     const { issues } = parseSourceRows([{ 用户故事编码: 'PRJ-1', 用户故事名称: 'n', 负责人: '' }], legacyMapping)
-    expect(issues).toContainEqual({ level: 'warning', row: 2, message: '负责人为空' })
+    expect(issues).toContainEqual({ level: 'warning', row: 2, message: '开发人员（对应列「负责人」）为空' })
     expect(issues).toContainEqual({ level: 'warning', row: 2, message: '所属项目为空' })
   })
 
   it('字段完全没映射时提示说清楚是未映射', () => {
     const { issues } = parseSourceRows([{ 名称: 'n', 编码: 'US-1' }], { story_code: '编码', story_name: '名称' }, 3)
-    expect(issues).toContainEqual({ level: 'warning', row: 3, message: '负责人（未映射任何 Excel 列）为空' })
+    expect(issues).toContainEqual({ level: 'warning', row: 3, message: '开发人员（未映射任何 Excel 列）为空' })
     expect(issues).toContainEqual({ level: 'warning', row: 3, message: '所属项目（未映射任何 Excel 列）为空' })
   })
 

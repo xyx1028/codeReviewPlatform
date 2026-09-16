@@ -1247,7 +1247,7 @@ function SourcePreview({ parsed }: { parsed: { stories: SourceStoryInput[]; issu
             columns={[
               { title: '编码', dataIndex: 'story_code' },
               { title: '名称', dataIndex: 'story_name' },
-              { title: '负责人', dataIndex: 'owners_text' },
+              { title: '开发人员', dataIndex: 'owners_text' },
               { title: '需求人员', dataIndex: 'requirement_handlers' },
               { title: '测试人员', dataIndex: 'test_handlers' },
             ]}
@@ -2055,7 +2055,7 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       onFilter: (value, row) => row.story.story_name === String(value),
     },
     {
-      title: '负责人',
+      title: '开发人员',
       key: 'owner',
       dataIndex: ['story', 'owners_text'],
       width: 190,
@@ -2429,7 +2429,7 @@ function DashboardPage({ batchId, canManage }: { batchId: string; canManage: boo
       </Row>
 
       <Row gutter={[12, 12]}>
-        <Col xs={24} xl={8}><GroupedProgress title="按负责人统计" rows={stats.byOwner} batchId={batchId} filterKey="owner" note="协作需求按负责人分别计入" /></Col>
+        <Col xs={24} xl={8}><GroupedProgress title="按开发人员统计" rows={stats.byOwner} batchId={batchId} filterKey="owner" note="协作需求按开发人员分别计入" /></Col>
         <Col xs={24} xl={8}><GroupedProgress title="按需求人员统计" rows={stats.byRequirementHandler} batchId={batchId} filterKey="requirementHandler" /></Col>
         <Col xs={24} xl={8}><GroupedProgress title="按测试人员统计" rows={stats.byTestHandler} batchId={batchId} filterKey="testHandler" /></Col>
       </Row>
@@ -2646,7 +2646,7 @@ function OperationLogPage({ scope, isAdmin = false }: { scope: OperationLogScope
 
 function StoryCard({ story }: { story: ReviewStory }) {
   const metadata = [
-    { label: '负责人', value: story.owners_text },
+    { label: '开发人员', value: story.owners_text },
     { label: '需求人员', value: story.requirement_handlers },
     { label: '测试人员', value: story.test_handlers },
     { label: '项目', value: story.project_name },
