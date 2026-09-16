@@ -29,15 +29,34 @@ export const sourceFieldLabels: Record<SourceFieldKey, string> = {
   source_status: '原始需求状态',
 }
 
+/**
+ * 每个实体字段的候选列名，**顺序即优先级**：越靠前越精确。
+ *
+ * 需求平台的导出有两代格式，列名口径不一样，所以同一个字段要挂多个别名：
+ * - 旧格式（单表头）：用户故事编码 / 用户故事名称 / 负责人 / 所属项目 / 所属云 / 所属应用
+ * - 新格式（双表头，第一行是 gf_*、tf_* 字段码，第二行才是中文名）：编码 / 名称 / 需求人员 / 关联特性
+ *
+ * 新格式的中文名比旧格式短（「编码」而不是「用户故事编码」），所以必须放在旧格式别名后面：
+ * 万一某份文件两种列名都在，要优先认更精确的那个。字段码放最后兜底，应付只导出了字段码行的变体。
+ *
+ * 新格式没有「所属应用」「所属云」这两列，别名里也就不该硬塞——见 application_name 的注释。
+ */
 const sourceAliases: Record<SourceFieldKey, string[]> = {
-  story_code: ['用户故事编码', '需求编号', '故事编码', 'story_code', 'story code'],
-  story_name: ['用户故事名称', '需求标题', '需求名称', '故事名称', 'story_name', 'title'],
-  owners_text: ['负责人', '责任人', '需求负责人', 'owner', 'owners'],
-  project_name: ['所属项目', '项目', '项目名称', 'project'],
+  story_code: ['用户故事编码', '需求编号', '故事编码', '编码', 'story_code', 'story code', 'gf_number'],
+  story_name: ['用户故事名称', '需求标题', '需求名称', '故事名称', '名称', 'story_name', 'title', 'gf_name'],
+  // 新格式的人员列有四个：需求人员、处理人、开发人员、测试人员。
+  // 「处理人」是当前流程节点的处理人，会随流程流转而变；「需求人员」才是稳定的需求归属人，
+  // 对应旧格式的「负责人」。所以只认前者，「处理人」留给用户手工选。
+  owners_text: ['负责人', '责任人', '需求负责人', '需求人员', 'owner', 'owners', 'tf_req_handlers'],
+  // 新格式里「关联特性」（FT-xxxx）是需求的上层业务归属，语义上最接近旧格式的「所属项目」。
+  project_name: ['所属项目', '项目', '项目名称', '关联特性', 'project', 'tf_subject'],
   cloud_name: ['所属云', '云', 'cloud'],
+  // 新格式没有任何一列表达「应用」。这里刻意不加 fallback：宁可留空让看板显示
+  // 「未填写应用」，也不要把人员列或特性列错认成应用——那会一路污染看板分组、
+  // 列表筛选和送给模型的「所属应用」。
   application_name: ['所属应用', '应用', '应用名称', 'application'],
-  iteration_name: ['迭代阶段', '迭代', 'iteration'],
-  release_window: ['发布窗口', '发布时间', 'release'],
+  iteration_name: ['迭代阶段', '迭代', 'iteration', 'tf_iteration'],
+  release_window: ['发布窗口', '发布时间', 'release', 'tf_release_window'],
   source_status: ['原始需求状态', '状态', '需求状态', 'status'],
 }
 
@@ -97,6 +116,8 @@ type ExportCell = Exclude<Cell, undefined>
 export interface WorkbookRows {
   headers: string[]
   rows: Record<string, unknown>[]
+  /** 第一条数据在 Excel 里的 1-based 行号。双表头文件是 3，单表头是 2。校验提示靠它对齐行号。 */
+  firstDataRowNumber: number
 }
 
 export interface SourceParseResult {
@@ -140,9 +161,31 @@ function confidenceNumber(value: unknown) {
   return !valueText.endsWith('%') && parsed > 0 && parsed <= 1 ? Math.round(parsed * 100) : parsed
 }
 
-function rowsToObjects(rows: SheetData): Record<string, unknown>[] {
-  const headers = rows[0]?.map((value) => cellText(value)) ?? []
-  return rows.slice(1).map((row) => {
+const fieldCodePattern = /^[A-Za-z][A-Za-z0-9_]*$/
+const chinesePattern = /[\u4e00-\u9fff]/
+
+/**
+ * 新格式的表头占两行：第一行是 `gf_name`、`tf_req_handlers` 这类字段码，第二行才是中文列名。
+ * 直接把第一行当表头会有两个后果：映射下拉框里只有字段码，而中文表头那一行会被当成一条需求
+ * 导入（编码=「编码」、名称=「名称」，两个都非空，连校验都拦不住）。
+ *
+ * 判定条件刻意收得很紧——第一行全是 ASCII 蛇形标识符，**并且**第二行含中文。只满足前一条不够：
+ * 一份表头本来就是英文（story_code、story_name）的文件会被误判成字段码行而丢掉真表头。
+ *
+ * @returns 表头所在的下标（0 或 1）
+ */
+export function detectHeaderRowIndex(rows: SheetData): number {
+  const first = rows[0]?.map((value) => cellText(value)).filter(Boolean) ?? []
+  const second = rows[1]?.map((value) => cellText(value)).filter(Boolean) ?? []
+  if (first.length < 3 || second.length === 0) return 0
+  const allFieldCodes = first.every((value) => fieldCodePattern.test(value))
+  const secondHasChinese = second.some((value) => chinesePattern.test(value))
+  return allFieldCodes && secondHasChinese ? 1 : 0
+}
+
+function rowsToObjects(rows: SheetData, headerRowIndex = 0): Record<string, unknown>[] {
+  const headers = rows[headerRowIndex]?.map((value) => cellText(value)) ?? []
+  return rows.slice(headerRowIndex + 1).map((row) => {
     const item: Record<string, unknown> = {}
     headers.forEach((header, index) => {
       if (header) item[header] = row[index] ?? ''
@@ -153,26 +196,44 @@ function rowsToObjects(rows: SheetData): Record<string, unknown>[] {
 
 export async function readFirstSheet(file: File): Promise<WorkbookRows> {
   const rows = await readSheet(file) as unknown as SheetData
-  const headers = rows[0]?.map((value) => cellText(value)).filter(Boolean) ?? []
-  return { headers, rows: rowsToObjects(rows) }
+  const headerRowIndex = detectHeaderRowIndex(rows)
+  const headers = rows[headerRowIndex]?.map((value) => cellText(value)).filter(Boolean) ?? []
+  return {
+    headers,
+    rows: rowsToObjects(rows, headerRowIndex),
+    // 1-based Excel 行号：表头下标 + 1 得到表头行号，再 +1 就是第一条数据的行号。
+    firstDataRowNumber: headerRowIndex + 2,
+  }
 }
 
 export function inferFieldMapping(headers: string[]): FieldMapping {
   const mapping: FieldMapping = {}
   for (const [field, aliases] of Object.entries(sourceAliases) as [SourceFieldKey, string[]][]) {
-    const matched = headers.find((header) => aliases.some((alias) => alias.toLowerCase() === header.toLowerCase()))
-    if (matched) mapping[field] = matched
+    // 按别名顺序找列，而不是按表头顺序找别名：别名表是有优先级的，
+    // 反过来遍历会让「名称」在列顺序上碰巧靠前时盖掉更精确的「用户故事名称」。
+    for (const alias of aliases) {
+      const matched = headers.find((header) => header.toLowerCase() === alias.toLowerCase())
+      if (matched) {
+        mapping[field] = matched
+        break
+      }
+    }
   }
   return mapping
 }
 
-export function parseSourceRows(rows: Record<string, unknown>[], mapping: FieldMapping): SourceParseResult {
+export function parseSourceRows(
+  rows: Record<string, unknown>[],
+  mapping: FieldMapping,
+  firstDataRowNumber = 2,
+): SourceParseResult {
   const issues: ValidationIssue[] = []
   const stories: SourceStoryInput[] = []
   const seen = new Set<string>()
 
   rows.forEach((row, index) => {
-    const rowNumber = index + 2
+    // 校验提示里的行号要能对上用户在 Excel 里看到的行，双表头文件的数据从第 3 行才开始。
+    const rowNumber = index + firstDataRowNumber
     const hasValue = Object.values(row).some((value) => cellText(value))
     if (!hasValue) {
       issues.push({ level: 'info', row: rowNumber, message: '空白行已忽略' })

@@ -999,6 +999,7 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
   const [file, setFile] = useState<File | null>(null)
   const [headers, setHeaders] = useState<string[]>([])
   const [rows, setRows] = useState<Record<string, unknown>[]>([])
+  const [firstDataRowNumber, setFirstDataRowNumber] = useState(2)
   const [mapping, setMapping] = useState<FieldMapping>({})
   const { message } = AntApp.useApp()
   const queryClient = useQueryClient()
@@ -1007,7 +1008,7 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
   const storiesQuery = useQuery({ queryKey: ['stories', batchId], queryFn: () => listStories(batchId) })
   const sourceFilesQuery = useQuery({ queryKey: ['import-files', batchId, 'SOURCE'], queryFn: () => listImportFiles(batchId, 'SOURCE') })
   const alreadyImported = Boolean(storiesQuery.data?.length)
-  const parsed = useMemo(() => parseSourceRows(rows, mapping), [rows, mapping])
+  const parsed = useMemo(() => parseSourceRows(rows, mapping, firstDataRowNumber), [rows, mapping, firstDataRowNumber])
   const importMutation = useMutation({
     mutationFn: async () => {
       if (!file) throw new Error('请先选择文件')
@@ -1022,6 +1023,7 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
       setFile(null)
       setHeaders([])
       setRows([])
+      setFirstDataRowNumber(2)
       queryClient.invalidateQueries({ queryKey: ['stories', batchId] })
       queryClient.invalidateQueries({ queryKey: ['import-files', batchId, 'SOURCE'] })
       queryClient.invalidateQueries({ queryKey: ['batch', batchId] })
@@ -1057,6 +1059,7 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
               setFile(selectedFile)
               setHeaders(workbookRows.headers)
               setRows(workbookRows.rows)
+              setFirstDataRowNumber(workbookRows.firstDataRowNumber)
               setMapping(inferFieldMapping(workbookRows.headers))
               return false
             }}
@@ -1064,6 +1067,7 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
               setFile(null)
               setHeaders([])
               setRows([])
+              setFirstDataRowNumber(2)
               setMapping({})
             }}
           >
