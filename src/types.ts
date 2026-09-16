@@ -784,6 +784,21 @@ export interface AnalysisRuntimeConsoleResponse {
   cursor: RuntimeConsoleCursor
 }
 
+/** 当前需求的历史事件页。与批次实时游标分离，避免被其它需求的新事件挤掉。 */
+export interface RuntimeTaskEventHistoryResponse {
+  task_id: string
+  batch_id: string
+  total_events: number
+  events: RuntimeEvent[]
+  cursor: {
+    requested_before: number | null
+    next_before_event_id: number | null
+    has_more: boolean
+    page_size: number
+    server_time: string
+  }
+}
+
 /** admin_list_active_analysis_batches 的单个批次条目。 */
 export interface ActiveAnalysisBatch {
   batch_id: string

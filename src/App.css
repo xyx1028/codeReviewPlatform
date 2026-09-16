@@ -1192,6 +1192,12 @@ a.dashboard-distribution-item:focus-visible {
   padding: 0 !important;
 }
 
+.runtime-attempt-detail-button {
+  padding-inline: 8px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .runtime-attempt-header {
   display: flex;
   align-items: center;
@@ -1230,6 +1236,32 @@ a.dashboard-distribution-item:focus-visible {
 .runtime-event-list {
   padding: 12px 14px 14px;
   background: linear-gradient(180deg, #f8fbff 0%, #f8fafc 100%);
+}
+
+.runtime-attempt-detail-drawer .ant-drawer-body {
+  padding: 0;
+  background: #f8fafc;
+}
+
+.runtime-attempt-detail-summary {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #e2e8f0;
+  background: #ffffff;
+}
+
+.runtime-event-list--drawer {
+  min-height: 220px;
+  padding: 14px 18px 18px;
+}
+
+.runtime-timeline-pagination--drawer {
+  position: sticky;
+  z-index: 2;
+  bottom: 0;
 }
 
 .runtime-event-row {
@@ -1372,8 +1404,20 @@ a.dashboard-distribution-item:focus-visible {
   line-height: 17px;
 }
 
-.runtime-timeline-load-more {
-  margin: 10px 16px 14px;
+.runtime-timeline-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 10px 16px 14px;
+  border-top: 1px solid #eef2f7;
+  background: #ffffff;
+}
+
+.runtime-timeline-pagination .ant-typography {
+  min-width: 150px;
+  margin: 0;
+  text-align: center;
 }
 
 @media (max-width: 960px) {
@@ -1426,6 +1470,16 @@ a.dashboard-distribution-item:focus-visible {
 
   .runtime-attempt-header__stats {
     flex-wrap: wrap;
+  }
+
+  .runtime-timeline-pagination {
+    gap: 8px;
+    padding-inline: 12px;
+  }
+
+  .runtime-timeline-pagination .ant-typography {
+    min-width: 0;
+    font-size: 12px;
   }
 
   .runtime-event-list {

@@ -3,6 +3,7 @@ import {
   Button,
   Card,
   Collapse,
+  Drawer,
   Empty,
   Segmented,
   Select,
@@ -32,9 +33,6 @@ import {
 } from '../../lib/runtime-timeline'
 
 const { Text } = Typography
-
-const MOBILE_PAGE_SIZE = 50
-const DESKTOP_PAGE_SIZE = 160
 
 const SCOPE_LABELS: Record<RuntimeEventScope, string> = {
   JOB: '批次',
@@ -114,7 +112,7 @@ function groupHeader(group: RuntimeTimelineGroup) {
           <Text type="secondary">领取与仓库准备；结论提交归入 Attempt</Text>
         </div>
         <Text type="secondary" className="runtime-attempt-header__stats">
-          当前载入 {group.events.length} 条事件
+          本页 {group.events.length} 条事件
         </Text>
       </div>
     )
@@ -133,7 +131,7 @@ function groupHeader(group: RuntimeTimelineGroup) {
         {group.failures > 0 ? <Tag color="error">{group.failures} 个异常</Tag> : null}
       </div>
       <div className="runtime-attempt-header__stats">
-        <span>当前载入 {group.events.length} 条事件</span>
+        <span>本页 {group.events.length} 条事件</span>
         {duration === null ? null : <span>{formatDuration(duration)}</span>}
       </div>
     </div>
@@ -206,19 +204,31 @@ export function RuntimeActivityTimeline({
   serverTime,
   agentOptions,
   attempts,
-  selectedAttempt,
   taskId,
   taskLabel,
-  isMobile,
+  historyPage,
+  historyPageCount,
+  historyTotal,
+  historyHasNewer,
+  historyHasOlder,
+  historyLoading,
+  onHistoryNewer,
+  onHistoryOlder,
 }: {
   events: RuntimeEvent[]
   serverTime: string
   agentOptions: Array<{ value: string; label: string }>
   attempts: RuntimeAttemptSnapshot[]
-  selectedAttempt: number | null
   taskId: string | null
   taskLabel: string | null
-  isMobile: boolean
+  historyPage: number
+  historyPageCount: number
+  historyTotal: number
+  historyHasNewer: boolean
+  historyHasOlder: boolean
+  historyLoading: boolean
+  onHistoryNewer(): void
+  onHistoryOlder(): void
 }) {
   const [scopeFilter, setScopeFilter] = useState<RuntimeEventScope[]>([])
   const [agentSelection, setAgentSelection] = useState<{
@@ -228,22 +238,15 @@ export function RuntimeActivityTimeline({
   const [failuresOnly, setFailuresOnly] = useState(false)
   const [compact, setCompact] = useState(true)
   const [showCodes, setShowCodes] = useState(false)
-  const [limitSelection, setLimitSelection] = useState<{
-    taskId: string | null
-    isMobile: boolean
-    value: number
-  }>({ taskId, isMobile, value: isMobile ? MOBILE_PAGE_SIZE : DESKTOP_PAGE_SIZE })
   const [openSelection, setOpenSelection] = useState<{
     context: string
     value: string | null
   } | null>(null)
+  const [detailSelection, setDetailSelection] = useState<{
+    taskId: string
+    groupKey: string
+  } | null>(null)
   const agentFilter = agentSelection.taskId === taskId ? agentSelection.value : null
-  const limit =
-    limitSelection.taskId === taskId && limitSelection.isMobile === isMobile
-      ? limitSelection.value
-      : isMobile
-        ? MOBILE_PAGE_SIZE
-        : DESKTOP_PAGE_SIZE
   const now = Date.parse(serverTime)
 
   const matched = useMemo(() => {
@@ -256,24 +259,21 @@ export function RuntimeActivityTimeline({
     })
   }, [events, taskId, scopeFilter, agentFilter, failuresOnly])
 
-  const visible = useMemo(() => matched.slice(-limit), [matched, limit])
   const groups = useMemo(
-    () => buildRuntimeTimelineGroups(visible, attempts, compact),
-    [visible, attempts, compact],
+    () => buildRuntimeTimelineGroups(matched, attempts, compact),
+    [matched, attempts, compact],
   )
-  const selectedRunKey = attempts.find(
-    (attempt) => attempt.agent_attempt === selectedAttempt,
-  )?.agent_run_id
-  const preferredKey =
-    selectedRunKey !== undefined && groups.some((group) => group.key === selectedRunKey)
-      ? selectedRunKey
-      : (groups[0]?.key ?? null)
-  const openContext = `${taskId ?? 'none'}:${preferredKey ?? 'none'}`
+  const preferredKey = groups.find((group) => group.attempt === null)?.key ?? null
+  const openContext = taskId ?? 'none'
   const activeKey =
     openSelection?.context === openContext ? openSelection.value : preferredKey
+  const detailGroup =
+    detailSelection?.taskId === taskId
+      ? (groups.find((group) => group.key === detailSelection.groupKey) ?? null)
+      : null
 
   const renderedRows = groups.reduce((total, group) => total + group.clusters.length, 0)
-  const hiddenByCompact = compact ? Math.max(visible.length - renderedRows, 0) : 0
+  const hiddenByCompact = compact ? Math.max(matched.length - renderedRows, 0) : 0
 
   return (
     <Card
@@ -297,7 +297,7 @@ export function RuntimeActivityTimeline({
             ]}
           />
           <Text type="secondary">
-            当前需求 {matched.length} 条
+            当前需求共 {historyTotal} 条，本页 {matched.length} 条
             {hiddenByCompact > 0 ? `，已收起 ${String(hiddenByCompact)} 条重复/配对事件` : ''}
           </Text>
         </div>
@@ -363,33 +363,104 @@ export function RuntimeActivityTimeline({
                 value: typeof next === 'string' ? next : null,
               })
             }}
-            items={groups.map((group) => ({
-              key: group.key,
-              label: groupHeader(group),
-              children: (
-                <div className="runtime-event-list" role="list">
-                  {group.clusters.map((item) => eventRow(item, now, showCodes))}
-                </div>
-              ),
-            }))}
+            items={groups.map((group) => {
+              const isTaskStage = group.attempt === null
+              return {
+                key: group.key,
+                label: groupHeader(group),
+                showArrow: isTaskStage,
+                collapsible: isTaskStage ? 'header' as const : 'icon' as const,
+                extra: isTaskStage ? null : (
+                  <Button
+                    type="link"
+                    size="small"
+                    className="runtime-attempt-detail-button"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      if (taskId === null) return
+                      setDetailSelection({ taskId, groupKey: group.key })
+                    }}
+                  >
+                    查看完整详情
+                  </Button>
+                ),
+                children: isTaskStage ? (
+                  <div className="runtime-event-list" role="list">
+                    {group.clusters.map((item) => eventRow(item, now, showCodes))}
+                  </div>
+                ) : null,
+              }
+            })}
           />
-          {matched.length > limit ? (
-            <Button
-              className="runtime-timeline-load-more"
-              size="small"
-              onClick={() => {
-                setLimitSelection({
-                  taskId,
-                  isMobile,
-                  value: limit + (isMobile ? MOBILE_PAGE_SIZE : DESKTOP_PAGE_SIZE),
-                })
-              }}
-            >
-              加载更早事件（已载入 {Math.min(limit, matched.length)} / {matched.length}）
-            </Button>
-          ) : null}
+          {taskId === null ? null : (
+            <div className="runtime-timeline-pagination">
+              <Button
+                size="small"
+                disabled={!historyHasNewer || historyLoading}
+                onClick={onHistoryNewer}
+              >
+                较新一页
+              </Button>
+              <Text type="secondary">
+                第 {historyPage} / {Math.max(historyPageCount, 1)} 页 · 共 {historyTotal} 条事件
+              </Text>
+              <Button
+                size="small"
+                disabled={!historyHasOlder}
+                loading={historyLoading}
+                onClick={onHistoryOlder}
+              >
+                更早一页
+              </Button>
+            </div>
+          )}
         </>
       )}
+
+      <Drawer
+        className="runtime-attempt-detail-drawer"
+        title={
+          detailGroup?.attempt === null || detailGroup === null
+            ? 'Attempt 完整详情'
+            : `Attempt #${String(detailGroup.attempt.agent_attempt)} · 完整详情`
+        }
+        width="min(960px, 94vw)"
+        open={detailGroup !== null}
+        destroyOnHidden
+        onClose={() => setDetailSelection(null)}
+      >
+        {detailGroup === null ? null : (
+          <>
+            <div className="runtime-attempt-detail-summary">
+              {groupHeader(detailGroup)}
+              <Text type="secondary">当前筛选条件与主页面保持一致</Text>
+            </div>
+            <div className="runtime-event-list runtime-event-list--drawer" role="list">
+              {detailGroup.clusters.map((item) => eventRow(item, now, showCodes))}
+            </div>
+            <div className="runtime-timeline-pagination runtime-timeline-pagination--drawer">
+              <Button
+                size="small"
+                disabled={!historyHasNewer || historyLoading}
+                onClick={onHistoryNewer}
+              >
+                较新一页
+              </Button>
+              <Text type="secondary">
+                第 {historyPage} / {Math.max(historyPageCount, 1)} 页 · 共 {historyTotal} 条事件
+              </Text>
+              <Button
+                size="small"
+                disabled={!historyHasOlder}
+                loading={historyLoading}
+                onClick={onHistoryOlder}
+              >
+                更早一页
+              </Button>
+            </div>
+          </>
+        )}
+      </Drawer>
     </Card>
   )
 }

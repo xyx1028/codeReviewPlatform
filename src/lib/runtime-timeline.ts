@@ -69,6 +69,31 @@ export function eventsForRuntimeTask(
   return events.filter((event) => event.task_id === taskId)
 }
 
+/**
+ * 合成当前需求的一页时间线。
+ *
+ * 历史 RPC 只分页 Attempt 树事件；TASK 锚点由批次快照保证完整，因此每一页都保留。
+ * 最新页额外合并批次实时流，较早页则保持稳定，不被新事件插入打乱游标边界。
+ */
+export function buildRuntimeTaskEventPage(
+  historyEvents: readonly RuntimeEvent[],
+  liveEvents: readonly RuntimeEvent[],
+  taskId: string | null,
+  includeLiveAttemptEvents: boolean,
+): RuntimeEvent[] {
+  if (taskId === null) return []
+  const byUuid = new Map<string, RuntimeEvent>()
+  for (const event of historyEvents) {
+    if (event.task_id === taskId) byUuid.set(event.event_uuid, event)
+  }
+  for (const event of liveEvents) {
+    if (event.task_id !== taskId) continue
+    if (event.scope !== 'TASK' && !includeLiveAttemptEvents) continue
+    byUuid.set(event.event_uuid, event)
+  }
+  return [...byUuid.values()].sort((left, right) => left.event_id - right.event_id)
+}
+
 function compactKey(event: RuntimeEvent): string | null {
   if (event.scope !== 'TOOL' || event.phase !== 'TERMINAL') return null
   return [
@@ -164,7 +189,9 @@ export function buildRuntimeTimelineGroups(
   const grouped = new Map<string, RuntimeEvent[]>()
 
   for (const event of events) {
-    const key = event.agent_run_id ?? 'task'
+    // TASK 是产品语义边界：领取、仓库准备等平台调度事实即使为了链路追踪
+    // 关联了 agent_run_id，也仍应展示在“任务阶段”，不能混入 Attempt。
+    const key = event.scope === 'TASK' ? 'task' : (event.agent_run_id ?? 'task')
     const bucket = grouped.get(key)
     if (bucket === undefined) grouped.set(key, [event])
     else bucket.push(event)

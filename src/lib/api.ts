@@ -6,6 +6,7 @@ import type {
   AdminUserListItem,
   AgentRunDetail,
   AnalysisRuntimeConsoleResponse,
+  RuntimeTaskEventHistoryResponse,
   AiCodeEvidence,
   AiEvidenceInput,
   AiImportRecord,
@@ -917,4 +918,24 @@ export async function getAnalysisRuntimeConsole(batchId: string, sinceEventId: n
     p_since_event_id: sinceEventId,
   })
   return unwrap<AnalysisRuntimeConsoleResponse>({ data, error })
+}
+
+/**
+ * 当前需求的历史事件页。
+ *
+ * `beforeEventId` 为空时取最新一页；翻页时使用服务端返回的
+ * `cursor.next_before_event_id`，不要自行从 occurred_at 推导游标。
+ */
+export async function getAnalysisRuntimeTaskEvents(
+  taskId: string,
+  beforeEventId: number | null,
+  limit: number,
+) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('get_analysis_runtime_task_events', {
+    p_task_id: taskId,
+    p_before_event_id: beforeEventId,
+    p_limit: limit,
+  })
+  return unwrap<RuntimeTaskEventHistoryResponse>({ data, error })
 }

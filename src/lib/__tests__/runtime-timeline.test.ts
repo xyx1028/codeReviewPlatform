@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { RuntimeAttemptSnapshot, RuntimeEvent } from '../../types'
 import {
+  buildRuntimeTaskEventPage,
   buildRuntimeTimelineGroups,
   compactRuntimeEvents,
   eventsForRuntimeTask,
@@ -77,6 +78,27 @@ describe('runtime timeline task isolation', () => {
 
     expect(eventsForRuntimeTask(events, 'task-1').map((item) => item.event_id)).toEqual([1])
     expect(eventsForRuntimeTask(events, null)).toEqual([])
+  })
+
+  it('keeps task anchors on every history page and only merges live attempt facts on page one', () => {
+    const history = [event(10)]
+    const live = [
+      event(10),
+      event(11),
+      event(12, {
+        agent_run_id: 'run-1',
+        scope: 'TASK',
+        event_type: 'TASK_REPOSITORIES_READY',
+      }),
+      event(13, { task_id: 'task-2' }),
+    ]
+
+    expect(
+      buildRuntimeTaskEventPage(history, live, 'task-1', true).map((item) => item.event_id),
+    ).toEqual([10, 11, 12])
+    expect(
+      buildRuntimeTaskEventPage(history, live, 'task-1', false).map((item) => item.event_id),
+    ).toEqual([10, 12])
   })
 })
 
@@ -165,7 +187,11 @@ describe('runtime timeline attempt grouping', () => {
       [
         event(1, { agent_run_id: 'run-1' }),
         event(2, { agent_run_id: 'run-2' }),
-        event(3, { agent_run_id: null, scope: 'TASK' }),
+        event(3, {
+          agent_run_id: 'run-2',
+          scope: 'TASK',
+          event_type: 'TASK_REPOSITORIES_READY',
+        }),
       ],
       [attempt(1), attempt(2)],
       false,
@@ -173,6 +199,8 @@ describe('runtime timeline attempt grouping', () => {
 
     expect(groups.map((group) => group.key)).toEqual(['run-2', 'run-1', 'task'])
     expect(groups[0]?.attempt?.agent_attempt).toBe(2)
+    expect(groups[0]?.events.map((item) => item.event_id)).toEqual([2])
     expect(groups[2]?.attempt).toBeNull()
+    expect(groups[2]?.events.map((item) => item.event_id)).toEqual([3])
   })
 })

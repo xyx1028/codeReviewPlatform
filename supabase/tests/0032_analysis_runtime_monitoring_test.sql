@@ -89,7 +89,8 @@ declare
   ];
   v_browser_rpcs text[] := array[
     'public.admin_list_active_analysis_batches()',
-    'public.get_analysis_runtime_console(uuid,bigint)'
+    'public.get_analysis_runtime_console(uuid,bigint)',
+    'public.get_analysis_runtime_task_events(uuid,bigint,integer)'
   ];
   v_internal text[] := array[
     'public.insert_analysis_runtime_event(uuid,uuid,uuid,uuid,uuid,uuid,text,text,text,text,text,text,text,text,text,integer,timestamptz,jsonb)',
@@ -1092,6 +1093,44 @@ begin
     v_console::text not like '%cost_micros%', 'cost_micros never appears in the console DTO'
   );
 
+  -- 单需求历史独立分页，避免批次快照的近期窗口挤掉较早的 Attempt 事件。
+  v_result := public.get_analysis_runtime_task_events(v_task, null, 3);
+  perform pg_temp.assert(
+    jsonb_array_length(v_result -> 'events') = 3,
+    'the task history RPC returns the requested newest page size'
+  );
+  perform pg_temp.assert(
+    (v_result ->> 'total_events')::integer > 3
+      and (v_result #>> '{cursor,has_more}')::boolean,
+    'the task history RPC reports the full non-task total and an older page'
+  );
+  perform pg_temp.assert(
+    not exists (
+      select 1 from jsonb_array_elements(v_result -> 'events') as event
+      where event ->> 'scope' = 'TASK'
+    ),
+    'task lifecycle anchors stay in the batch snapshot instead of being repeated in history pages'
+  );
+
+  v_event_id := (v_result #>> '{cursor,next_before_event_id}')::bigint;
+  v_diag := public.get_analysis_runtime_task_events(v_task, v_event_id, 3);
+  perform pg_temp.assert(
+    not exists (
+      select 1
+      from jsonb_array_elements(v_result -> 'events') newer
+      join jsonb_array_elements(v_diag -> 'events') older
+        on newer ->> 'event_uuid' = older ->> 'event_uuid'
+    ),
+    'adjacent task history pages never duplicate an event'
+  );
+  perform pg_temp.assert(
+    not exists (
+      select 1 from jsonb_array_elements(v_diag -> 'events') as event
+      where (event ->> 'event_id')::bigint >= v_event_id
+    ),
+    'the task history cursor returns only strictly older events'
+  );
+
   ---------------------------------------------------------------------------
   -- C13. 权限：ADMIN / 批次创建者可读，其他角色被拒
   ---------------------------------------------------------------------------
@@ -1102,6 +1141,10 @@ begin
   perform pg_temp.assert_raises(
     format('select public.get_analysis_runtime_console(%L, null)', v_batch),
     'batch management permission required', 'a VIEWER cannot read the runtime console'
+  );
+  perform pg_temp.assert_raises(
+    format('select public.get_analysis_runtime_task_events(%L, null, 3)', v_task),
+    'batch management permission required', 'a VIEWER cannot page through task runtime history'
   );
   perform pg_temp.assert_raises(
     'select public.admin_list_active_analysis_batches()',
@@ -1120,6 +1163,11 @@ begin
     format('select public.get_analysis_runtime_console(%L, null)', v_batch),
     'batch management permission required',
     'a REVIEWER who does not own the batch cannot read the runtime console'
+  );
+  perform pg_temp.assert_raises(
+    format('select public.get_analysis_runtime_task_events(%L, null, 3)', v_task),
+    'batch management permission required',
+    'a REVIEWER who does not own the batch cannot read task runtime history'
   );
 
   perform set_config(
