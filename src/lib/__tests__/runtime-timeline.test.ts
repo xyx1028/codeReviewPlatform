@@ -81,6 +81,30 @@ describe('runtime timeline task isolation', () => {
 })
 
 describe('runtime timeline compact mode', () => {
+  it('orders by occurrence time when database ids arrive out of order', () => {
+    const events = [
+      event(11, {
+        event_type: 'AGENT_FINISHED',
+        occurred_at: '2026-09-13T08:02:35.000Z',
+      }),
+      event(10, {
+        event_type: 'ATTEMPT_COMMITTED',
+        occurred_at: '2026-09-13T08:02:37.000Z',
+      }),
+    ]
+    const compacted = compactRuntimeEvents(events)
+    const full = buildRuntimeTimelineGroups(events, [attempt(1, 'run-1')], false)[0]
+
+    expect(compacted.map((item) => item.representative.event_type)).toEqual([
+      'ATTEMPT_COMMITTED',
+      'AGENT_FINISHED',
+    ])
+    expect(full?.clusters.map((item) => item.representative.event_type)).toEqual([
+      'ATTEMPT_COMMITTED',
+      'AGENT_FINISHED',
+    ])
+  })
+
   it('hides a closed STARTED pair but keeps an actually open STARTED event', () => {
     const compacted = compactRuntimeEvents([
       event(1, {

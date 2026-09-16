@@ -172,13 +172,15 @@ export function RuntimeTaskList({
                         ? null
                         : <span> · {formatElapsed(activity.startedAt, now)}</span>}
                     </div>
-                    <div className="runtime-task-item__meta">
-                      <span>{shortWorker(task.worker_id)}</span>
-                      <span>Agent {activity.agentCount}</span>
-                      {activity.maxDepth > 0 ? <span>深度 {activity.maxDepth}</span> : null}
-                      <span>{formatAge(task.last_event_at, now)}</span>
-                      <RuntimeFreshnessBadge freshness={freshnessOf(task)} />
-                    </div>
+                    {task.agent_status === 'RUNNING' ? (
+                      <div className="runtime-task-item__meta">
+                        <span>{shortWorker(task.worker_id)}</span>
+                        <span>运行中 Agent {activity.agentCount}</span>
+                        {activity.maxDepth > 0 ? <span>深度 {activity.maxDepth}</span> : null}
+                        <span>{formatAge(task.last_event_at, now)}</span>
+                        <RuntimeFreshnessBadge freshness={freshnessOf(task)} />
+                      </div>
+                    ) : null}
                     {errorLabel === null ? null : (
                       <div className="runtime-task-item__error">{errorLabel}</div>
                     )}

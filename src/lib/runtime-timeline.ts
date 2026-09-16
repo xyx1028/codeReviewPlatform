@@ -17,8 +17,6 @@ export interface RuntimeTimelineGroup {
   attempt: RuntimeAttemptSnapshot | null
   events: RuntimeEvent[]
   clusters: RuntimeTimelineCluster[]
-  modelRequests: number
-  toolCalls: number
   failures: number
   startedAt: string | null
   finishedAt: string | null
@@ -35,6 +33,21 @@ const SETUP_EVENT_TYPES = new Set([
   'ACP_TURN_STARTED',
   'ATTEMPT_INSTRUMENTATION_REPORTED',
 ])
+
+/**
+ * 时间线展示按事实发生时间排序，而不是按数据库取号顺序排序。
+ *
+ * Reporter 可能批量上报事件，较早发生的事件反而晚入库、拿到更大的 event_id。
+ * event_id 仍负责游标推进；这里只在发生时间相同时用它保证展示顺序稳定。
+ */
+function compareNewestFirst(left: RuntimeEvent, right: RuntimeEvent): number {
+  const leftTime = Date.parse(left.occurred_at)
+  const rightTime = Date.parse(right.occurred_at)
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return rightTime - leftTime
+  }
+  return right.event_id - left.event_id
+}
 
 export function isRuntimeFailure(event: RuntimeEvent): boolean {
   return (
@@ -102,7 +115,7 @@ export function compactRuntimeEvents(events: RuntimeEvent[]): RuntimeTimelineClu
           terminals.has(event.correlation_id)
         ),
     )
-    .sort((left, right) => right.event_id - left.event_id)
+    .sort(compareNewestFirst)
 
   const setupEvents = visible.filter((event) => SETUP_EVENT_TYPES.has(event.event_type))
   const rows: RuntimeTimelineCluster[] = []
@@ -138,7 +151,7 @@ export function compactRuntimeEvents(events: RuntimeEvent[]): RuntimeTimelineClu
 function fullRuntimeEvents(events: RuntimeEvent[]): RuntimeTimelineCluster[] {
   return events
     .slice()
-    .sort((left, right) => right.event_id - left.event_id)
+    .sort(compareNewestFirst)
     .map((event) => cluster(`event:${event.event_uuid}`, 'event', [event]))
 }
 
@@ -170,12 +183,6 @@ export function buildRuntimeTimelineGroups(
         attempt,
         events: ordered,
         clusters: compact ? compactRuntimeEvents(ordered) : fullRuntimeEvents(ordered),
-        modelRequests: ordered.filter(
-          (event) => event.scope === 'MODEL' && event.phase === 'TERMINAL',
-        ).length,
-        toolCalls: ordered.filter(
-          (event) => event.scope === 'TOOL' && event.phase === 'TERMINAL',
-        ).length,
         failures: ordered.filter(isRuntimeFailure).length,
         startedAt: attempt?.started_at ?? first?.occurred_at ?? null,
         finishedAt:

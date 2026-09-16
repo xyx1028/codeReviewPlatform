@@ -111,10 +111,10 @@ function groupHeader(group: RuntimeTimelineGroup) {
       <div className="runtime-attempt-header">
         <div className="runtime-attempt-header__title">
           <span className="runtime-attempt-index">任务阶段</span>
-          <Text type="secondary">领取、仓库准备与任务收敛</Text>
+          <Text type="secondary">领取与仓库准备；结论提交归入 Attempt</Text>
         </div>
         <Text type="secondary" className="runtime-attempt-header__stats">
-          {group.events.length} 条事实
+          当前载入 {group.events.length} 条事件
         </Text>
       </div>
     )
@@ -133,9 +133,7 @@ function groupHeader(group: RuntimeTimelineGroup) {
         {group.failures > 0 ? <Tag color="error">{group.failures} 个异常</Tag> : null}
       </div>
       <div className="runtime-attempt-header__stats">
-        <span>模型 {group.modelRequests}</span>
-        <span>工具 {group.toolCalls}</span>
-        <span>{group.events.length} 条事实</span>
+        <span>当前载入 {group.events.length} 条事件</span>
         {duration === null ? null : <span>{formatDuration(duration)}</span>}
       </div>
     </div>
@@ -165,9 +163,15 @@ function eventRow(
       : 'complete'
 
   return (
-    <div className="runtime-event-row" key={cluster.key}>
-      <div className="runtime-event-time">{formatAge(event.occurred_at, now)}</div>
-      <div className={`runtime-event-dot runtime-event-dot--${dotKind}`} />
+    <div
+      className={`runtime-event-row runtime-event-row--${dotKind}`}
+      key={cluster.key}
+      role="listitem"
+    >
+      <time className="runtime-event-time" dateTime={event.occurred_at}>
+        {formatAge(event.occurred_at, now)}
+      </time>
+      <div className={`runtime-event-dot runtime-event-dot--${dotKind}`} aria-hidden="true" />
       <div className="runtime-event-content">
         <div className="runtime-event-mainline">
           <Tag bordered={false} color={SCOPE_COLORS[event.scope]}>
@@ -363,7 +367,7 @@ export function RuntimeActivityTimeline({
               key: group.key,
               label: groupHeader(group),
               children: (
-                <div className="runtime-event-list">
+                <div className="runtime-event-list" role="list">
                   {group.clusters.map((item) => eventRow(item, now, showCodes))}
                 </div>
               ),
