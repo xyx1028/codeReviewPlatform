@@ -243,46 +243,186 @@ a.dashboard-distribution-item:focus-visible {
   font-weight: 400;
 }
 
-.dashboard-progress-cell {
-  min-width: 130px;
+/* 分组统计卡片：同一行的卡片等高，行数差异靠卡片内部滚动吸收 */
+.dashboard-group-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+/* 1200px 与 antd 的 xl 断点对齐，保持和页面其他两列区块一致的换行点。 */
+@media (min-width: 1200px) {
+  .dashboard-group-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.dashboard-group-card {
   display: flex;
   flex-direction: column;
-  gap: 4px;
 }
 
-.dashboard-progress-cell .ant-progress {
-  margin: 0;
+.dashboard-group-card .ant-card-head {
+  min-height: 48px;
+  padding: 0 16px;
 }
 
-.dashboard-group-row {
-  cursor: pointer;
+.dashboard-group-card .ant-card-head-title {
+  padding: 13px 0;
 }
 
-.dashboard-group-row:hover > td {
-  background: #eff6ff !important;
+.dashboard-group-card .ant-card-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  padding: 10px 16px 14px;
 }
 
-.dashboard-group-row:focus-within > td {
-  background: #dbeafe !important;
+.group-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
 }
 
-.dashboard-group-link {
-  color: #2563eb;
-  font-weight: 600;
+.group-list__head,
+.group-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(64px, 96px) minmax(64px, 96px) 40px;
+  align-items: center;
+  gap: 12px;
+}
+
+.group-list__head {
+  padding: 0 8px 6px;
+  border-bottom: 1px solid #eef2f7;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.group-list__head-metric,
+.group-list__head-pending {
+  text-align: end;
+}
+
+.group-list__body {
+  min-height: 0;
+  /* 约 8 行的高度：再长就在卡片内滚，避免一张卡把整页拉长。 */
+  max-height: 336px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.group-row {
+  padding: 7px 8px;
+  border-radius: 8px;
+  color: inherit;
   text-decoration: none;
 }
 
-.dashboard-group-link:hover {
+.group-row + .group-row {
+  box-shadow: inset 0 1px 0 #f4f6fa;
+}
+
+.group-row:hover {
+  background: #f3f8ff;
+  box-shadow: none;
+}
+
+.group-row:focus-visible {
+  outline: 2px solid #1d4ed8;
+  outline-offset: -2px;
+}
+
+.group-row__name {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.group-row__label {
+  overflow: hidden;
+  color: #1d4ed8;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-row__total {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.group-row:hover .group-row__label {
   text-decoration: underline;
 }
 
-.dashboard-group-link:focus-visible {
-  outline: 3px solid #1d4ed8;
-  outline-offset: 2px;
+.group-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.group-metric__count {
+  color: #475569;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  text-align: end;
+}
+
+.group-metric__track {
+  overflow: hidden;
+  height: 4px;
+  border-radius: 999px;
+  background: #eef2f7;
+}
+
+.group-metric__fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+}
+
+.group-row__pending {
+  justify-self: end;
+  min-width: 30px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #64748b;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.group-row__pending--open {
+  background: #fff7ed;
+  color: #c2410c;
+  font-weight: 600;
 }
 
 .dashboard-log-card {
   opacity: 0.9;
+}
+
+.batch-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/*
+ * 页签的内容由 Routes 渲染在 Tabs 外面，Tabs 自带的 16px 底边距在这里
+ * 会和容器间距叠成一条 40px 的空白带，所以清掉，只保留容器的一档间距。
+ */
+.batch-page > .batch-tabs > .ant-tabs-nav {
+  margin-bottom: 0;
 }
 
 .review-table-card {

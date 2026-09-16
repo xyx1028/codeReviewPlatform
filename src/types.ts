@@ -231,14 +231,23 @@ export interface ReviewStory {
   /** 测试人员。新版导出（tf_test_handlers）才有，历史批次为 null。 */
   test_handlers: string | null
   project_name: string | null
+  /**
+   * @deprecated 需求平台已没有云维度，导入不再写入、前端不再展示。列仅为历史批次保留，
+   * 详见 supabase/migrations/0040_retire_story_cloud_name.sql。
+   */
   cloud_name: string | null
   /**
    * @deprecated 新版导出没有应用维度，导入不再写入、前端不再展示。列仅为历史批次保留。
    * 详见 supabase/migrations/0038_story_requirement_test_handlers.sql。
    */
   application_name: string | null
+  /**
+   * @deprecated 只关注发布窗口，迭代阶段维度已下线：导入不再写入、前端不再展示。
+   * 列仅为历史批次保留，详见 supabase/migrations/0039_retire_story_iteration_name.sql。
+   */
   iteration_name: string | null
   release_window: string | null
+  /** 需求在源系统里的状态，例如「提测完成」「基线测试完成」。看板按它分组。 */
   source_status: string | null
   source_data: Record<string, unknown>
   created_at: string
@@ -355,7 +364,8 @@ export interface BatchOperationLogWithBatch extends BatchOperationLog {
 
 /**
  * 导入时从 Excel 解析出的原始需求。字段集合同时驱动映射 UI（见 excel.ts 的 SourceFieldKey），
- * 所以这里刻意不再包含 application_name —— 新版导出没有应用列，映射界面也不该给出这一项。
+ * 所以这里刻意不再包含 application_name / cloud_name —— 应用和云这两个维度都已下线，
+ * 映射界面也不该给出这些项。
  */
 export interface SourceStoryInput {
   story_code: string
@@ -364,8 +374,6 @@ export interface SourceStoryInput {
   requirement_handlers: string | null
   test_handlers: string | null
   project_name: string | null
-  cloud_name: string | null
-  iteration_name: string | null
   release_window: string | null
   source_status: string | null
   source_data: Record<string, unknown>

@@ -35,11 +35,9 @@ export const sourceFieldLabels: Record<SourceFieldKey, string> = {
   owners_text: '开发人员',
   requirement_handlers: '需求人员',
   test_handlers: '测试人员',
-  project_name: '所属项目',
-  cloud_name: '所属云',
-  iteration_name: '迭代阶段',
+  project_name: '关联特性',
   release_window: '发布窗口',
-  source_status: '原始需求状态',
+  source_status: '需求状态',
 }
 
 /**
@@ -47,6 +45,7 @@ export const sourceFieldLabels: Record<SourceFieldKey, string> = {
  *
  * 需求平台的导出有两代格式，列名口径不一样，所以同一个字段要挂多个别名：
  * - 旧格式（单表头）：用户故事编码 / 用户故事名称 / 负责人 / 所属项目 / 所属云 / 所属应用
+ *   （「所属云」「所属应用」这两个维度已下线，不再有任何实体字段认领它们的列）
  * - 新格式（双表头，第一行是 gf_*、tf_* 字段码，第二行才是中文名）：
  *   编码 / 名称 / 处理人 / 需求人员 / 开发人员 / 测试人员 / 关联特性
  *
@@ -65,12 +64,11 @@ const sourceAliases: Record<SourceFieldKey, string[]> = {
   owners_text: ['负责人', '责任人', '需求负责人', '开发人员', 'owner', 'owners', 'tf_dev_handlers'],
   requirement_handlers: ['需求人员', 'tf_req_handlers'],
   test_handlers: ['测试人员', 'tf_test_handlers'],
-  // 新格式里「关联特性」（FT-xxxx）是需求的上层业务归属，语义上最接近旧格式的「所属项目」。
-  project_name: ['所属项目', '项目', '项目名称', '关联特性', 'project', 'tf_subject'],
-  cloud_name: ['所属云', '云', 'cloud'],
-  iteration_name: ['迭代阶段', '迭代', 'iteration', 'tf_iteration'],
+  // 平台口径跟随新格式叫「关联特性」（FT-xxxx），它是需求的上层业务归属。
+  // 旧格式的「所属项目」是同一个维度的老叫法，作为兼容别名留在后面。
+  project_name: ['关联特性', 'tf_subject', '所属项目', '项目', '项目名称', 'project'],
   release_window: ['发布窗口', '发布时间', 'release', 'tf_release_window'],
-  source_status: ['原始需求状态', '状态', '需求状态', 'status'],
+  source_status: ['需求状态', '原始需求状态', '状态', 'status'],
 }
 
 const reviewSheetName = '需求评审'
@@ -237,7 +235,7 @@ export function inferFieldMapping(headers: string[]): FieldMapping {
 /**
  * 校验提示里同时点出实体字段名和它实际映射到的 Excel 列名。
  *
- * 两者经常不同名：新版导出把「所属项目」映射到「关联特性」列，旧版导出把「开发人员」映射到「负责人」列。
+ * 两者经常不同名：旧版导出把「开发人员」映射到「负责人」列、「关联特性」映射到「所属项目」列。
  * 只报实体字段名的话，用户拿着提示回去翻自己的文件会找不到对应的列。
  * 两者同名时（旧版导出的多数列）就不重复说了。
  */
@@ -289,8 +287,6 @@ export function parseSourceRows(
       requirement_handlers: nullableText(mapped('requirement_handlers')),
       test_handlers: nullableText(mapped('test_handlers')),
       project_name: nullableText(mapped('project_name')),
-      cloud_name: nullableText(mapped('cloud_name')),
-      iteration_name: nullableText(mapped('iteration_name')),
       release_window: nullableText(mapped('release_window')),
       source_status: nullableText(mapped('source_status')),
       source_data: row,

@@ -493,7 +493,7 @@ function Shell({ session }: { session: Session }) {
         <div className="brand-lockup">
           <span className="brand-mark" aria-hidden="true">AI</span>
           <div className="brand-copy">
-            <Text className="brand">AI代码评审平台</Text>
+            <Text className="brand">AI需求-开发-评审一致性平台</Text>
             <Text className="subtitle">需求与代码一致性 · 智能分析</Text>
           </div>
         </div>
@@ -1073,12 +1073,13 @@ function BatchPage({ canManageBatch }: { canManageBatch: (batch: ReviewBatch) =>
   const activeKey = tabs.find((tab) => location.pathname.includes(`/${tab.key}`))?.key ?? 'dashboard'
 
   return (
-    <Space direction="vertical" size="large" className="page-stack">
+    // 用 flex 容器代替 Space：页签下面紧跟着 Routes 渲染的内容，需要自己控制这段间距。
+    <div className="page-stack batch-page">
       <PageTitle
         title={batchQuery.data.name}
         extra={<Tag color={statusColor(batchQuery.data.status)}>{batchStatusLabels[batchQuery.data.status]}</Tag>}
       />
-      <Tabs activeKey={activeKey} items={tabs} onChange={(key) => navigate(`/batches/${batchId}/${key}`)} />
+      <Tabs className="batch-tabs" activeKey={activeKey} items={tabs} onChange={(key) => navigate(`/batches/${batchId}/${key}`)} />
       <Routes>
         <Route path="/" element={<Navigate to="dashboard" replace />} />
         <Route path="dashboard" element={<DashboardPage batchId={batchId} canManage={canManage} />} />
@@ -1089,7 +1090,7 @@ function BatchPage({ canManageBatch }: { canManageBatch: (batch: ReviewBatch) =>
         {/* Agent 运行详情：VIEWER 也能进入只读查看，取消按钮由 canManage 控制。 */}
         <Route path="agent-runs/:taskId" element={<AgentRunDetailPage canManage={canManage} />} />
       </Routes>
-    </Space>
+    </div>
   )
 }
 
@@ -1981,6 +1982,7 @@ function ReviewListPage({ batchId }: { batchId: string }) {
   const ownerOptions = useMemo(() => peopleFilterOptions(workspaceQuery.data?.stories, (story) => story.owners_text), [workspaceQuery.data])
   const requirementHandlerOptions = useMemo(() => peopleFilterOptions(workspaceQuery.data?.stories, (story) => story.requirement_handlers), [workspaceQuery.data])
   const testHandlerOptions = useMemo(() => peopleFilterOptions(workspaceQuery.data?.stories, (story) => story.test_handlers), [workspaceQuery.data])
+  const statusOptions = useMemo(() => statusFilterOptions(workspaceQuery.data?.stories), [workspaceQuery.data])
   const getSingleSearchParam = (name: string) => {
     const values = new URLSearchParams(location.search).getAll(name)
     return values.length === 1 && values[0] ? values[0] : undefined
@@ -1989,6 +1991,7 @@ function ReviewListPage({ batchId }: { batchId: string }) {
   const ownerParam = getSingleSearchParam('owner')
   const requirementHandlerParam = getSingleSearchParam('requirementHandler')
   const testHandlerParam = getSingleSearchParam('testHandler')
+  const statusParam = getSingleSearchParam('status')
   const verdict = verdictParam && (
     verdictParam === 'UNANALYZED' || aiVerdictOptions.some((option) => option.value === verdictParam)
   ) ? verdictParam as AiVerdict | 'UNANALYZED' : undefined
@@ -1997,7 +2000,8 @@ function ReviewListPage({ batchId }: { batchId: string }) {
     && requirementHandlerOptions.some((option) => option.value === requirementHandlerParam) ? requirementHandlerParam : undefined
   const testHandler = testHandlerParam
     && testHandlerOptions.some((option) => option.value === testHandlerParam) ? testHandlerParam : undefined
-  const updateFilters = (changes: Partial<Record<PeopleFilterKey | 'verdict', string | undefined>>) => {
+  const status = statusParam && statusOptions.some((option) => option.value === statusParam) ? statusParam : undefined
+  const updateFilters = (changes: Partial<Record<GroupFilterKey | 'verdict', string | undefined>>) => {
     const searchParams = new URLSearchParams(location.search)
     Object.entries(changes).forEach(([name, value]) => {
       if (value) searchParams.set(name, value)
@@ -2091,6 +2095,18 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       render: (value) => <PeopleTags value={value as string | null} />,
     },
     {
+      title: '需求状态',
+      key: 'status',
+      dataIndex: ['story', 'source_status'],
+      width: 140,
+      filters: statusOptions.map((option) => ({ text: option.label, value: option.value })),
+      filteredValue: status ? [status] : null,
+      filterSearch: true,
+      filterMultiple: false,
+      onFilter: (value, row) => storyStatusName(row.story) === String(value),
+      render: (_value, row) => <Tag>{storyStatusName(row.story)}</Tag>,
+    },
+    {
       title: 'AI判断',
       key: 'verdict',
       width: 120,
@@ -2140,8 +2156,13 @@ function ReviewListPage({ batchId }: { batchId: string }) {
             columns={columns}
             dataSource={rows}
             size="middle"
-            scroll={{ x: 1370 }}
-            pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
+            scroll={{ x: 1520 }}
+            pagination={{
+              defaultPageSize: 10,
+              showSizeChanger: true,
+              pageSizeOptions: [10, 20, 50, 100],
+              showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 条`,
+            }}
             onChange={(_pagination, filters, _sorter, extra) => {
               if (extra.action !== 'filter') return
               const normalize = (values: unknown) => Array.isArray(values) ? values.map(String) : null
@@ -2154,6 +2175,7 @@ function ReviewListPage({ batchId }: { batchId: string }) {
                 owner: normalize(filters.owner)?.[0],
                 requirementHandler: normalize(filters.requirementHandler)?.[0],
                 testHandler: normalize(filters.testHandler)?.[0],
+                status: normalize(filters.status)?.[0],
                 verdict: normalize(filters.verdict)?.[0],
               })
             }}
@@ -2428,11 +2450,17 @@ function DashboardPage({ batchId, canManage }: { batchId: string; canManage: boo
         <Col xs={24} lg={12}><DistributionCard title="人工结论分布" items={humanItems} total={stats.reviewed} /></Col>
       </Row>
 
-      <Row gutter={[12, 12]}>
-        <Col xs={24} xl={8}><GroupedProgress title="按开发人员统计" rows={stats.byOwner} batchId={batchId} filterKey="owner" note="协作需求按开发人员分别计入" /></Col>
-        <Col xs={24} xl={8}><GroupedProgress title="按需求人员统计" rows={stats.byRequirementHandler} batchId={batchId} filterKey="requirementHandler" /></Col>
-        <Col xs={24} xl={8}><GroupedProgress title="按测试人员统计" rows={stats.byTestHandler} batchId={batchId} filterKey="testHandler" /></Col>
-      </Row>
+      {/*
+        分组卡片用 CSS Grid 而不是 Ant Row/Col：各维度行数差得很多（状态维度可能只有 2 行，
+        人员维度十几行），Row 里的 Col 各自按内容高度撑开，同排两张卡片底边会错开一大段空白。
+        Grid 的同一行天然等高，配合卡片内部的滚动区，四张卡片底边始终对齐。
+      */}
+      <div className="dashboard-group-grid">
+        <GroupedProgress title="按需求状态统计" rows={stats.byStatus} batchId={batchId} filterKey="status" note="需求在源系统里的状态" />
+        <GroupedProgress title="按开发人员统计" rows={stats.byOwner} batchId={batchId} filterKey="owner" note="协作需求按开发人员分别计入" />
+        <GroupedProgress title="按需求人员统计" rows={stats.byRequirementHandler} batchId={batchId} filterKey="requirementHandler" />
+        <GroupedProgress title="按测试人员统计" rows={stats.byTestHandler} batchId={batchId} filterKey="testHandler" />
+      </div>
     </div>
   )
 }
@@ -2649,11 +2677,9 @@ function StoryCard({ story }: { story: ReviewStory }) {
     { label: '开发人员', value: story.owners_text },
     { label: '需求人员', value: story.requirement_handlers },
     { label: '测试人员', value: story.test_handlers },
-    { label: '项目', value: story.project_name },
-    { label: '所属云', value: story.cloud_name },
-    { label: '迭代', value: story.iteration_name },
+    { label: '关联特性', value: story.project_name },
     { label: '发布窗口', value: story.release_window },
-    { label: '来源状态', value: story.source_status },
+    { label: '需求状态', value: story.source_status },
   ].filter((item) => item.value)
 
   return (
@@ -2815,6 +2841,20 @@ function peopleFilterOptions(stories: ReviewStory[] | undefined, pick: (story: R
   return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN')).map((name) => ({ value: name, label: name }))
 }
 
+/**
+ * 需求状态的分组名。状态是单值，不做拆分。
+ * 源系统没给状态时归到「未填写状态」，这样看板分组的合计始终等于需求总数。
+ */
+function storyStatusName(story: ReviewStory) {
+  return story.source_status?.trim() || '未填写状态'
+}
+
+function statusFilterOptions(stories: ReviewStory[] | undefined) {
+  const names = new Set<string>()
+  stories?.forEach((story) => names.add(storyStatusName(story)))
+  return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN')).map((name) => ({ value: name, label: name }))
+}
+
 function BaselineMetaChip({ label, value, tone, mono = false }: { label: string; value: string; tone?: 'warning'; mono?: boolean }) {
   return (
     <span className={`baseline-chip${tone ? ` baseline-chip--${tone}` : ''}`}>
@@ -2843,7 +2883,10 @@ function BaselineCommitChips({ metadata }: { metadata: BaselineCommit }) {
 function BaselineImportDetails({ aiImport }: { aiImport: AiImportRecord }) {
   const modelNameById = useModelDisplayNameMap()
   const metadata = parseBaselineCommit(aiImport.baseline_commit)
-  const branchMismatch = Boolean(metadata && metadata.actual_branch !== aiImport.baseline_branch)
+  // 现在只会分析批次选定的那个分支，所以配置分支就是分析分支，只展示一个。
+  // 历史数据里 AI 报告的 actual_branch 可能与配置不一致，这时标黄并在 tooltip 里说明。
+  const analyzedBranch = aiImport.baseline_branch || metadata?.actual_branch || '-'
+  const branchMismatch = Boolean(metadata && aiImport.baseline_branch && metadata.actual_branch !== aiImport.baseline_branch)
   const currentModelName = aiImport.ai_model_config_id
     ? modelNameById.get(aiImport.ai_model_config_id)
     : null
@@ -2851,8 +2894,13 @@ function BaselineImportDetails({ aiImport }: { aiImport: AiImportRecord }) {
   return (
     <div className="baseline-meta">
       <div className="baseline-meta__row">
-        <BaselineMetaChip label="配置分支" value={aiImport.baseline_branch || '-'} />
-        {metadata ? <BaselineMetaChip label="实际分支" value={metadata.actual_branch} tone={branchMismatch ? 'warning' : undefined} /> : null}
+        {branchMismatch ? (
+          <Tooltip title={`AI 报告填写的实际分支是 ${metadata?.actual_branch}，与批次配置的 ${aiImport.baseline_branch} 不一致`}>
+            <span><BaselineMetaChip label="分析分支" value={analyzedBranch} tone="warning" /></span>
+          </Tooltip>
+        ) : (
+          <BaselineMetaChip label="分析分支" value={analyzedBranch} />
+        )}
         <BaselineMetaChip label="模型" value={currentModelName ?? aiImport.ai_model ?? '-'} />
         <BaselineMetaChip label="分析时间" value={aiImport.analyzed_at ? new Date(aiImport.analyzed_at).toLocaleString() : '-'} />
       </div>
@@ -2918,62 +2966,74 @@ function DistributionCard({ title, items, total }: { title: string; items: Distr
 }
 
 /** 看板分组卡片可下钻的维度，同时也是评审列表页的 URL 筛选参数名。 */
-type PeopleFilterKey = 'owner' | 'requirementHandler' | 'testHandler'
+type GroupFilterKey = 'owner' | 'requirementHandler' | 'testHandler' | 'status'
 
-function GroupedProgress({ title, rows, batchId, filterKey, note }: { title: string; rows: DashboardGroup[]; batchId: string; filterKey: PeopleFilterKey; note?: string }) {
-  const navigate = useNavigate()
+/**
+ * 分组进度列表。
+ *
+ * 这里刻意不用 Table：五列固定宽度加起来 680px，而两列布局下卡片只有 400 出头，
+ * 每张卡都会挂一条横向滚动条。改成 CSS Grid 的紧凑列表后列宽随卡片伸缩，
+ * 整行还能直接做成链接（原来是 tr 上挂 onClick，键盘用户只能摸到名称那一个链接）。
+ */
+function GroupedProgress({ title, rows, batchId, filterKey, note }: { title: string; rows: DashboardGroup[]; batchId: string; filterKey: GroupFilterKey; note?: string }) {
   const reviewListPath = (name: string) => {
     const search = new URLSearchParams([[filterKey, name]]).toString()
     return `/batches/${batchId}/reviews?${search}`
   }
 
   return (
-    <Card className="dashboard-card" title={<div className="dashboard-card-heading">{title}{note ? <Text type="secondary" className="dashboard-card-note">{note}</Text> : null}</div>}>
-      <Table
-        size="small"
-        rowKey="name"
-        pagination={false}
-        scroll={{ x: 680 }}
-        dataSource={rows}
-        onRow={(row) => ({
-          className: 'dashboard-group-row',
-          onClick: (event) => {
-            if (event.target instanceof Element && event.target.closest('a')) return
-            navigate(reviewListPath(row.name))
-          },
-        })}
-        columns={[
-          {
-            title: '名称',
-            dataIndex: 'name',
-            width: 180,
-            render: (name: string) => <Link className="dashboard-group-link" to={reviewListPath(name)} aria-label={`查看${name}的评审列表`}>{name}</Link>,
-          },
-          { title: '总数', dataIndex: 'total', width: 72 },
-          {
-            title: 'AI 分析进度',
-            width: 170,
-            render: (_value, row: DashboardGroup) => (
-              <div className="dashboard-progress-cell">
-                <Progress percent={percentage(row.aiDone, row.total)} showInfo={false} strokeColor="#2563eb" size="small" />
-                <Text type="secondary">{row.aiDone} / {row.total}</Text>
-              </div>
-            ),
-          },
-          {
-            title: '人工确认进度',
-            width: 170,
-            render: (_value, row: DashboardGroup) => (
-              <div className="dashboard-progress-cell">
-                <Progress percent={percentage(row.reviewed, row.aiDone)} showInfo={false} strokeColor="#16a34a" size="small" />
-                <Text type="secondary">{row.reviewed} / {row.aiDone}</Text>
-              </div>
-            ),
-          },
-          { title: '待处理', width: 84, render: (_value, row: DashboardGroup) => row.pendingAi + row.pendingReview },
-        ]}
-      />
+    <Card
+      className="dashboard-card dashboard-group-card"
+      title={<div className="dashboard-card-heading">{title}{note ? <Text type="secondary" className="dashboard-card-note">{note}</Text> : null}</div>}
+      extra={rows.length ? <Text type="secondary" className="dashboard-card-note">共 {rows.length} 项</Text> : null}
+    >
+      {rows.length === 0 ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />
+      ) : (
+        <div className="group-list">
+          {/* 表头纯装饰：每行的语义由链接的 aria-label 完整给出，读屏不需要再听一遍列名。 */}
+          <div className="group-list__head" aria-hidden="true">
+            <span>名称</span>
+            <span className="group-list__head-metric">AI 分析</span>
+            <span className="group-list__head-metric">人工确认</span>
+            <span className="group-list__head-pending">待处理</span>
+          </div>
+          <div className="group-list__body">
+            {rows.map((row) => {
+              const pending = row.pendingAi + row.pendingReview
+              return (
+                <Link
+                  key={row.name}
+                  to={reviewListPath(row.name)}
+                  className="group-row"
+                  aria-label={`${row.name}：共 ${row.total} 条，AI 已分析 ${row.aiDone} 条，人工已确认 ${row.reviewed} 条，待处理 ${pending} 条`}
+                >
+                  <span className="group-row__name">
+                    <span className="group-row__label" title={row.name}>{row.name}</span>
+                    <span className="group-row__total">{row.total}</span>
+                  </span>
+                  <GroupMetric done={row.aiDone} total={row.total} color="#2563eb" />
+                  <GroupMetric done={row.reviewed} total={row.aiDone} color="#16a34a" />
+                  <span className={pending > 0 ? 'group-row__pending group-row__pending--open' : 'group-row__pending'}>{pending}</span>
+                </Link>
+              )
+            })}
+          </div>
+        </div>
+      )}
     </Card>
+  )
+}
+
+/** 单个进度指标：一行计数 + 一条细进度条，比 Ant Progress 的默认高度矮一半。 */
+function GroupMetric({ done, total, color }: { done: number; total: number; color: string }) {
+  return (
+    <span className="group-metric">
+      <span className="group-metric__count">{done}/{total}</span>
+      <span className="group-metric__track">
+        <span className="group-metric__fill" style={{ width: `${percentage(done, total)}%`, background: color }} />
+      </span>
+    </span>
   )
 }
 
@@ -2992,6 +3052,7 @@ function buildStats(workspace: BatchWorkspace) {
   const owners = new Map<string, DashboardGroup>()
   const requirementHandlers = new Map<string, DashboardGroup>()
   const testHandlers = new Map<string, DashboardGroup>()
+  const statuses = new Map<string, DashboardGroup>()
 
   resultByStory.forEach((result) => {
     if (result.verdict) aiDistribution[result.verdict] += 1
@@ -3006,6 +3067,8 @@ function buildStats(workspace: BatchWorkspace) {
     splitPeople(story.owners_text).forEach((name) => addGrouped(owners, name, aiDone, reviewed))
     splitPeople(story.requirement_handlers).forEach((name) => addGrouped(requirementHandlers, name, aiDone, reviewed))
     splitPeople(story.test_handlers).forEach((name) => addGrouped(testHandlers, name, aiDone, reviewed))
+    // 状态是单值，不像人员列那样拆分，所以这个维度的合计正好等于需求总数。
+    addGrouped(statuses, storyStatusName(story), aiDone, reviewed)
   })
 
   const sortGroups = (groups: DashboardGroup[]) => groups.sort((a, b) => {
@@ -3027,6 +3090,7 @@ function buildStats(workspace: BatchWorkspace) {
     byOwner: sortGroups([...owners.values()]),
     byRequirementHandler: sortGroups([...requirementHandlers.values()]),
     byTestHandler: sortGroups([...testHandlers.values()]),
+    byStatus: sortGroups([...statuses.values()]),
   }
 }
 

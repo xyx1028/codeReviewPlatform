@@ -52,13 +52,12 @@ describe('inferFieldMapping', () => {
       story_code: '用户故事编码',
       story_name: '用户故事名称',
       owners_text: '负责人',
+      // 旧格式的「所属项目」列仍然认，只是平台侧这个字段现在叫「关联特性」。
       project_name: '所属项目',
-      cloud_name: '所属云',
-      iteration_name: '迭代阶段',
       release_window: '发布窗口',
       source_status: '状态',
     })
-    // 旧格式没有这两列；「所属应用」这一列现在已经不再是任何实体字段的来源。
+    // 旧格式没有这两列；「所属应用」「所属云」「迭代阶段」三列现在都不再是任何实体字段的来源。
     expect(mapping.requirement_handlers).toBeUndefined()
     expect(mapping.test_handlers).toBeUndefined()
   })
@@ -72,10 +71,22 @@ describe('inferFieldMapping', () => {
       requirement_handlers: '需求人员',
       test_handlers: '测试人员',
       project_name: '关联特性',
-      iteration_name: '迭代阶段',
       release_window: '发布窗口',
       source_status: '状态',
     })
+  })
+
+  it('迭代阶段已下线，不再映射到任何实体字段', () => {
+    // 只关注发布窗口。两代导出都有「迭代阶段」列，但它不该再落到实体字段上。
+    expect(inferFieldMapping(['迭代阶段', '迭代', 'tf_iteration'])).toEqual({})
+    expect(Object.values(inferFieldMapping(newHeaders))).not.toContain('迭代阶段')
+    expect(Object.values(inferFieldMapping(legacyHeaders))).not.toContain('迭代阶段')
+  })
+
+  it('所属云已下线，不再映射到任何实体字段', () => {
+    // 需求平台已经没有云维度，旧格式文件里残留的「所属云」列不该再落到实体字段上。
+    expect(inferFieldMapping(['所属云', '云', 'cloud'])).toEqual({})
+    expect(Object.values(inferFieldMapping(legacyHeaders))).not.toContain('所属云')
   })
 
   it('「处理人」不被任何字段认领', () => {
@@ -90,6 +101,13 @@ describe('inferFieldMapping', () => {
     expect(mapping.story_code).toBe('用户故事编码')
     expect(mapping.story_name).toBe('用户故事名称')
     expect(mapping.owners_text).toBe('负责人')
+  })
+
+  it('关联特性反过来优先新格式列名', () => {
+    // 这个字段的平台口径已经跟随新格式改叫「关联特性」，所以两列都在时优先认它，
+    // 旧格式的「所属项目」只是兼容别名。
+    expect(inferFieldMapping(['所属项目', '关联特性']).project_name).toBe('关联特性')
+    expect(inferFieldMapping(['所属项目']).project_name).toBe('所属项目')
   })
 
   it('只导出了字段码行时按字段码兜底', () => {
@@ -127,11 +145,13 @@ describe('parseSourceRows', () => {
       requirement_handlers: '何翘楚（61700）',
       test_handlers: '董驰（62413）',
       project_name: 'Build开发测试 一体化服务（FT-2026-001543）',
-      cloud_name: null,
-      iteration_name: '202609-3（0914-0918）',
       release_window: 'R20260918',
       source_status: '提测完成',
     })
+    // 迭代阶段的原值仍留在 source_data 里，只是不再落到实体字段。
+    expect(stories[0].source_data['迭代阶段']).toBe('202609-3（0914-0918）')
+    expect('iteration_name' in stories[0]).toBe(false)
+    expect('cloud_name' in stories[0]).toBe(false)
     expect(issues.filter((issue) => issue.level === 'error')).toEqual([])
   })
 
@@ -139,8 +159,7 @@ describe('parseSourceRows', () => {
     // 新格式下「开发人员」字段正好映射到同名的「开发人员」列，不该啰嗦成「开发人员（对应列「开发人员」）」。
     const { issues } = parseSourceRows([{ ...row, 关联特性: '', 开发人员: '' }], mapping, 3)
     expect(issues).toContainEqual({ level: 'warning', row: 3, message: '开发人员为空' })
-    // 「所属项目」映射到的是「关联特性」列，必须点出来，否则用户回去翻文件找不到。
-    expect(issues).toContainEqual({ level: 'warning', row: 3, message: '所属项目（对应列「关联特性」）为空' })
+    expect(issues).toContainEqual({ level: 'warning', row: 3, message: '关联特性为空' })
     expect(issues.some((issue) => issue.message.includes('应用'))).toBe(false)
   })
 
@@ -148,13 +167,13 @@ describe('parseSourceRows', () => {
     const legacyMapping = inferFieldMapping(legacyHeaders)
     const { issues } = parseSourceRows([{ 用户故事编码: 'PRJ-1', 用户故事名称: 'n', 负责人: '' }], legacyMapping)
     expect(issues).toContainEqual({ level: 'warning', row: 2, message: '开发人员（对应列「负责人」）为空' })
-    expect(issues).toContainEqual({ level: 'warning', row: 2, message: '所属项目为空' })
+    expect(issues).toContainEqual({ level: 'warning', row: 2, message: '关联特性（对应列「所属项目」）为空' })
   })
 
   it('字段完全没映射时提示说清楚是未映射', () => {
     const { issues } = parseSourceRows([{ 名称: 'n', 编码: 'US-1' }], { story_code: '编码', story_name: '名称' }, 3)
     expect(issues).toContainEqual({ level: 'warning', row: 3, message: '开发人员（未映射任何 Excel 列）为空' })
-    expect(issues).toContainEqual({ level: 'warning', row: 3, message: '所属项目（未映射任何 Excel 列）为空' })
+    expect(issues).toContainEqual({ level: 'warning', row: 3, message: '关联特性（未映射任何 Excel 列）为空' })
   })
 
   it('行号按第一条数据的真实 Excel 行号起算', () => {
@@ -182,9 +201,9 @@ describe('parseSourceRows', () => {
       requirement_handlers: null,
       test_handlers: null,
       project_name: '灵基AIOS项目',
-      cloud_name: '平台公共',
     })
-    // 「所属应用」的值仍然留在 source_data 里，只是不再落到任何实体字段。
+    // 「所属应用」「所属云」的值仍然留在 source_data 里，只是不再落到任何实体字段。
     expect(stories[0].source_data['所属应用']).toBe('智能体')
+    expect(stories[0].source_data['所属云']).toBe('平台公共')
   })
 })
