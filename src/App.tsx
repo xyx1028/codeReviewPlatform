@@ -157,6 +157,12 @@ function buildWeekCode(parts: WeekCodeParts) {
   return `${year}${pad2(month)}${pad2(day)}`
 }
 
+// 发布周期默认值：当天。每次打开弹窗时重新计算，避免页面长时间不刷新导致跨天后仍是旧日期。
+function getTodayWeekCodeParts(): WeekCodeParts {
+  const today = new Date()
+  return { year: today.getFullYear(), month: today.getMonth() + 1, day: today.getDate() }
+}
+
 function WeekCodeSelect({
   value,
   onChange,
@@ -1104,7 +1110,21 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
 
   return (
     <Space direction="vertical" size="large" className="page-stack">
-      <PageTitle title="评审列表" extra={canCreateBatch ? <Button type="primary" onClick={() => setOpen(true)}>创建代码评审</Button> : null} />
+      <PageTitle
+        title="评审列表"
+        extra={canCreateBatch ? (
+          <Button
+            type="primary"
+            onClick={() => {
+              form.resetFields()
+              form.setFieldValue('week_code_parts', getTodayWeekCodeParts())
+              setOpen(true)
+            }}
+          >
+            创建代码评审
+          </Button>
+        ) : null}
+      />
       <Table
         rowKey="id"
         loading={batchesQuery.isLoading}
@@ -1116,6 +1136,7 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
         <Form
           form={form}
           layout="vertical"
+          initialValues={{ week_code_parts: getTodayWeekCodeParts() }}
           onFinish={({ week_code_parts, ...rest }) => {
             const weekCode = buildWeekCode(week_code_parts ?? {})
             if (!weekCode) return
@@ -1129,7 +1150,7 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
             name="week_code_parts"
             label="发布周期"
             required
-            extra="选择年、月、日，自动拼接成 20260918 这种格式"
+            extra="默认当天，可手动调整；年、月、日会自动拼接成 20260918 这种格式"
             rules={[
               {
                 validator: async (_rule, value?: WeekCodeParts) => {
