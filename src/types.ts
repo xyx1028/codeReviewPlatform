@@ -34,6 +34,13 @@ export interface AdminUserListItem {
   email: string
   display_name: string | null
   role: UserRole
+  /**
+   * 邮箱验证时间，null 表示注册后一直没点验证邮件、当前无法登录。
+   * 注意 user_profile 行在注册瞬间就由触发器建好了，所以「列表里有这个人」不代表能登录。
+   */
+  email_confirmed_at: string | null
+  /** 最近一次登录时间，null 表示从未成功登录过。 */
+  last_sign_in_at: string | null
   created_at: string
   updated_at: string
 }

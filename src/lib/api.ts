@@ -159,33 +159,81 @@ const authErrorMessages: Record<string, string> = {
   signup_disabled: '当前未开放注册，请联系管理员创建账号。',
   email_address_invalid: '邮箱地址无效，请检查后重试。',
   email_address_not_authorized: '该邮箱不在允许注册的范围内，请联系管理员。',
+  email_address_already_confirmed: '该邮箱已完成验证，直接登录即可。',
 }
 
-function authErrorMessage(error: unknown): string {
+/**
+ * 带错误码的认证异常。
+ *
+ * 登录页要靠 `code === 'email_not_confirmed'` 决定是否亮出「重新发送验证邮件」，
+ * 所以不能只把翻译后的文案抛出去 —— 那样调用方只能去匹配中文字符串。
+ */
+export class AuthActionError extends Error {
+  readonly code: string
+
+  constructor(message: string, code: string) {
+    super(message)
+    this.name = 'AuthActionError'
+    this.code = code
+  }
+}
+
+function toAuthError(error: unknown): AuthActionError {
   const fallback = error instanceof Error ? error.message : '操作失败，请稍后重试'
-  const code = typeof error === 'object' && error !== null && 'code' in error
+  const rawCode = typeof error === 'object' && error !== null && 'code' in error
     ? String((error as { code?: unknown }).code ?? '')
     : ''
-  if (authErrorMessages[code]) return authErrorMessages[code]
-  // 老版本 GoTrue 只给英文文案、不给错误码，按关键词兜底。
   const normalized = fallback.toLowerCase()
-  if (normalized.includes('email rate limit exceeded')) return authErrorMessages.over_email_send_rate_limit
-  if (normalized.includes('already registered')) return authErrorMessages.user_already_exists
-  if (normalized.includes('invalid login credentials')) return authErrorMessages.invalid_credentials
-  if (normalized.includes('email not confirmed')) return authErrorMessages.email_not_confirmed
-  return fallback
+  // 老版本 GoTrue 只给英文文案、不给错误码，按关键词兜底。
+  const code = rawCode || (
+    normalized.includes('email rate limit exceeded') ? 'over_email_send_rate_limit'
+      : normalized.includes('already registered') ? 'user_already_exists'
+        : normalized.includes('invalid login credentials') ? 'invalid_credentials'
+          : normalized.includes('email not confirmed') ? 'email_not_confirmed'
+            : normalized.includes('already confirmed') ? 'email_address_already_confirmed'
+              : ''
+  )
+  // 重发冷却和「额度用完」共用 over_email_send_rate_limit，但处置方式完全不同（等几十秒 vs 等一小时），
+  // GoTrue 只在文案里给出剩余秒数，所以这里优先按秒数还原提示。
+  const cooldown = /after (\d+) seconds?/.exec(normalized)
+  if (cooldown) return new AuthActionError(`操作过于频繁，请 ${cooldown[1]} 秒后再试。`, code)
+  return new AuthActionError(authErrorMessages[code] ?? fallback, code)
+}
+
+export interface SignUpResult {
+  /**
+   * 该邮箱之前就注册过。
+   *
+   * GoTrue 为了防账号枚举，对已存在的邮箱不报错、照常返回成功，只把 identities 清空作为区分，
+   * 所以这里只能靠 identities 判断。注意它无法区分「注册过但没验证」和「注册过且已验证」，
+   * 前者 signUp 本身会重发验证邮件，后者什么都不发 —— 文案必须同时覆盖这两种可能。
+   */
+  alreadyRegistered: boolean
+  /** 还需要点验证邮件才能登录（关掉邮箱验证时 signUp 直接给 session，这里就是 false）。 */
+  needsEmailConfirmation: boolean
 }
 
 export async function signIn(email: string, password: string) {
   const client = requireSupabase()
   const { error } = await client.auth.signInWithPassword({ email, password })
-  if (error) throw new Error(authErrorMessage(error))
+  if (error) throw toAuthError(error)
 }
 
-export async function signUp(email: string, password: string) {
+export async function signUp(email: string, password: string): Promise<SignUpResult> {
   const client = requireSupabase()
-  const { error } = await client.auth.signUp({ email, password })
-  if (error) throw new Error(authErrorMessage(error))
+  const { data, error } = await client.auth.signUp({ email, password })
+  if (error) throw toAuthError(error)
+  return {
+    alreadyRegistered: (data.user?.identities?.length ?? 0) === 0,
+    needsEmailConfirmation: !data.session,
+  }
+}
+
+/** 重发注册验证邮件。GoTrue 侧有 60 秒冷却，超过会抛 over_email_send_rate_limit。 */
+export async function resendSignUpEmail(email: string) {
+  const client = requireSupabase()
+  const { error } = await client.auth.resend({ type: 'signup', email })
+  if (error) throw toAuthError(error)
 }
 
 export async function signOut() {

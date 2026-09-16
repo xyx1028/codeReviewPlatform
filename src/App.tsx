@@ -44,6 +44,7 @@ import {
   adminSetModelEnabled,
   adminTestModelConfig,
   adminUpdateModelConfig,
+  AuthActionError,
   claimInitialAdmin,
   completeBatch,
   consumeWechatAuthError,
@@ -74,6 +75,7 @@ import {
   saveHumanReview,
   setBatchDefaultBranch,
   setBatchModel,
+  resendSignUpEmail,
   signIn,
   signOut,
   signUp,
@@ -317,18 +319,79 @@ function AuthPageLayout({
   )
 }
 
+/**
+ * 重发验证邮件的按钮。
+ *
+ * GoTrue 对重发有 60 秒冷却，前端同步一个倒计时：既挡住连点（连点只会换来一串报错），
+ * 也让用户知道还要等多久，而不是对着一个「点了没反应」的按钮猜。
+ */
+function ResendConfirmationButton({ email, initialCooldown = 0, block }: { email: string; initialCooldown?: number; block?: boolean }) {
+  const { message } = AntApp.useApp()
+  const [seconds, setSeconds] = useState(initialCooldown)
+
+  useEffect(() => {
+    if (seconds <= 0) return
+    const timer = window.setTimeout(() => setSeconds((value) => value - 1), 1000)
+    return () => window.clearTimeout(timer)
+  }, [seconds])
+
+  const mutation = useMutation({
+    mutationFn: () => resendSignUpEmail(email),
+    onSuccess: () => {
+      message.success('验证邮件已重新发送，请查收（记得看一下垃圾邮件箱）')
+      setSeconds(60)
+    },
+    onError: (error) => message.error(error.message),
+  })
+
+  return (
+    <Button
+      block={block}
+      disabled={seconds > 0}
+      loading={mutation.isPending}
+      onClick={() => mutation.mutate()}
+    >
+      {seconds > 0 ? `重新发送验证邮件（${seconds}s）` : '重新发送验证邮件'}
+    </Button>
+  )
+}
+
 function LoginPage() {
   const [wechatError] = useState(consumeWechatAuthError)
   const { message } = AntApp.useApp()
+  // 只有确认是「邮箱没验证」才亮重发入口：密码错、账号不存在等情况给重发按钮属于误导。
+  const [unconfirmedEmail, setUnconfirmedEmail] = useState<string | null>(null)
   const mutation = useMutation({
     mutationFn: (values: { email: string; password: string }) => signIn(values.email, values.password),
-    onSuccess: () => message.success('登录成功'),
-    onError: (error) => message.error(error.message),
+    onSuccess: () => {
+      setUnconfirmedEmail(null)
+      message.success('登录成功')
+    },
+    onError: (error, values) => {
+      message.error(error.message)
+      setUnconfirmedEmail(error instanceof AuthActionError && error.code === 'email_not_confirmed' ? values.email : null)
+    },
   })
 
   return (
     <AuthPageLayout title="欢迎登录" description="使用你的邮箱账号进入评审工作台">
       {wechatError ? <Alert className="auth-alert" type="error" showIcon title={wechatError} /> : null}
+      {unconfirmedEmail ? (
+        <Alert
+          className="auth-alert"
+          type="warning"
+          showIcon
+          title="邮箱还没验证"
+          description={(
+            <div className="auth-alert-body">
+              <Text type="secondary">
+                验证邮件发到了 {unconfirmedEmail}，链接 24 小时内有效。没收到就翻一下垃圾邮件箱，或者重新发一封。
+              </Text>
+              <ResendConfirmationButton email={unconfirmedEmail} />
+            </div>
+          )}
+        />
+      ) : null}
       <Form layout="vertical" requiredMark={false} onFinish={(values) => mutation.mutate(values)}>
         <Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email', message: '请输入有效邮箱' }]}>
           <Input size="large" autoComplete="email" placeholder="name@example.com" />
@@ -362,14 +425,50 @@ function LoginPage() {
 function RegisterPage() {
   const { message } = AntApp.useApp()
   const navigate = useNavigate()
+  /**
+   * 注册成功后停在结果页而不是立刻跳登录页。
+   *
+   * 原来是弹一条 toast 然后 replace 到 /login，提示三秒就消失，用户没记住要去收邮件、
+   * 更没有重发的入口，邮件一丢就只能靠「再注册一次」自救。
+   */
+  const [result, setResult] = useState<{ email: string; alreadyRegistered: boolean } | null>(null)
   const mutation = useMutation({
     mutationFn: (values: { email: string; password: string; confirmPassword: string }) => signUp(values.email, values.password),
-    onSuccess: () => {
-      message.success('注册成功，请按邮件提示完成验证后登录')
-      navigate('/login', { replace: true })
+    onSuccess: (data, values) => {
+      // 关掉邮箱验证时 signUp 直接返回 session，这时没有邮件要等，按老路径跳走。
+      if (!data.needsEmailConfirmation) {
+        message.success('注册成功')
+        navigate('/login', { replace: true })
+        return
+      }
+      setResult({ email: values.email, alreadyRegistered: data.alreadyRegistered })
     },
     onError: (error) => message.error(error.message),
   })
+
+  if (result) {
+    return (
+      <AuthPageLayout
+        title={result.alreadyRegistered ? '这个邮箱已注册过' : '验证邮件已发送'}
+        description={result.alreadyRegistered ? '按下面的说明处理即可' : '完成邮箱验证后就能登录了'}
+      >
+        <Alert
+          className="auth-alert"
+          type={result.alreadyRegistered ? 'warning' : 'success'}
+          showIcon
+          title={result.email}
+          description={result.alreadyRegistered
+            ? '如果当时没完成验证，我们已经重新发了一封验证邮件；如果早就验证过了，直接返回登录即可。'
+            : '点开邮件里的验证链接即可完成注册，链接 24 小时内有效。没收到先翻一下垃圾邮件箱。'}
+        />
+        <ResendConfirmationButton email={result.email} initialCooldown={60} block />
+        <div className="auth-switch">
+          <Text type="secondary">验证完成后</Text>
+          <Link to="/login">返回登录</Link>
+        </div>
+      </AuthPageLayout>
+    )
+  }
 
   return (
     <AuthPageLayout title="创建账号" description="注册邮箱账号，开始使用代码一致性评审平台">
@@ -866,6 +965,25 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
       render: (value: string | null, record) => getUserDisplayName(value, record.email),
     },
     {
+      title: '邮箱状态',
+      dataIndex: 'email_confirmed_at',
+      width: 150,
+      filters: [
+        { text: '待验证', value: 'pending' },
+        { text: '已验证', value: 'confirmed' },
+      ],
+      onFilter: (value, record) => (value === 'pending' ? !record.email_confirmed_at : Boolean(record.email_confirmed_at)),
+      render: (confirmedAt: string | null, record) => (confirmedAt ? (
+        <Tooltip title={`验证于 ${new Date(confirmedAt).toLocaleString()}${record.last_sign_in_at ? `，最近登录 ${new Date(record.last_sign_in_at).toLocaleString()}` : '，从未登录'}`}>
+          <Tag color="green">已验证</Tag>
+        </Tooltip>
+      ) : (
+        <Tooltip title="注册后没点验证邮件，当前无法登录。可让他在登录页用「重新发送验证邮件」拿一封新的。">
+          <Tag color="orange">待验证</Tag>
+        </Tooltip>
+      )),
+    },
+    {
       title: '角色',
       dataIndex: 'role',
       width: 180,
@@ -882,9 +1000,19 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
     { title: '创建时间', dataIndex: 'created_at', width: 200, render: (value) => new Date(value).toLocaleString() },
   ]
 
+  const pendingCount = usersQuery.data?.filter((user) => !user.email_confirmed_at).length ?? 0
+
   return (
     <Space direction="vertical" size="large" className="page-stack">
       <PageTitle title="用户管理" />
+      {pendingCount > 0 ? (
+        <Alert
+          type="warning"
+          showIcon
+          title={`有 ${pendingCount} 个账号还没验证邮箱`}
+          description="这些账号注册流程没走完，暂时登录不了。让本人在登录页点一次「重新发送验证邮件」即可；实在收不到邮件（企业邮箱网关拦截等）再去 Supabase 后台手动确认。"
+        />
+      ) : null}
       <Table rowKey="id" loading={usersQuery.isLoading} columns={columns} dataSource={usersQuery.data ?? []} />
     </Space>
   )
