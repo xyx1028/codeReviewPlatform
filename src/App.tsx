@@ -1150,7 +1150,8 @@ function SourcePreview({ parsed }: { parsed: { stories: SourceStoryInput[]; issu
               { title: '编码', dataIndex: 'story_code' },
               { title: '名称', dataIndex: 'story_name' },
               { title: '负责人', dataIndex: 'owners_text' },
-              { title: '应用', dataIndex: 'application_name' },
+              { title: '需求人员', dataIndex: 'requirement_handlers' },
+              { title: '测试人员', dataIndex: 'test_handlers' },
             ]}
           />
         </Card>
@@ -1879,31 +1880,26 @@ function ReviewListPage({ batchId }: { batchId: string }) {
   const location = useLocation()
   const navigate = useNavigate()
   const workspaceQuery = useBatchWorkspace(batchId)
-  const ownerOptions = useMemo(() => {
-    const names = new Set<string>()
-    workspaceQuery.data?.stories.forEach((story) => {
-      splitOwners(story.owners_text).forEach((name) => names.add(name))
-    })
-    return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN')).map((name) => ({ value: name, label: name }))
-  }, [workspaceQuery.data])
-  const applicationOptions = useMemo(() => {
-    const names = new Set<string>()
-    workspaceQuery.data?.stories.forEach((story) => names.add(applicationGroupName(story)))
-    return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN')).map((name) => ({ value: name, label: name }))
-  }, [workspaceQuery.data])
+  const ownerOptions = useMemo(() => peopleFilterOptions(workspaceQuery.data?.stories, (story) => story.owners_text), [workspaceQuery.data])
+  const requirementHandlerOptions = useMemo(() => peopleFilterOptions(workspaceQuery.data?.stories, (story) => story.requirement_handlers), [workspaceQuery.data])
+  const testHandlerOptions = useMemo(() => peopleFilterOptions(workspaceQuery.data?.stories, (story) => story.test_handlers), [workspaceQuery.data])
   const getSingleSearchParam = (name: string) => {
     const values = new URLSearchParams(location.search).getAll(name)
     return values.length === 1 && values[0] ? values[0] : undefined
   }
   const verdictParam = getSingleSearchParam('verdict')
   const ownerParam = getSingleSearchParam('owner')
-  const applicationParam = getSingleSearchParam('application')
+  const requirementHandlerParam = getSingleSearchParam('requirementHandler')
+  const testHandlerParam = getSingleSearchParam('testHandler')
   const verdict = verdictParam && (
     verdictParam === 'UNANALYZED' || aiVerdictOptions.some((option) => option.value === verdictParam)
   ) ? verdictParam as AiVerdict | 'UNANALYZED' : undefined
   const owner = ownerParam && ownerOptions.some((option) => option.value === ownerParam) ? ownerParam : undefined
-  const application = applicationParam && applicationOptions.some((option) => option.value === applicationParam) ? applicationParam : undefined
-  const updateFilters = (changes: Partial<Record<'verdict' | 'owner' | 'application', string | undefined>>) => {
+  const requirementHandler = requirementHandlerParam
+    && requirementHandlerOptions.some((option) => option.value === requirementHandlerParam) ? requirementHandlerParam : undefined
+  const testHandler = testHandlerParam
+    && testHandlerOptions.some((option) => option.value === testHandlerParam) ? testHandlerParam : undefined
+  const updateFilters = (changes: Partial<Record<PeopleFilterKey | 'verdict', string | undefined>>) => {
     const searchParams = new URLSearchParams(location.search)
     Object.entries(changes).forEach(([name, value]) => {
       if (value) searchParams.set(name, value)
@@ -1969,20 +1965,32 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       filteredValue: owner ? [owner] : null,
       filterSearch: true,
       filterMultiple: false,
-      onFilter: (value, row) => splitOwners(row.story.owners_text).includes(String(value)),
-      render: (value) => <Space size={[4, 4]} wrap>{splitOwners(value).map((name) => <Tag key={name}>{name}</Tag>)}</Space>,
+      onFilter: (value, row) => splitPeople(row.story.owners_text).includes(String(value)),
+      render: (value) => <PeopleTags value={value as string | null} />,
     },
     {
-      title: '应用',
-      key: 'application',
-      dataIndex: ['story', 'application_name'],
-      width: 120,
-      filters: applicationOptions.map((option) => ({ text: option.label, value: option.value })),
-      filteredValue: application ? [application] : null,
+      title: '需求人员',
+      key: 'requirementHandler',
+      dataIndex: ['story', 'requirement_handlers'],
+      width: 170,
+      filters: requirementHandlerOptions.map((option) => ({ text: option.label, value: option.value })),
+      filteredValue: requirementHandler ? [requirementHandler] : null,
       filterSearch: true,
       filterMultiple: false,
-      onFilter: (value, row) => applicationGroupName(row.story) === String(value),
-      render: (_value, row) => applicationGroupName(row.story),
+      onFilter: (value, row) => splitPeople(row.story.requirement_handlers).includes(String(value)),
+      render: (value) => <PeopleTags value={value as string | null} />,
+    },
+    {
+      title: '测试人员',
+      key: 'testHandler',
+      dataIndex: ['story', 'test_handlers'],
+      width: 170,
+      filters: testHandlerOptions.map((option) => ({ text: option.label, value: option.value })),
+      filteredValue: testHandler ? [testHandler] : null,
+      filterSearch: true,
+      filterMultiple: false,
+      onFilter: (value, row) => splitPeople(row.story.test_handlers).includes(String(value)),
+      render: (value) => <PeopleTags value={value as string | null} />,
     },
     {
       title: 'AI判断',
@@ -2034,7 +2042,7 @@ function ReviewListPage({ batchId }: { batchId: string }) {
             columns={columns}
             dataSource={rows}
             size="middle"
-            scroll={{ x: 1120 }}
+            scroll={{ x: 1370 }}
             pagination={{ pageSize: 20, showSizeChanger: false, showTotal: (total) => `共 ${total} 条` }}
             onChange={(_pagination, filters, _sorter, extra) => {
               if (extra.action !== 'filter') return
@@ -2046,7 +2054,8 @@ function ReviewListPage({ batchId }: { batchId: string }) {
               setLocalColumnFilters({ storyCode, storyName, evidence, humanStatus })
               updateFilters({
                 owner: normalize(filters.owner)?.[0],
-                application: normalize(filters.application)?.[0],
+                requirementHandler: normalize(filters.requirementHandler)?.[0],
+                testHandler: normalize(filters.testHandler)?.[0],
                 verdict: normalize(filters.verdict)?.[0],
               })
             }}
@@ -2322,8 +2331,9 @@ function DashboardPage({ batchId, canManage }: { batchId: string; canManage: boo
       </Row>
 
       <Row gutter={[12, 12]}>
-        <Col xs={24} xl={12}><GroupedProgress title="按负责人统计" rows={stats.byOwner} batchId={batchId} filterKey="owner" note="协作需求按负责人分别计入" /></Col>
-        <Col xs={24} xl={12}><GroupedProgress title="按应用统计" rows={stats.byApplication} batchId={batchId} filterKey="application" /></Col>
+        <Col xs={24} xl={8}><GroupedProgress title="按负责人统计" rows={stats.byOwner} batchId={batchId} filterKey="owner" note="协作需求按负责人分别计入" /></Col>
+        <Col xs={24} xl={8}><GroupedProgress title="按需求人员统计" rows={stats.byRequirementHandler} batchId={batchId} filterKey="requirementHandler" /></Col>
+        <Col xs={24} xl={8}><GroupedProgress title="按测试人员统计" rows={stats.byTestHandler} batchId={batchId} filterKey="testHandler" /></Col>
       </Row>
     </div>
   )
@@ -2539,8 +2549,9 @@ function OperationLogPage({ scope, isAdmin = false }: { scope: OperationLogScope
 function StoryCard({ story }: { story: ReviewStory }) {
   const metadata = [
     { label: '负责人', value: story.owners_text },
+    { label: '需求人员', value: story.requirement_handlers },
+    { label: '测试人员', value: story.test_handlers },
     { label: '项目', value: story.project_name },
-    { label: '应用', value: story.application_name },
     { label: '所属云', value: story.cloud_name },
     { label: '迭代', value: story.iteration_name },
     { label: '发布窗口', value: story.release_window },
@@ -2685,13 +2696,25 @@ type DistributionItem = {
   to?: string
 }
 
-function splitOwners(ownersText: string) {
-  const owners = ownersText.split(/[，,、；;]/).map((name) => name.trim()).filter(Boolean)
-  return [...new Set(owners.length ? owners : ['未分配'])]
+/**
+ * 人员列可能是「张烨,肖洋,尹昱杰」这种多人串，列表筛选和看板分组都要按单人拆。
+ * 拆不出任何人时归到「未分配」，这样看板不会漏掉这批需求。
+ * 需求人员 / 测试人员在历史批次里是 null，同样落到「未分配」。
+ */
+function splitPeople(peopleText: string | null | undefined) {
+  const people = (peopleText ?? '').split(/[，,、；;]/).map((name) => name.trim()).filter(Boolean)
+  return [...new Set(people.length ? people : ['未分配'])]
 }
 
-function applicationGroupName(story: ReviewStory) {
-  return story.application_name || '未填写应用'
+function PeopleTags({ value }: { value: string | null }) {
+  return <Space size={[4, 4]} wrap>{splitPeople(value).map((name) => <Tag key={name}>{name}</Tag>)}</Space>
+}
+
+/** 把某个人员列拆成去重排序后的列筛选项。三个人员维度共用一套逻辑。 */
+function peopleFilterOptions(stories: ReviewStory[] | undefined, pick: (story: ReviewStory) => string | null) {
+  const names = new Set<string>()
+  stories?.forEach((story) => splitPeople(pick(story)).forEach((name) => names.add(name)))
+  return [...names].sort((a, b) => a.localeCompare(b, 'zh-CN')).map((name) => ({ value: name, label: name }))
 }
 
 function BaselineMetaChip({ label, value, tone, mono = false }: { label: string; value: string; tone?: 'warning'; mono?: boolean }) {
@@ -2796,7 +2819,10 @@ function DistributionCard({ title, items, total }: { title: string; items: Distr
   )
 }
 
-function GroupedProgress({ title, rows, batchId, filterKey, note }: { title: string; rows: DashboardGroup[]; batchId: string; filterKey: 'owner' | 'application'; note?: string }) {
+/** 看板分组卡片可下钻的维度，同时也是评审列表页的 URL 筛选参数名。 */
+type PeopleFilterKey = 'owner' | 'requirementHandler' | 'testHandler'
+
+function GroupedProgress({ title, rows, batchId, filterKey, note }: { title: string; rows: DashboardGroup[]; batchId: string; filterKey: PeopleFilterKey; note?: string }) {
   const navigate = useNavigate()
   const reviewListPath = (name: string) => {
     const search = new URLSearchParams([[filterKey, name]]).toString()
@@ -2866,7 +2892,8 @@ function buildStats(workspace: BatchWorkspace) {
   const aiDistribution = { IMPLEMENTED: 0, PARTIAL: 0, NOT_IMPLEMENTED: 0, UNCERTAIN: 0 }
   const humanDistribution = { CORRECT: 0, PARTIALLY_CORRECT: 0, INCORRECT: 0, NEED_DISCUSSION: 0 }
   const owners = new Map<string, DashboardGroup>()
-  const applications = new Map<string, DashboardGroup>()
+  const requirementHandlers = new Map<string, DashboardGroup>()
+  const testHandlers = new Map<string, DashboardGroup>()
 
   resultByStory.forEach((result) => {
     if (result.verdict) aiDistribution[result.verdict] += 1
@@ -2876,8 +2903,11 @@ function buildStats(workspace: BatchWorkspace) {
   workspace.stories.forEach((story) => {
     const aiDone = resultByStory.has(story.id)
     const reviewed = latestReviewByStory.has(story.id)
-    splitOwners(story.owners_text).forEach((owner) => addGrouped(owners, owner, aiDone, reviewed))
-    addGrouped(applications, applicationGroupName(story), aiDone, reviewed)
+    // 三个维度都按单人拆分计入，所以协作需求会在每个参与人名下各计一次，
+    // 各维度的合计会大于需求总数。
+    splitPeople(story.owners_text).forEach((name) => addGrouped(owners, name, aiDone, reviewed))
+    splitPeople(story.requirement_handlers).forEach((name) => addGrouped(requirementHandlers, name, aiDone, reviewed))
+    splitPeople(story.test_handlers).forEach((name) => addGrouped(testHandlers, name, aiDone, reviewed))
   })
 
   const sortGroups = (groups: DashboardGroup[]) => groups.sort((a, b) => {
@@ -2897,7 +2927,8 @@ function buildStats(workspace: BatchWorkspace) {
     aiDistribution,
     humanDistribution,
     byOwner: sortGroups([...owners.values()]),
-    byApplication: sortGroups([...applications.values()]),
+    byRequirementHandler: sortGroups([...requirementHandlers.values()]),
+    byTestHandler: sortGroups([...testHandlers.values()]),
   }
 }
 

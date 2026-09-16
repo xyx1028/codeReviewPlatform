@@ -224,9 +224,18 @@ export interface ReviewStory {
   story_name: string
   description: string | null
   acceptance_criteria: string | null
+  /** 负责人。新版导出映射自「开发人员」，旧版导出映射自「负责人」。 */
   owners_text: string
+  /** 需求人员。新版导出（tf_req_handlers）才有，历史批次为 null。 */
+  requirement_handlers: string | null
+  /** 测试人员。新版导出（tf_test_handlers）才有，历史批次为 null。 */
+  test_handlers: string | null
   project_name: string | null
   cloud_name: string | null
+  /**
+   * @deprecated 新版导出没有应用维度，导入不再写入、前端不再展示。列仅为历史批次保留。
+   * 详见 supabase/migrations/0038_story_requirement_test_handlers.sql。
+   */
   application_name: string | null
   iteration_name: string | null
   release_window: string | null
@@ -344,13 +353,18 @@ export interface BatchOperationLogWithBatch extends BatchOperationLog {
   review_batch: Pick<ReviewBatch, 'id' | 'name' | 'week_code'> | null
 }
 
+/**
+ * 导入时从 Excel 解析出的原始需求。字段集合同时驱动映射 UI（见 excel.ts 的 SourceFieldKey），
+ * 所以这里刻意不再包含 application_name —— 新版导出没有应用列，映射界面也不该给出这一项。
+ */
 export interface SourceStoryInput {
   story_code: string
   story_name: string
   owners_text: string
+  requirement_handlers: string | null
+  test_handlers: string | null
   project_name: string | null
   cloud_name: string | null
-  application_name: string | null
   iteration_name: string | null
   release_window: string | null
   source_status: string | null

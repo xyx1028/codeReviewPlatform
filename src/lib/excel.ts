@@ -15,15 +15,23 @@ import type {
 } from '../types'
 
 
-export const templateVersion = '1.1'
+/**
+ * 1.2 起「需求评审」sheet 去掉了「所属应用」列（新版导出没有应用维度），
+ * 而且「负责人」列的口径从需求人员改成开发人员。两者都会让 1.1 模板回读时
+ * 撞上「原始需求字段被修改」这种误导性报错，所以必须 bump，让用户直接看到
+ * 「不支持的模板版本」并重新下载。
+ */
+export const templateVersion = '1.2'
 
+/** 映射界面的字段顺序与显示名，key 的顺序就是界面上的排列顺序。 */
 export const sourceFieldLabels: Record<SourceFieldKey, string> = {
   story_code: '用户故事编码',
   story_name: '用户故事名称',
-  owners_text: '负责人',
+  owners_text: '负责人（开发人员）',
+  requirement_handlers: '需求人员',
+  test_handlers: '测试人员',
   project_name: '所属项目',
   cloud_name: '所属云',
-  application_name: '所属应用',
   iteration_name: '迭代阶段',
   release_window: '发布窗口',
   source_status: '原始需求状态',
@@ -34,27 +42,27 @@ export const sourceFieldLabels: Record<SourceFieldKey, string> = {
  *
  * 需求平台的导出有两代格式，列名口径不一样，所以同一个字段要挂多个别名：
  * - 旧格式（单表头）：用户故事编码 / 用户故事名称 / 负责人 / 所属项目 / 所属云 / 所属应用
- * - 新格式（双表头，第一行是 gf_*、tf_* 字段码，第二行才是中文名）：编码 / 名称 / 需求人员 / 关联特性
+ * - 新格式（双表头，第一行是 gf_*、tf_* 字段码，第二行才是中文名）：
+ *   编码 / 名称 / 处理人 / 需求人员 / 开发人员 / 测试人员 / 关联特性
  *
  * 新格式的中文名比旧格式短（「编码」而不是「用户故事编码」），所以必须放在旧格式别名后面：
  * 万一某份文件两种列名都在，要优先认更精确的那个。字段码放最后兜底，应付只导出了字段码行的变体。
  *
- * 新格式没有「所属应用」「所属云」这两列，别名里也就不该硬塞——见 application_name 的注释。
+ * 新格式的四个人员列各归各位，互不抢占：
+ * - 开发人员 → owners_text（负责人 = 交付负责人）
+ * - 需求人员 → requirement_handlers
+ * - 测试人员 → test_handlers
+ * - 处理人 是当前流程节点的处理人，会随流程流转而变，不稳定，任何字段都不认它，留给用户手工选。
  */
 const sourceAliases: Record<SourceFieldKey, string[]> = {
   story_code: ['用户故事编码', '需求编号', '故事编码', '编码', 'story_code', 'story code', 'gf_number'],
   story_name: ['用户故事名称', '需求标题', '需求名称', '故事名称', '名称', 'story_name', 'title', 'gf_name'],
-  // 新格式的人员列有四个：需求人员、处理人、开发人员、测试人员。
-  // 「处理人」是当前流程节点的处理人，会随流程流转而变；「需求人员」才是稳定的需求归属人，
-  // 对应旧格式的「负责人」。所以只认前者，「处理人」留给用户手工选。
-  owners_text: ['负责人', '责任人', '需求负责人', '需求人员', 'owner', 'owners', 'tf_req_handlers'],
+  owners_text: ['负责人', '责任人', '需求负责人', '开发人员', 'owner', 'owners', 'tf_dev_handlers'],
+  requirement_handlers: ['需求人员', 'tf_req_handlers'],
+  test_handlers: ['测试人员', 'tf_test_handlers'],
   // 新格式里「关联特性」（FT-xxxx）是需求的上层业务归属，语义上最接近旧格式的「所属项目」。
   project_name: ['所属项目', '项目', '项目名称', '关联特性', 'project', 'tf_subject'],
   cloud_name: ['所属云', '云', 'cloud'],
-  // 新格式没有任何一列表达「应用」。这里刻意不加 fallback：宁可留空让看板显示
-  // 「未填写应用」，也不要把人员列或特性列错认成应用——那会一路污染看板分组、
-  // 列表筛选和送给模型的「所属应用」。
-  application_name: ['所属应用', '应用', '应用名称', 'application'],
   iteration_name: ['迭代阶段', '迭代', 'iteration', 'tf_iteration'],
   release_window: ['发布窗口', '发布时间', 'release', 'tf_release_window'],
   source_status: ['原始需求状态', '状态', '需求状态', 'status'],
@@ -69,7 +77,6 @@ const reviewColumns = [
   '用户故事名称',
   '负责人',
   '所属项目',
-  '所属应用',
   'AI判断',
   '置信度',
   '分析摘要',
@@ -248,9 +255,9 @@ export function parseSourceRows(
     if (!storyCode) issues.push({ level: 'error', row: rowNumber, message: '用户故事编码为空' })
     if (!storyName) issues.push({ level: 'error', row: rowNumber, message: '用户故事名称为空' })
     if (storyCode && seen.has(storyCode)) issues.push({ level: 'error', row: rowNumber, message: `当前文件内重复需求编码：${storyCode}` })
-    if (!ownersText) issues.push({ level: 'warning', row: rowNumber, message: '负责人为空' })
-    if (!cellText(mapped('project_name')) && !cellText(mapped('application_name'))) {
-      issues.push({ level: 'warning', row: rowNumber, message: '项目和应用均为空' })
+    if (!ownersText) issues.push({ level: 'warning', row: rowNumber, message: '负责人（开发人员）为空' })
+    if (!cellText(mapped('project_name'))) {
+      issues.push({ level: 'warning', row: rowNumber, message: '所属项目为空' })
     }
 
     if (!storyCode || !storyName) return
@@ -260,9 +267,10 @@ export function parseSourceRows(
       story_code: storyCode,
       story_name: storyName,
       owners_text: ownersText,
+      requirement_handlers: nullableText(mapped('requirement_handlers')),
+      test_handlers: nullableText(mapped('test_handlers')),
       project_name: nullableText(mapped('project_name')),
       cloud_name: nullableText(mapped('cloud_name')),
-      application_name: nullableText(mapped('application_name')),
       iteration_name: nullableText(mapped('iteration_name')),
       release_window: nullableText(mapped('release_window')),
       source_status: nullableText(mapped('source_status')),
@@ -298,7 +306,6 @@ export async function downloadAiTemplate(batch: ReviewBatch, stories: ReviewStor
       story.story_name,
       story.owners_text,
       story.project_name ?? '',
-      story.application_name ?? '',
       '',
       '',
       '',
