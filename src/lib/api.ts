@@ -242,6 +242,37 @@ export async function signOut() {
   if (error) throw error
 }
 
+/**
+ * 修改当前登录账号的密码。
+ *
+ * GoTrue 的 updateUser 只看会话有效性、不校验原密码，所以这里先用原密码重新登录做一次二次验证，
+ * 避免别人捡到未锁屏的浏览器就能直接改密码。微信-only 账号没有可用的邮箱密码，直接拦掉。
+ */
+export async function changeMyPassword(currentPassword: string, newPassword: string) {
+  const client = requireSupabase()
+  const { data: userData, error: userError } = await client.auth.getUser()
+  if (userError) throw userError
+  const email = userData.user?.email
+  if (!email) throw new Error('未登录')
+  if (email.endsWith('@wechat.invalid')) throw new Error('微信账号没有邮箱密码，请先绑定邮箱后再设置密码')
+
+  const { error: verifyError } = await client.auth.signInWithPassword({ email, password: currentPassword })
+  if (verifyError) {
+    const authError = toAuthError(verifyError)
+    // 这里的凭据错误只可能是原密码填错，邮箱是从会话里取的。
+    throw authError.code === 'invalid_credentials' ? new AuthActionError('当前密码不正确', authError.code) : authError
+  }
+
+  const { error } = await client.auth.updateUser({ password: newPassword })
+  if (error) throw toAuthError(error)
+
+  // 改完密码 GoTrue 不会主动踢掉别的设备，旧密码泄露的场景下那些会话还能继续用，
+  // 所以显式吊销「除当前设备外」的全部 refresh token。这一步失败不影响密码已改成功的事实，
+  // 只把结果回传给界面，让提示文案跟实际状态一致。
+  const { error: revokeError } = await client.auth.signOut({ scope: 'others' })
+  return { otherSessionsRevoked: !revokeError }
+}
+
 export interface WechatBindingStatus {
   configured: boolean
   bound: boolean

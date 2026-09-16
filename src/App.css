@@ -1016,21 +1016,27 @@ a.dashboard-distribution-item:focus-visible {
   box-shadow: 0 8px 18px rgba(22, 119, 255, 0.18);
 }
 
-.profile-login-card .ant-card-body {
-  padding: 28px 32px 32px;
+/* 安全卡片只做一行「说明 + 按钮」，密码表单放进弹窗，页面不再被三个输入框拉长。 */
+.profile-security-card .ant-card-body {
+  padding: 24px 32px;
 }
 
-.profile-login-panel {
-  min-height: 72px;
-  margin-top: 20px;
-  padding: 18px;
-  border: 1px solid #e5edf7;
-  border-radius: 12px;
-  background: #f8fafc;
+.profile-security-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
 }
 
-.profile-login-panel .ant-alert {
-  border-radius: 10px;
+.profile-security-text h4 {
+  margin: 0 0 4px;
+  color: #0f172a;
+}
+
+.profile-security-row .ant-btn {
+  flex: none;
+  min-width: 116px;
+  font-weight: 600;
 }
 
 @media (max-width: 767px) {
@@ -1048,8 +1054,7 @@ a.dashboard-distribution-item:focus-visible {
     border-bottom: 1px solid #dbeafe;
   }
 
-  .profile-editor,
-  .profile-login-card .ant-card-body {
+  .profile-editor {
     padding: 26px 22px;
   }
 
@@ -1062,8 +1067,17 @@ a.dashboard-distribution-item:focus-visible {
     width: 100%;
   }
 
-  .profile-login-panel {
-    padding: 14px;
+  .profile-security-card .ant-card-body {
+    padding: 22px;
+  }
+
+  .profile-security-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .profile-security-row .ant-btn {
+    width: 100%;
   }
 }
 
