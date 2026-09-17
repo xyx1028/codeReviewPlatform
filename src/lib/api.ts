@@ -33,6 +33,7 @@ import type {
   ReviewSkillCatalog,
   ReviewSkillDetail,
   ReviewStory,
+  SkillCatalogLimitsConfig,
   SkillUploadTicket,
   SkillValidationResult,
   SourceStoryInput,
@@ -909,6 +910,34 @@ export async function adminUpdateV4CapabilityPolicy(
 }
 
 // ---------------------------------------------------------------------------
+// V1.8 平台级技能目录容量上限（可配置）
+// ---------------------------------------------------------------------------
+
+/** ADMIN：读取当前平台级技能目录四项容量上限。 */
+export async function adminGetSkillCatalogLimits() {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_get_skill_catalog_limits')
+  return unwrap<SkillCatalogLimitsConfig>({ data, error })
+}
+
+/** ADMIN：更新平台级技能目录四项容量上限；越界由 RPC 以稳定错误码拒绝。仅影响之后新建的批次。 */
+export async function adminUpdateSkillCatalogLimits(input: {
+  catalogBundles: number
+  catalogRenderBytes: number
+  catalogArchiveBytes: number
+  catalogExpandedBytes: number
+}) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_update_skill_catalog_limits', {
+    p_catalog_bundles: input.catalogBundles,
+    p_catalog_render_bytes: input.catalogRenderBytes,
+    p_catalog_archive_bytes: input.catalogArchiveBytes,
+    p_catalog_expanded_bytes: input.catalogExpandedBytes,
+  })
+  return unwrap<SkillCatalogLimitsConfig>({ data, error })
+}
+
+// ---------------------------------------------------------------------------
 // V1.5 真实运行监控台（见 V1.5 方案 §6.7 / §8.1）
 //
 // 权限边界：
@@ -1024,6 +1053,26 @@ export function adminSetReviewSkillEnabled(skillId: string, enabled: boolean) {
     action: 'set-enabled',
     skill_id: skillId,
     enabled,
+  })
+}
+
+/**
+ * 删除技能及其全部版本。
+ *
+ * 服务端会拒绝删除任何**被 Analysis Job 冻结过**的技能（`SKILL_REFERENCED_BY_JOB`）：
+ * `analysis_job_skill_snapshot` 是"那次评审到底给了模型哪些技能"的唯一证据。
+ *
+ * `orphaned_objects > 0` 表示库行已删除但归档对象没删掉。这不是失败——它只影响容量
+ * 水位，不影响正确性，所以调用方提示一下即可，不要重试删除（技能已经不存在了）。
+ */
+export function adminDeleteReviewSkill(skillId: string) {
+  return invokeSkillBundleAdmin<{
+    ok: boolean
+    skill_name: string
+    orphaned_objects: number
+  }>({
+    action: 'delete-skill',
+    skill_id: skillId,
   })
 }
 

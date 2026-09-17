@@ -12,6 +12,7 @@ import {
   Modal,
   Progress,
   Row,
+  Select,
   Space,
   Statistic,
   Table,
@@ -24,14 +25,15 @@ import type { UploadFile } from 'antd/es/upload/interface'
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  adminCreateReviewSkill,
   adminCreateSkillDownloadUrl,
+  adminDeleteReviewSkill,
   adminGetReviewSkill,
   adminListReviewSkills,
   adminPublishSkillVersion,
   adminSetReviewSkillEnabled,
   adminUploadSkillBundle,
 } from '../lib/api'
+import { SkillCreateWizard } from './SkillCreateWizard'
 import type {
   ReviewSkillListItem,
   ReviewSkillStatus,
@@ -41,7 +43,7 @@ import type {
   SkillValidationResult,
 } from '../types'
 
-const { Title, Text, Paragraph } = Typography
+const { Title, Text } = Typography
 
 const STATUS_LABELS: Record<ReviewSkillStatus, { text: string; color: string }> = {
   DRAFT: { text: '草稿', color: 'default' },
@@ -60,7 +62,7 @@ const ROLE_LABELS: Record<SkillFileRole, string> = {
   OTHER: '其他',
 }
 
-function formatBytes(bytes: number | null | undefined): string {
+export function formatBytes(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined) return '—'
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
@@ -105,7 +107,7 @@ function CapacityBar({
 }
 
 /** 服务端解析出来的文件树。展示 hash / MIME / 角色 / 大小，不展示任何文件正文。 */
-function BundleFileTree({ files }: { files: SkillBundleFile[] }) {
+export function BundleFileTree({ files }: { files: SkillBundleFile[] }) {
   return (
     <Table<SkillBundleFile>
       dataSource={files}
@@ -168,10 +170,11 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
   const { message, modal } = AntApp.useApp()
   const queryClient = useQueryClient()
   const [createOpen, setCreateOpen] = useState(false)
+  const [statusFilter, setStatusFilter] = useState<ReviewSkillStatus | 'ALL'>('ALL')
+  const [keyword, setKeyword] = useState('')
   const [publishSkill, setPublishSkill] = useState<ReviewSkillListItem | null>(null)
   const [validation, setValidation] = useState<SkillValidationResult | null>(null)
   const [historySkillId, setHistorySkillId] = useState<string | null>(null)
-  const [createForm] = Form.useForm<{ name: string; display_name: string }>()
   const [publishForm] = Form.useForm<PublishFormValues>()
 
   const catalogQuery = useQuery({
@@ -191,18 +194,6 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
       queryClient.invalidateQueries({ queryKey: ['admin-review-skill', historySkillId] })
     }
   }
-
-  const createMutation = useMutation({
-    mutationFn: (values: { name: string; display_name: string }) =>
-      adminCreateReviewSkill({ name: values.name.trim(), displayName: values.display_name.trim() }),
-    onSuccess: () => {
-      message.success('技能已创建，接下来上传 Bundle ZIP')
-      setCreateOpen(false)
-      createForm.resetFields()
-      invalidate()
-    },
-    onError: (error: Error) => message.error(error.message),
-  })
 
   const uploadMutation = useMutation({
     mutationFn: (input: { skillId: string; file: File }) =>
@@ -239,8 +230,23 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
     onError: (error: Error) => message.error(error.message),
   })
 
-  const enabledMutation = useMutation({
-    mutationFn: (input: { skillId: string; enabled: boolean }) =>
+  const deleteMutation = useMutation({
+    mutationFn: (skillId: string) => adminDeleteReviewSkill(skillId),
+    onSuccess: (result) => {
+      if (result.orphaned_objects > 0) {
+        // 库行已经删了，重试删除没有意义（技能已不存在）。孤儿对象只影响容量水位。
+        message.warning(
+          `已删除 ${result.skill_name}，但有 ${result.orphaned_objects} 个归档对象未能从存储清理，需要运维介入`,
+        )
+      } else {
+        message.success(`已删除 ${result.skill_name}`)
+      }
+      invalidate()
+    },
+    onError: (error: Error) => message.error(error.message),
+  })
+
+  const enabledMutation = useMutation({    mutationFn: (input: { skillId: string; enabled: boolean }) =>
       adminSetReviewSkillEnabled(input.skillId, input.enabled),
     onSuccess: () => {
       message.success('技能状态已更新；只影响之后新建的 Job')
@@ -261,9 +267,20 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
   const limits = catalogQuery.data?.limits
   const capacity = catalogQuery.data?.capacity
   const skills = useMemo(() => catalogQuery.data?.skills ?? [], [catalogQuery.data])
+  const filteredSkills = useMemo(() => {
+    const kw = keyword.trim().toLowerCase()
+    return skills.filter((skill) => {
+      if (statusFilter !== 'ALL' && skill.status !== statusFilter) return false
+      if (kw.length === 0) return true
+      return (
+        skill.name.toLowerCase().includes(kw) ||
+        skill.display_name.toLowerCase().includes(kw)
+      )
+    })
+  }, [skills, statusFilter, keyword])
 
   if (!isAdmin) {
-    return <Alert type="warning" showIcon message="仅管理员可以维护评审技能" />
+    return <Alert type="warning" showIcon message="仅管理员可以维护技能" />
   }
 
   const columns = [
@@ -377,6 +394,39 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
               启用
             </Button>
           ) : null}
+          {row.referenced_by_job ? (
+            <Tooltip
+              title={
+                '这个技能已被至少一个 Analysis Job 冻结，不能删除。' +
+                'Job 的技能快照是「那次评审到底给了模型哪些技能」的唯一证据，' +
+                '删掉源技能等于让历史评审结果失去依据。改用「停用」：它只影响之后新建的 Job。'
+              }
+            >
+              <Button size="small" danger disabled>
+                删 除
+              </Button>
+            </Tooltip>
+          ) : (
+            <Button
+              size="small"
+              danger
+              onClick={() =>
+                modal.confirm({
+                  title: `删除 ${row.name}？`,
+                  content:
+                    row.version_count > 0
+                      ? `将连同 ${row.version_count} 个已发布版本与其归档一起永久删除，不可恢复。` +
+                        '技能名会被释放，之后可以重新创建同名技能。'
+                      : '这是一个还没有任何版本的草稿，删除后技能名会被释放。',
+                  okText: '删除',
+                  okButtonProps: { danger: true },
+                  onOk: () => deleteMutation.mutateAsync(row.id),
+                })
+              }
+            >
+              删 除
+            </Button>
+          )}
         </Space>
       ),
     },
@@ -384,29 +434,6 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <Space direction="vertical" size="large" className="full-width">
-      <Card>
-        <Space direction="vertical" size="small" className="full-width">
-          <Space align="baseline" wrap>
-            <Title level={4} className="mb-0">
-              评审技能（DSH Skills）
-            </Title>
-            <Button type="primary" onClick={() => setCreateOpen(true)}>
-              新增技能
-            </Button>
-          </Space>
-          <Paragraph type="secondary" className="mb-0">
-            这里维护的是**全量技能目录**：创建 Analysis Job 时，全部「已发布且启用」的版本会被
-            整体冻结进那个 Job，所有需求任务共用同一份目录与同一个 catalog hash。发布 V2 或停用
-            技能只影响之后新建的 Job，正在运行的 Job 继续使用它冻结的版本。
-          </Paragraph>
-          <Paragraph type="secondary" className="mb-0">
-            dsh 首轮只看到技能的 name 与 description；Agent 调用 <Text code>skill(name)</Text> 之后
-            才会读到 <Text code>SKILL.md</Text> 正文，再按 resourceBase 按需读取 references /
-            assets / templates。<Text strong>脚本不会因为加载技能而被执行</Text>。
-          </Paragraph>
-        </Space>
-      </Card>
-
       {capacity && limits ? (
         <Card title="全局目录容量">
           <Row gutter={[16, 16]}>
@@ -445,91 +472,101 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
               <Statistic title="含脚本技能" value={capacity.script_bundles} />
             </Col>
           </Row>
-          <Paragraph type="secondary" className="mt-2 mb-0">
-            当前目录 catalog hash：<Text code>{capacity.catalog_hash.slice(0, 16)}…</Text>
-            。它是「这套技能集合」的身份；新建 Job 会把它冻结下来，Worker 独立重算后必须一致才会启动。
-          </Paragraph>
         </Card>
       ) : null}
 
       <Card>
-        <Table<ReviewSkillListItem>
-          dataSource={skills}
-          rowKey="id"
-          loading={catalogQuery.isLoading}
-          columns={columns}
-          scroll={{ x: 1500 }}
-          locale={{ emptyText: <Empty description="还没有技能。新增一个并上传 Bundle ZIP。" /> }}
-          expandable={{
-            rowExpandable: (row) => row.latest_upload !== null,
-            expandedRowRender: (row) =>
-              row.latest_upload === null ? null : (
-                <Space direction="vertical" className="full-width">
-                  <Text strong>最近一次上传（尚未发布）</Text>
-                  <Descriptions size="small" column={4}>
-                    <Descriptions.Item label="状态">{row.latest_upload.status}</Descriptions.Item>
-                    <Descriptions.Item label="文件数">
-                      {row.latest_upload.file_count ?? '—'}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="ZIP">
-                      {formatBytes(row.latest_upload.archive_size_bytes)}
-                    </Descriptions.Item>
-                    <Descriptions.Item label="含脚本">
-                      {row.latest_upload.contains_scripts ? '是' : '否'}
-                    </Descriptions.Item>
-                  </Descriptions>
-                  {row.latest_upload.error_code !== null ? (
-                    <Alert
-                      type="error"
-                      showIcon
-                      message={`校验失败：${row.latest_upload.error_code}`}
-                      description={row.latest_upload.error_message}
-                    />
-                  ) : null}
-                  {row.latest_upload.bundle_manifest !== null ? (
-                    <BundleFileTree files={row.latest_upload.bundle_manifest.files} />
-                  ) : null}
-                </Space>
-              ),
-          }}
-        />
+        <Space direction="vertical" size="middle" className="full-width">
+          <div className="skill-toolbar">
+            <Title level={4} className="mb-0">
+              技能
+            </Title>
+            <Button type="primary" onClick={() => setCreateOpen(true)}>
+              新增技能
+            </Button>
+          </div>
+
+          <div className="skill-filter-bar">
+            <Space size="middle" wrap>
+              <Space size="small">
+                <Text type="secondary">技能状态</Text>
+                <Select
+                  value={statusFilter}
+                  onChange={setStatusFilter}
+                  style={{ width: 140 }}
+                  options={[
+                    { value: 'ALL', label: '全部' },
+                    ...Object.entries(STATUS_LABELS).map(([value, meta]) => ({
+                      value,
+                      label: meta.text,
+                    })),
+                  ]}
+                />
+              </Space>
+              <Input.Search
+                allowClear
+                placeholder="搜索技能名称或显示名称"
+                value={keyword}
+                onChange={(event) => setKeyword(event.target.value)}
+                style={{ width: 260 }}
+              />
+            </Space>
+            <Text type="secondary">共 {filteredSkills.length} 条</Text>
+          </div>
+
+          <Table<ReviewSkillListItem>
+            dataSource={filteredSkills}
+            rowKey="id"
+            loading={catalogQuery.isLoading}
+            columns={columns}
+            scroll={{ x: 1500 }}
+            pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
+            locale={{ emptyText: <Empty description="还没有技能。新增一个并上传 Bundle ZIP。" /> }}
+            expandable={{
+              rowExpandable: (row) => row.latest_upload !== null,
+              expandedRowRender: (row) =>
+                row.latest_upload === null ? null : (
+                  <Space direction="vertical" className="full-width">
+                    <Text strong>最近一次上传（尚未发布）</Text>
+                    <Descriptions size="small" column={4}>
+                      <Descriptions.Item label="状态">{row.latest_upload.status}</Descriptions.Item>
+                      <Descriptions.Item label="文件数">
+                        {row.latest_upload.file_count ?? '—'}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="ZIP">
+                        {formatBytes(row.latest_upload.archive_size_bytes)}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="含脚本">
+                        {row.latest_upload.contains_scripts ? '是' : '否'}
+                      </Descriptions.Item>
+                    </Descriptions>
+                    {row.latest_upload.error_code !== null ? (
+                      <Alert
+                        type="error"
+                        showIcon
+                        message={`校验失败：${row.latest_upload.error_code}`}
+                        description={row.latest_upload.error_message}
+                      />
+                    ) : null}
+                    {row.latest_upload.bundle_manifest !== null ? (
+                      <BundleFileTree files={row.latest_upload.bundle_manifest.files} />
+                    ) : null}
+                  </Space>
+                ),
+            }}
+          />
+        </Space>
       </Card>
 
-      <Modal
-        title="新增技能"
+      <SkillCreateWizard
         open={createOpen}
         onCancel={() => setCreateOpen(false)}
-        onOk={() => createForm.submit()}
-        confirmLoading={createMutation.isPending}
-        destroyOnHidden
-      >
-        <Form form={createForm} layout="vertical" onFinish={(values) => createMutation.mutate(values)}>
-          <Alert
-            className="mb-3"
-            type="info"
-            showIcon
-            message="技能名称创建后不可修改"
-            description="它同时是 Agent 运行时 DSH_HOME/skills/<name>/ 的目录名，改名等于换一个技能。"
-          />
-          <Form.Item
-            name="name"
-            label="技能名称（kebab-case）"
-            rules={[
-              { required: true, message: '请输入技能名称' },
-              {
-                pattern: /^[a-z0-9]+(-[a-z0-9]+)*$/,
-                message: '只允许小写字母、数字和连字符，例如 bos-bill-review',
-              },
-              { min: 2, max: 64, message: '长度需在 2 到 64 之间' },
-            ]}
-          >
-            <Input placeholder="bos-bill-review" />
-          </Form.Item>
-          <Form.Item name="display_name" label="显示名称" rules={[{ required: true, message: '请输入显示名称' }]}>
-            <Input placeholder="BOS 单据评审" />
-          </Form.Item>
-        </Form>
-      </Modal>
+        onDone={() => {
+          setCreateOpen(false)
+          invalidate()
+        }}
+        onDraftChanged={invalidate}
+      />
 
       <Modal
         title={publishSkill === null ? '发布新版本' : `发布新版本：${publishSkill.name}`}

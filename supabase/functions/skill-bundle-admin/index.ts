@@ -165,6 +165,11 @@ interface SetEnabledPayload {
   enabled: boolean
 }
 
+interface DeleteSkillPayload {
+  action: 'delete-skill'
+  skill_id: string
+}
+
 interface CreateDownloadUrlPayload {
   action: 'create-download-url'
   version_id: string
@@ -176,6 +181,7 @@ type Payload =
   | ValidatePayload
   | PublishPayload
   | SetEnabledPayload
+  | DeleteSkillPayload
   | CreateDownloadUrlPayload
 
 async function handleCreateSkill(userId: string, payload: CreateSkillPayload): Promise<Response> {
@@ -465,6 +471,58 @@ async function handleSetEnabled(userId: string, payload: SetEnabledPayload): Pro
 }
 
 /**
+ * 删除技能及其全部版本。
+ *
+ * 顺序是**先库后对象**，不能反过来：数据库那一步会因为 `SKILL_REFERENCED_BY_JOB` 拒绝，
+ * 而先删对象就已经把归档毁了 —— 那份归档正是历史 Job 快照要用的东西。所以让数据库先
+ * 表态，它成功之后返回的 key 才允许删。
+ *
+ * 对象删除失败不回滚：库行已经没了，重新插回去只会造出一个指向不存在归档的技能。留下
+ * 孤儿对象由容量水位体现，比数据库与存储互相矛盾要好。
+ */
+async function handleDeleteSkill(userId: string, payload: DeleteSkillPayload): Promise<Response> {
+  const svc = serviceClient()
+  const { data, error } = await svc.rpc('admin_delete_review_skill', {
+    p_actor_id: userId,
+    p_skill_id: payload.skill_id,
+  })
+  if (error) return json({ error: reason(error) ?? 'failed to delete the skill' }, 400)
+
+  const result = (data ?? {}) as {
+    skill_name?: string
+    version_count?: number
+    objects?: { bucket: string; object_key: string }[]
+  }
+  const keys = (result.objects ?? [])
+    .filter((entry) => entry.bucket === BUCKET && typeof entry.object_key === 'string')
+    .map((entry) => entry.object_key)
+
+  let orphanedObjects = 0
+  if (keys.length > 0) {
+    const { error: removeError } = await svc.storage.from(BUCKET).remove(keys)
+    if (removeError) {
+      orphanedObjects = keys.length
+      logEvent('skill_deleted_objects_orphaned', {
+        userId,
+        skill_id: payload.skill_id,
+        object_count: keys.length,
+        reason: reason(removeError),
+      })
+    }
+  }
+
+  logEvent('skill_deleted', {
+    userId,
+    skill_id: payload.skill_id,
+    skill_name: result.skill_name,
+    version_count: result.version_count,
+    removed_objects: keys.length - orphanedObjects,
+    orphaned_objects: orphanedObjects,
+  })
+  return json({ ok: true, skill_name: result.skill_name, orphaned_objects: orphanedObjects })
+}
+
+/**
  * ADMIN 下载已发布 Bundle。
  *
  * signed URL 是**短期访问凭据**：它不落库、不进日志，也永远不作为冻结 locator（§5.3）。
@@ -523,6 +581,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
         return await handlePublish(admin.userId, payload)
       case 'set-enabled':
         return await handleSetEnabled(admin.userId, payload)
+      case 'delete-skill':
+        return await handleDeleteSkill(admin.userId, payload)
       case 'create-download-url':
         return await handleCreateDownloadUrl(admin.userId, payload)
       default:

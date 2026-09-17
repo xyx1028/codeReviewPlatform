@@ -61,6 +61,21 @@ export interface FrozenSkillCatalog {
   snapshotVersion: number
   catalogHash: string
   bundles: FrozenSkillBundle[]
+  /**
+   * Job 冻结时生效的目录四项容量上限（V1.8）。
+   *
+   * `undefined` = 历史快照（升级前建的 Job，快照里没有这个字段）。此时 Worker 回退到
+   * 编译默认 `SKILL_CATALOG_LIMITS` —— 而出厂默认恰等于历史常量，所以历史 Job 行为不变。
+   */
+  catalogLimits?: FrozenCatalogLimits
+}
+
+/** 只含四项容量上限；`descriptionChars` 未随 Job 冻结，仍取编译默认。 */
+export interface FrozenCatalogLimits {
+  catalogBundles: number
+  catalogRenderBytes: number
+  catalogArchiveBytes: number
+  catalogExpandedBytes: number
 }
 
 export const SKILL_ENTRY_FILE = 'SKILL.md'

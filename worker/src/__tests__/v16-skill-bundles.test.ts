@@ -32,7 +32,7 @@ import {
   SkillBundleLimitError,
   validateSkillArchive,
 } from '../ai/skills/bundle-validator.js'
-import { SKILL_BUNDLE_LIMITS } from '../ai/skills/skill-limits.js'
+import { SKILL_BUNDLE_LIMITS, SKILL_CATALOG_LIMITS } from '../ai/skills/skill-limits.js'
 import {
   bundleHashDirName,
   catalogHashFromBundles,
@@ -48,6 +48,7 @@ import { materializeSkillTree, relaxSkillTree } from '../ai/skills/skill-materia
 import {
   parseFrozenSkillCatalog,
   provisionSkillCatalog,
+  resolveCatalogLimits,
 } from '../ai/skills/skill-provisioner.js'
 import { SKILL_ERROR_CODES, SkillGovernanceError } from '../ai/skills/skill-errors.js'
 import { assertFrozenObjectKey, type SkillStorageClient } from '../ai/skills/skill-storage.js'
@@ -1108,5 +1109,68 @@ describe('skill resource audit attribution', () => {
     expect(
       describeSkillResourceAccess({ path: `${skillsDir}/../escape/SKILL.md` }, skillsDir),
     ).toBeUndefined()
+  })
+})
+
+describe('V1.8 configurable catalog limits carried on the frozen snapshot', () => {
+  const FROZEN = {
+    catalogBundles: 60,
+    catalogRenderBytes: 65536,
+    catalogArchiveBytes: 209715200,
+    catalogExpandedBytes: 536870912,
+  }
+
+  it('parses catalog_limits out of the snapshot when present', () => {
+    const catalog = parseFrozenSkillCatalog({
+      snapshot_version: 1,
+      catalog_hash: emptyCatalogHash(),
+      catalog_limits: FROZEN,
+      bundles: [],
+    })
+    expect(catalog.catalogLimits).toEqual(FROZEN)
+  })
+
+  it('resolves to the frozen four values, keeping descriptionChars from the compiled default', () => {
+    const catalog = parseFrozenSkillCatalog({
+      snapshot_version: 1,
+      catalog_hash: emptyCatalogHash(),
+      catalog_limits: FROZEN,
+      bundles: [],
+    })
+    const resolved = resolveCatalogLimits(catalog)
+    expect(resolved.catalogBundles).toBe(FROZEN.catalogBundles)
+    expect(resolved.catalogRenderBytes).toBe(FROZEN.catalogRenderBytes)
+    expect(resolved.catalogArchiveBytes).toBe(FROZEN.catalogArchiveBytes)
+    expect(resolved.catalogExpandedBytes).toBe(FROZEN.catalogExpandedBytes)
+    // descriptionChars 未随 Job 冻结，仍取编译默认。
+    expect(resolved.descriptionChars).toBe(SKILL_CATALOG_LIMITS.descriptionChars)
+  })
+
+  it('falls back to compiled defaults for a historical snapshot without catalog_limits', () => {
+    const catalog = parseFrozenSkillCatalog({
+      snapshot_version: 1,
+      catalog_hash: emptyCatalogHash(),
+      bundles: [],
+    })
+    expect(catalog.catalogLimits).toBeUndefined()
+    expect(resolveCatalogLimits(catalog)).toEqual(SKILL_CATALOG_LIMITS)
+  })
+
+  it('ignores a partial/corrupt catalog_limits and falls back to defaults', () => {
+    const catalog = parseFrozenSkillCatalog({
+      snapshot_version: 1,
+      catalog_hash: emptyCatalogHash(),
+      // 缺 catalogExpandedBytes —— 半份 limits 视为不可信。
+      catalog_limits: { catalogBundles: 60, catalogRenderBytes: 65536, catalogArchiveBytes: 209715200 },
+      bundles: [],
+    })
+    expect(catalog.catalogLimits).toBeUndefined()
+    expect(resolveCatalogLimits(catalog)).toEqual(SKILL_CATALOG_LIMITS)
+  })
+
+  it('null RPC result (fully historical job) also resolves to defaults', () => {
+    const catalog = parseFrozenSkillCatalog(null)
+    expect(catalog.catalogLimits).toBeUndefined()
+    expect(resolveCatalogLimits(catalog)).toEqual(SKILL_CATALOG_LIMITS)
   })
 })

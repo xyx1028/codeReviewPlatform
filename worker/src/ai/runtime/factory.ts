@@ -20,6 +20,7 @@ import { DeepSeekHarnessAcpEngine } from './deepseek-harness-acp-engine.js'
 import {
   parseFrozenSkillCatalog,
   provisionSkillCatalog,
+  resolveCatalogLimits,
   type ProvisionedSkill,
 } from '../skills/skill-provisioner.js'
 import { SkillCache } from '../skills/skill-cache.js'
@@ -405,6 +406,8 @@ export async function resolveFrozenSkills(
     catalog,
     cache: input.skills.cache,
     storage: input.skills.storage,
+    // V1.8：用 Job 冻结时的目录上限重算校验，而不是编译常量；历史快照回退默认。
+    catalogLimits: resolveCatalogLimits(catalog),
     onEvent: (event) =>
       input.logger.info('skill_bundle_provisioned', {
         event: 'skill_bundle_provisioned',

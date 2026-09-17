@@ -15,6 +15,7 @@ import {
   canonicalManifest,
   computeBundleHash,
   sha256Prefixed,
+  type FrozenCatalogLimits,
   type FrozenSkillBundle,
   type FrozenSkillCatalog,
   type SkillBundleManifest,
@@ -102,6 +103,46 @@ export function parseFrozenSkillCatalog(raw: unknown): FrozenSkillCatalog {
     snapshotVersion: Number(row.snapshot_version ?? 0),
     catalogHash: String(row.catalog_hash ?? ''),
     bundles,
+    catalogLimits: parseCatalogLimits(row.catalog_limits),
+  }
+}
+
+/**
+ * 解析快照里的 `catalog_limits`（V1.8）。
+ *
+ * 历史快照没有这个字段 → 返回 `undefined`，由 `resolveCatalogLimits` 回退编译默认。
+ * 只要四项里任意一项缺失或非有限数，就整体视为不可信并回退默认——半份 limits 比没有更危险。
+ */
+function parseCatalogLimits(raw: unknown): FrozenCatalogLimits | undefined {
+  if (raw === null || raw === undefined || typeof raw !== 'object') return undefined
+  const row = raw as Record<string, unknown>
+  const bundles = Number(row.catalogBundles)
+  const render = Number(row.catalogRenderBytes)
+  const archive = Number(row.catalogArchiveBytes)
+  const expanded = Number(row.catalogExpandedBytes)
+  if (![bundles, render, archive, expanded].every((n) => Number.isFinite(n) && n > 0)) {
+    return undefined
+  }
+  return {
+    catalogBundles: bundles,
+    catalogRenderBytes: render,
+    catalogArchiveBytes: archive,
+    catalogExpandedBytes: expanded,
+  }
+}
+
+/**
+ * 把快照里冻结的四项容量上限合并到完整的 `SkillCatalogLimits` 上：四项用冻结值，
+ * `descriptionChars` 未随 Job 冻结，取编译默认。快照缺失时整体回退编译默认。
+ */
+export function resolveCatalogLimits(catalog: FrozenSkillCatalog): SkillCatalogLimits {
+  if (catalog.catalogLimits === undefined) return SKILL_CATALOG_LIMITS
+  return {
+    ...SKILL_CATALOG_LIMITS,
+    catalogBundles: catalog.catalogLimits.catalogBundles,
+    catalogRenderBytes: catalog.catalogLimits.catalogRenderBytes,
+    catalogArchiveBytes: catalog.catalogLimits.catalogArchiveBytes,
+    catalogExpandedBytes: catalog.catalogLimits.catalogExpandedBytes,
   }
 }
 

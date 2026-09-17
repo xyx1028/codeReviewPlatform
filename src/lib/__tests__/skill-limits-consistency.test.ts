@@ -19,6 +19,12 @@ const MIGRATION = join(
   process.cwd(),
   'supabase/migrations/20260917100000_managed_dsh_skill_bundles.sql',
 )
+// V1.8：skill_bundle_limits() 的目录四项改为从 skill_catalog_limits_config 读取，
+// 出厂默认写在这张表的列默认值里。单包上限仍是 skill_bundle_limits() 里的字面量。
+const CONFIG_MIGRATION = join(
+  process.cwd(),
+  'supabase/migrations/20260917143802_configurable_skill_catalog_limits.sql',
+)
 const WORKER_LIMITS = join(process.cwd(), 'worker/src/ai/skills/skill-limits.ts')
 const EDGE_BUNDLE = join(process.cwd(), 'supabase/functions/skill-bundle-admin/bundle.ts')
 const WORKER_MANIFEST = join(process.cwd(), 'worker/src/ai/skills/skill-manifest.ts')
@@ -63,6 +69,34 @@ function tsLimits(path: string, anchorText: string): Record<string, number> {
   return out
 }
 
+/**
+ * V1.8：从配置迁移里解析 skill_catalog_limits_config 各列的 DEFAULT，映射到目录四项键。
+ *
+ * 这是「出厂默认」的权威来源——skill_bundle_limits() 运行时就是从这张表读这几项。
+ */
+function configTableDefaults(): Record<string, number> {
+  const sql = readFileSync(CONFIG_MIGRATION, 'utf8')
+  const anchor = sql.indexOf('create table if not exists public.skill_catalog_limits_config')
+  expect(anchor).toBeGreaterThan(-1)
+  const close = sql.indexOf(');', anchor)
+  const body = sql.slice(anchor, close)
+  const columnToKey: Record<string, string> = {
+    catalog_bundles: 'catalogBundles',
+    catalog_render_bytes: 'catalogRenderBytes',
+    catalog_archive_bytes: 'catalogArchiveBytes',
+    catalog_expanded_bytes: 'catalogExpandedBytes',
+  }
+  const out: Record<string, number> = {}
+  for (const [column, key] of Object.entries(columnToKey)) {
+    // 形如：  catalog_render_bytes bigint not null default 32 * 1024
+    const re = new RegExp(`${column}\\s+\\w+\\s+not null\\s+default\\s+([0-9*\\s]+?)\\n`, 'i')
+    const match = body.match(re)
+    expect(match, `default for ${column}`).not.toBeNull()
+    out[key] = evaluateNumeric(match![1]!)
+  }
+  return out
+}
+
 /** §8.1 单包上限：Worker、Edge Function 与 SQL 必须逐项相等。 */
 const BUNDLE_KEYS = [
   'archiveBytes',
@@ -76,28 +110,33 @@ const BUNDLE_KEYS = [
   'validateMs',
 ] as const
 
-/** §8.2 全目录上限：只在 Worker 与 SQL 两处生效（Edge Function 校验的是单包）。 */
-const CATALOG_KEYS = [
+/**
+ * §8.2 目录容量四项：V1.8 起可配置，运行时从 skill_catalog_limits_config 读取。
+ * 一致性链条变成「配置表出厂默认 == Worker 编译默认 == 文档现值」。
+ */
+const CATALOG_CONFIGURABLE_KEYS = [
   'catalogBundles',
-  'descriptionChars',
   'catalogRenderBytes',
   'catalogArchiveBytes',
   'catalogExpandedBytes',
 ] as const
 
-describe('V1.6 skill limits agree everywhere they are enforced', () => {
+/** descriptionChars 未放开，仍是 SQL 与 Worker 两处的字面量常量。 */
+const CATALOG_CONSTANT_KEYS = ['descriptionChars'] as const
+
+describe('V1.6/V1.8 skill limits agree everywhere they are enforced', () => {
   const sql = sqlLimits()
   const workerBundle = tsLimits(WORKER_LIMITS, 'export const SKILL_BUNDLE_LIMITS')
   const workerCatalog = tsLimits(WORKER_LIMITS, 'export const SKILL_CATALOG_LIMITS')
   const edge = tsLimits(EDGE_BUNDLE, 'export const LIMITS =')
+  const configDefaults = configTableDefaults()
 
   it('parses a non-empty limit table from each source', () => {
     // 解析器自身的守卫：一个匹配不到任何键的正则会让下面每条断言都"通过"。
-    expect(Object.keys(sql).length).toBeGreaterThanOrEqual(
-      BUNDLE_KEYS.length + CATALOG_KEYS.length,
-    )
+    expect(Object.keys(sql).length).toBeGreaterThanOrEqual(BUNDLE_KEYS.length)
     expect(Object.keys(workerBundle).length).toBeGreaterThanOrEqual(BUNDLE_KEYS.length)
     expect(Object.keys(edge).length).toBeGreaterThanOrEqual(BUNDLE_KEYS.length)
+    expect(Object.keys(configDefaults).length).toBe(CATALOG_CONFIGURABLE_KEYS.length)
   })
 
   it.each(BUNDLE_KEYS)('per-bundle limit %s is the same in SQL, Worker and Edge Function', (key) => {
@@ -105,12 +144,20 @@ describe('V1.6 skill limits agree everywhere they are enforced', () => {
     expect(edge[key]).toBe(sql[key])
   })
 
-  it.each(CATALOG_KEYS)('catalog limit %s is the same in SQL and Worker', (key) => {
+  it.each(CATALOG_CONSTANT_KEYS)('non-configurable catalog limit %s is the same in SQL and Worker', (key) => {
     expect(workerCatalog[key]).toBe(sql[key])
   })
 
-  it('keeps the documented V1.6 numbers, not just internally consistent ones', () => {
-    // 方案 §8 的表。三处一致但集体改错也是回归，所以这里钉住绝对值。
+  it.each(CATALOG_CONFIGURABLE_KEYS)(
+    'configurable catalog limit %s: config-table factory default == Worker compiled default',
+    (key) => {
+      // V1.8：SQL 运行时从配置表读，所以不再比对 SQL 字面量；改为比对「出厂默认」与 Worker 默认。
+      expect(configDefaults[key]).toBe(workerCatalog[key])
+    },
+  )
+
+  it('keeps the documented numbers, not just internally consistent ones', () => {
+    // 单包上限（§8.1）：钉住绝对值。
     expect(sql.archiveBytes).toBe(10 * 1024 * 1024)
     expect(sql.expandedBytes).toBe(50 * 1024 * 1024)
     expect(sql.entryCount).toBe(200)
@@ -120,11 +167,12 @@ describe('V1.6 skill limits agree everywhere they are enforced', () => {
     expect(sql.pathBytes).toBe(240)
     expect(sql.compressionRatio).toBe(20)
     expect(sql.validateMs).toBe(30000)
-    expect(sql.catalogBundles).toBe(50)
     expect(sql.descriptionChars).toBe(500)
-    expect(sql.catalogRenderBytes).toBe(32 * 1024)
-    expect(sql.catalogArchiveBytes).toBe(100 * 1024 * 1024)
-    expect(sql.catalogExpandedBytes).toBe(256 * 1024 * 1024)
+    // 目录四项（§8.2）：出厂默认必须等于 V1.6 现值，保证升级零行为变化。
+    expect(configDefaults.catalogBundles).toBe(50)
+    expect(configDefaults.catalogRenderBytes).toBe(32 * 1024)
+    expect(configDefaults.catalogArchiveBytes).toBe(100 * 1024 * 1024)
+    expect(configDefaults.catalogExpandedBytes).toBe(256 * 1024 * 1024)
   })
 })
 

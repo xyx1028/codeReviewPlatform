@@ -1087,6 +1087,11 @@ export interface ReviewSkillListItem {
   published_at: string | null
   published_by_name: string | null
   updated_at: string
+  /**
+   * 是否被任何 Analysis Job 冻结过。为 true 时不能删除：
+   * `analysis_job_skill_snapshot` 是那次评审给了模型哪些技能的唯一证据。
+   */
+  referenced_by_job: boolean
   version_count: number
   latest_upload: ReviewSkillUpload | null
 }
@@ -1107,6 +1112,20 @@ export interface SkillBundleLimits {
   catalogRenderBytes: number
   catalogArchiveBytes: number
   catalogExpandedBytes: number
+}
+
+/**
+ * 平台级技能目录容量上限（V1.8，可配置）。
+ *
+ * 由 `admin_get_skill_catalog_limits` 返回、`admin_update_skill_catalog_limits` 写入。
+ * 只含目录四项；单包上限仍是数据库常量（不可配）。
+ */
+export interface SkillCatalogLimitsConfig {
+  catalogBundles: number
+  catalogRenderBytes: number
+  catalogArchiveBytes: number
+  catalogExpandedBytes: number
+  updatedAt: string
 }
 
 /** 全局目录容量水位（§14.1 页面顶部那五行）。 */

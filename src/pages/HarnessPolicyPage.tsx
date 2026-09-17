@@ -18,11 +18,14 @@ import {
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  adminGetSkillCatalogLimits,
   adminGetV4CapabilityPolicy,
   adminListModelConfigs,
+  adminUpdateSkillCatalogLimits,
   adminUpdateV4CapabilityPolicy,
 } from '../lib/api'
 import type {
+  SkillCatalogLimitsConfig,
   V4Capabilities,
   V4CapabilityPolicy,
   V4CapabilityPolicyEditable,
@@ -115,6 +118,145 @@ function policyToEditable(policy: V4CapabilityPolicy): V4CapabilityPolicyEditabl
       retentionDays: policy.session.retentionDays,
     },
   }
+}
+
+/**
+ * ADMIN 维护平台级技能目录容量上限（V1.8，可配置）。
+ *
+ * 独立于按模型的能力策略：技能目录是全平台共享的一份，与模型无关。保存仅影响之后新建的
+ * 批次；单包上限仍是数据库常量，不在这里配置。区间与后端 RPC 校验一致（越界会被 RPC 拒绝）。
+ */
+const KIB = 1024
+const MIB = 1024 * 1024
+
+interface SkillLimitsForm {
+  catalogBundles: number
+  catalogRenderKiB: number
+  catalogArchiveMiB: number
+  catalogExpandedMiB: number
+}
+
+function SkillCatalogLimitsCard({ isAdmin }: { isAdmin: boolean }) {
+  const { message } = AntApp.useApp()
+  const queryClient = useQueryClient()
+  const [editing, setEditing] = useState(false)
+  const [form] = Form.useForm<SkillLimitsForm>()
+
+  const limitsQuery = useQuery({
+    queryKey: ['admin-skill-catalog-limits'],
+    enabled: isAdmin,
+    queryFn: adminGetSkillCatalogLimits,
+  })
+
+  const updateMutation = useMutation({
+    mutationFn: (values: SkillLimitsForm) =>
+      adminUpdateSkillCatalogLimits({
+        catalogBundles: values.catalogBundles,
+        catalogRenderBytes: Math.round(values.catalogRenderKiB * KIB),
+        catalogArchiveBytes: Math.round(values.catalogArchiveMiB * MIB),
+        catalogExpandedBytes: Math.round(values.catalogExpandedMiB * MIB),
+      }),
+    onSuccess: (config: SkillCatalogLimitsConfig) => {
+      queryClient.setQueryData(['admin-skill-catalog-limits'], config)
+      message.success('技能目录容量上限已更新；仅影响之后新建的批次')
+      setEditing(false)
+      form.resetFields()
+    },
+    onError: (error: Error) => message.error(error.message),
+  })
+
+  const limits = limitsQuery.data
+
+  const beginEdit = () => {
+    if (!limits) return
+    form.setFieldsValue({
+      catalogBundles: limits.catalogBundles,
+      catalogRenderKiB: Math.round(limits.catalogRenderBytes / KIB),
+      catalogArchiveMiB: Math.round(limits.catalogArchiveBytes / MIB),
+      catalogExpandedMiB: Math.round(limits.catalogExpandedBytes / MIB),
+    })
+    setEditing(true)
+  }
+
+  return (
+    <Card
+      title="技能目录容量上限（平台级）"
+      loading={limitsQuery.isLoading}
+      extra={
+        editing ? (
+          <Space>
+            <Button onClick={() => setEditing(false)} disabled={updateMutation.isPending}>
+              取消
+            </Button>
+            <Button type="primary" loading={updateMutation.isPending} onClick={() => form.submit()}>
+              保存
+            </Button>
+          </Space>
+        ) : (
+          <Button type="primary" disabled={!limits} onClick={beginEdit}>
+            编辑
+          </Button>
+        )
+      }
+    >
+      {limitsQuery.isError ? (
+        <Alert type="error" showIcon title="容量上限加载失败" description={limitsQuery.error.message} />
+      ) : !limits ? (
+        <Empty description="未返回技能目录容量上限" />
+      ) : (
+        <Form
+          form={form}
+          layout="vertical"
+          onFinish={(values) => updateMutation.mutate(values)}
+        >
+          <Alert
+            className="mb-3"
+            type="info"
+            showIcon
+            description="保存仅影响之后新建的批次；在跑与历史批次沿用它们冻结时的上限。首轮目录渲染直接占用模型上下文，不建议调得过大。"
+          />
+          <Row gutter={[24, 20]}>
+            <Col xs={24} md={12}>
+              {editing ? (
+                <Form.Item name="catalogBundles" label="已启用技能数上限（个）" className="mb-0" rules={[{ required: true }]}>
+                  <InputNumber min={1} max={200} className="full-width" />
+                </Form.Item>
+              ) : (
+                <Statistic title="已启用技能数上限" value={limits.catalogBundles} suffix="个" />
+              )}
+            </Col>
+            <Col xs={24} md={12}>
+              {editing ? (
+                <Form.Item name="catalogRenderKiB" label="首轮目录渲染上限（KiB）" className="mb-0" rules={[{ required: true }]}>
+                  <InputNumber min={8} max={128} className="full-width" />
+                </Form.Item>
+              ) : (
+                <Statistic title="首轮目录渲染上限" value={Math.round(limits.catalogRenderBytes / KIB)} suffix="KiB" />
+              )}
+            </Col>
+            <Col xs={24} md={12}>
+              {editing ? (
+                <Form.Item name="catalogArchiveMiB" label="归档总量上限（MiB）" className="mb-0" rules={[{ required: true }]}>
+                  <InputNumber min={10} max={1024} className="full-width" />
+                </Form.Item>
+              ) : (
+                <Statistic title="归档总量上限" value={Math.round(limits.catalogArchiveBytes / MIB)} suffix="MiB" />
+              )}
+            </Col>
+            <Col xs={24} md={12}>
+              {editing ? (
+                <Form.Item name="catalogExpandedMiB" label="展开总量上限（MiB）" className="mb-0" rules={[{ required: true }]}>
+                  <InputNumber min={50} max={2048} className="full-width" />
+                </Form.Item>
+              ) : (
+                <Statistic title="展开总量上限" value={Math.round(limits.catalogExpandedBytes / MIB)} suffix="MiB" />
+              )}
+            </Col>
+          </Row>
+        </Form>
+      )}
+    </Card>
+  )
 }
 
 /**
@@ -395,6 +537,8 @@ export function HarnessPolicyPage({ isAdmin }: { isAdmin: boolean }) {
       ) : (
         <Empty description="未返回能力策略" />
       )}
+
+      <SkillCatalogLimitsCard isAdmin={isAdmin} />
     </Space>
   )
 }

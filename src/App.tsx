@@ -594,7 +594,7 @@ function Shell({ session }: { session: Session }) {
     ...(isAdmin ? [{ key: '/monitoring', label: <Link to="/monitoring">Agent 运行监控</Link> }] : []),
     ...(isAdmin ? [{ key: '/workers', label: <Link to="/workers">调度中心</Link> }] : []),
     ...(isAdmin ? [{ key: '/harness-policy', label: <Link to="/harness-policy">默认能力策略</Link> }] : []),
-    ...(isAdmin ? [{ key: '/skills', label: <Link to="/skills">评审技能</Link> }] : []),
+    ...(isAdmin ? [{ key: '/skills', label: <Link to="/skills">技能</Link> }] : []),
     ...(isAdmin ? [{ key: '/models', label: <Link to="/models">模型管理</Link> }] : []),
     ...(isAdmin ? [{ key: '/users', label: <Link to="/users">用户管理</Link> }] : []),
   ]
