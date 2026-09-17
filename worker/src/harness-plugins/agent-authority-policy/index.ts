@@ -51,6 +51,22 @@ export interface AgentAuthorityConfig {
    * 与根 Agent 相同的 30 个工具，其中包含 `submit_review_result`。
    */
   childTools: string[]
+  /**
+   * 本次 attempt 物化的技能目录（`<DSH_HOME>/skills`）。
+   *
+   * 只用于**审计归因**：判断一次 `read` / `read_image` / `grep` / `glob` / `bash` 是不是在
+   * 读技能资源，从而把安全的相对路径记进审计。它不是权限边界 —— 权限边界是沙箱与角色
+   * 工具面。空字符串表示这个 attempt 没有技能目录。
+   */
+  skillsDir?: string
+  /**
+   * 冻结技能的 `name → bundleHash`。
+   *
+   * 插件不解析 Bundle、也不信任模型自报的 hash：它只把模型传给 `skill(name)` 的那个
+   * name 在这张表里查一次。查不到就什么都不带 —— Broker 侧还会用自己的冻结目录再核一次，
+   * 数据库还会按 `(job, name, bundle_hash)` 反查 snapshot id。三层都不采信上报值本身。
+   */
+  skills?: Array<{ name: string; bundleHash: string }>
 }
 
 export const Config: z<AgentAuthorityConfig> = z.object({
@@ -62,7 +78,62 @@ export const Config: z<AgentAuthorityConfig> = z.object({
   rootSessionId: z.string().required(),
   rootTools: z.array(z.string()).required(),
   childTools: z.array(z.string()).required(),
+  skillsDir: z.string(),
+  skills: z.array(z.object({ name: z.string().required(), bundleHash: z.string().required() })),
 })
+
+/**
+ * 会消费技能资源的工具。
+ *
+ * 这张表决定"要不要去参数里找路径"。它刻意只含**已有**的工具 —— V1.6 不新增任何模型工具，
+ * 技能资源就是用这些工具读的（方案 §3.3）。
+ */
+const RESOURCE_TOOLS: ReadonlySet<string> = new Set([
+  'read',
+  'read_image',
+  'grep',
+  'glob',
+  'bash',
+])
+
+/** 审计里允许出现的规范相对路径。带 `..`、绝对路径、反斜杠或空白的一律丢弃。 */
+function safeRelativePath(value: string): string | undefined {
+  if (value === '' || value.length > 240) return undefined
+  if (/(^\/)|(\\)|(^[A-Za-z]:)|(\.\.)|(^\s)|(\s$)/.test(value)) return undefined
+  return value
+}
+
+/**
+ * 从工具参数里推导 `(skillName, relativePath)`。
+ *
+ * 只看**字符串型**参数，且只在它以物化目录为前缀时才认。不递归遍历任意对象：那会把
+ * 命令正文和查询串也扫进来，而审计明确不存这些东西（方案 §16）。
+ */
+export function describeSkillResourceAccess(
+  args: unknown,
+  skillsDir: string,
+): { skillName: string; relativePath?: string } | undefined {
+  if (skillsDir === '' || args === null || typeof args !== 'object') return undefined
+  const prefix = skillsDir.endsWith('/') ? skillsDir : `${skillsDir}/`
+  for (const key of ['path', 'file', 'filePath', 'file_path', 'pattern', 'cwd', 'command']) {
+    const value = (args as Record<string, unknown>)[key]
+    if (typeof value !== 'string') continue
+    const at = value.indexOf(prefix)
+    if (at < 0) continue
+    const tail = value.slice(at + prefix.length)
+    // 第一段是技能名，其余是相对路径。用空白截断：`bash` 的 command 里路径后面还有别的。
+    const cut = tail.search(/[\s'"]/)
+    const cleaned = cut < 0 ? tail : tail.slice(0, cut)
+    const slash = cleaned.indexOf('/')
+    if (slash < 0) {
+      return /^[a-z0-9]+(-[a-z0-9]+)*$/.test(cleaned) ? { skillName: cleaned } : undefined
+    }
+    const skillName = cleaned.slice(0, slash)
+    if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(skillName)) return undefined
+    return { skillName, relativePath: safeRelativePath(cleaned.slice(slash + 1)) }
+  }
+  return undefined
+}
 
 /** 拒绝时给模型的说明。写给模型看：说清楚为什么，以及下一步该做什么。 */
 function denialMessage(toolName: string, role: string): string {
@@ -252,6 +323,13 @@ export function apply(ctx: Context, config: AgentAuthorityConfig): void {
   function postToolLifecycle(
     identity: { agentCapability: string; agentId: string; sessionId: string },
     lifecycle: Record<string, string | number | boolean | undefined>,
+    /**
+     * V1.6 技能归因（方案 §16）。
+     *
+     * 只在 TERMINAL 上传一次 `entries`，不在 STARTED 上传：`entries` 是持久审计行，
+     * 一次调用应当只落一行。STARTED 的作用是驱动"正在调用"投影，它不需要审计行。
+     */
+    skill?: { skillName: string; skillBundleHash?: string; resourceRelativePath?: string },
   ): Promise<void> {
     return brokerPost<{ accepted?: boolean }>(channel, '/attempt/tool-audit', {
       taskId: config.taskId,
@@ -261,7 +339,22 @@ export function apply(ctx: Context, config: AgentAuthorityConfig): void {
       sessionId: identity.sessionId,
       toolName: lifecycle.toolName,
       lifecycle,
-      entries: [],
+      entries:
+        skill === undefined
+          ? []
+          : [
+              {
+                toolName: String(lifecycle.toolName ?? 'unknown'),
+                permissionVerdict: 'ALLOW',
+                errorCode: lifecycle.errorCode ?? null,
+                startedAt: String(lifecycle.occurredAt ?? new Date().toISOString()),
+                finishedAt: String(lifecycle.occurredAt ?? new Date().toISOString()),
+                durationMs: typeof lifecycle.durationMs === 'number' ? lifecycle.durationMs : 0,
+                skillName: skill.skillName,
+                skillBundleHash: skill.skillBundleHash,
+                resourceRelativePath: skill.resourceRelativePath,
+              },
+            ],
     })
       .then(() => undefined)
       .catch((err: unknown) => {
@@ -278,8 +371,42 @@ export function apply(ctx: Context, config: AgentAuthorityConfig): void {
     started: Promise<void>,
     identity: { agentCapability: string; agentId: string; sessionId: string },
     lifecycle: Record<string, string | number | boolean | undefined>,
+    skill?: { skillName: string; skillBundleHash?: string; resourceRelativePath?: string },
   ): void {
-    void started.then(() => postToolLifecycle(identity, lifecycle))
+    void started.then(() => postToolLifecycle(identity, lifecycle, skill))
+  }
+
+  /** 冻结技能的 name → bundleHash。查不到就不带 hash，让 Broker 与数据库各自再核一次。 */
+  const skillBundleHashes = new Map(
+    (config.skills ?? []).map((skill) => [skill.name, skill.bundleHash] as const),
+  )
+
+  /**
+   * 一次工具调用的技能归因。
+   *
+   * 两种来源，都不采信模型自报的 hash：
+   *
+   *   * `skill(name)` —— name 直接来自参数，是"加载了哪个技能"的权威信号；
+   *   * `read/read_image/grep/glob/bash` —— 从参数里的**绝对路径前缀**反推，是"读了哪个
+   *     技能的哪个资源"。
+   */
+  function attributeSkill(
+    toolName: string,
+    args: unknown,
+  ): { skillName: string; skillBundleHash?: string; resourceRelativePath?: string } | undefined {
+    if (toolName === 'skill') {
+      const name = (args as { name?: unknown } | null)?.name
+      if (typeof name !== 'string' || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)) return undefined
+      return { skillName: name, skillBundleHash: skillBundleHashes.get(name) }
+    }
+    if (!RESOURCE_TOOLS.has(toolName)) return undefined
+    const access = describeSkillResourceAccess(args, config.skillsDir ?? '')
+    if (access === undefined) return undefined
+    return {
+      skillName: access.skillName,
+      skillBundleHash: skillBundleHashes.get(access.skillName),
+      resourceRelativePath: access.relativePath,
+    }
   }
 
   ctx.on(
@@ -347,17 +474,24 @@ export function apply(ctx: Context, config: AgentAuthorityConfig): void {
       })
       const t0 = Date.now()
 
+      const skillAttribution = attributeSkill(toolName, exec.arguments)
+
       try {
         const result = await next()
-        chainToolLifecycle(startedPost, identity, {
-          phase: 'TERMINAL',
-          outcome: 'COMPLETED',
-          correlationId,
-          toolName,
-          occurredAt: new Date().toISOString(),
-          durationMs: Date.now() - t0,
-          ...describeToolResult(result),
-        })
+        chainToolLifecycle(
+          startedPost,
+          identity,
+          {
+            phase: 'TERMINAL',
+            outcome: 'COMPLETED',
+            correlationId,
+            toolName,
+            occurredAt: new Date().toISOString(),
+            durationMs: Date.now() - t0,
+            ...describeToolResult(result),
+          },
+          skillAttribution,
+        )
         return result
       } catch (err) {
         chainToolLifecycle(startedPost, identity, {

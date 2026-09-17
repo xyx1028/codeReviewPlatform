@@ -52,7 +52,9 @@ describe('v4 capability contract', () => {
 
   it('locates and parses the checked-in manifest', () => {
     expect(resolveContractPath()).toMatch(/v4-capability-contract\.json$/)
-    expect(contract.manifestRevision).toBe(1)
+    // R2（V1.6）：skill-badge 从 enabledPlugins 移到 disabledPlugins，与已安装 base bundle
+    // 的真实状态对齐（方案 §21 第 6 条）。修订号与 supabase/migrations/*_v4_harness_manifest_r2.sql 一一对应。
+    expect(contract.manifestRevision).toBe(2)
     expect(contract.contractVersion).toBe(V4_POLICY_VERSION)
     expect(contract.harnessVersion).toBe('0.1.5-rc.1')
     expect(V4_DEFAULT_POLICY).toEqual(contract.defaultPolicy)
@@ -139,6 +141,17 @@ describe('v4 capability contract', () => {
 
   it('exposes the exact V4 error code set', () => {
     expect([...contract.errorCodes].sort()).toEqual(Object.keys(V4_ERROR_CODES).sort())
+  })
+
+  it('does not claim skill-badge is enabled when the base bundle disables it', () => {
+    // 一份不真实的冻结契约会让 Release Gate 的结论建立在一个不存在的插件面上。
+    // 已安装的 @deepseek-ai/dsh-base 在它自己的 cordis.patch.yml 里就写着 disabled: true。
+    expect(contract.enabledPlugins).not.toContain('skill-badge')
+    expect(contract.disabledPlugins).toContain('skill-badge')
+    // Skills 本身仍然是启用的：技能注册表、文件系统 provider 和 skill 工具三件都在。
+    expect(contract.enabledPlugins).toContain('skill')
+    expect(contract.enabledPlugins).toContain('skill-filesystem')
+    expect(contract.enabledPlugins).toContain('tool-skill')
   })
 
   it('produces a stable contract hash', () => {

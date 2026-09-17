@@ -5,7 +5,7 @@
     "生成数据库部署副本；npm run harness:manifest:check 会阻止配置、依赖和迁移漂移。",
     "任何 Harness 升级带来的插件或工具增删都必须显式修改本文件，否则契约测试 fail closed。"
   ],
-  "manifestRevision": 1,
+  "manifestRevision": 2,
   "contractVersion": 4,
   "harnessVersion": "0.1.5-rc.1",
   "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-acp-app"],
@@ -90,7 +90,6 @@
     "agent-instructions",
     "skill",
     "skill-filesystem",
-    "skill-badge",
     "tool-skill",
     "commands",
     "command-feedback",
@@ -148,7 +147,8 @@
 
   "$comment_disabled": [
     "disabledPlugins：本方案第 1.4 节列出的“不属于全能力”的项目。它们必须保持禁用：",
-    "重复的 adapter、外部 telemetry、OS 不兼容的 Shell、以及被平台自有实现替换掉的出口。"
+    "重复的 adapter、外部 telemetry、OS 不兼容的 Shell、以及被平台自有实现替换掉的出口。",
+    "R2（V1.6）：skill-badge 从 enabledPlugins 移到这里。已安装的 @deepseek-ai/dsh-base 在它自己的 cordis.patch.yml 里就把它标成 disabled: true，而这份契约此前声称它是启用的 —— 一份不真实的冻结契约会让 Release Gate 的结论建立在一个不存在的插件面上。它不提供任何模型工具，所以 modelTools 与 roleTools 一字未改；但契约摘要变了，因此必须走一次 Job cutover（见 worker/OPERATIONS.md 第 17 节）。"
   ],
   "$comment_web": [
     "tool-web / web-search-deepseek / web-fetch-http 被禁用，不是因为关闭 Web 能力，而是因为",
@@ -165,7 +165,8 @@
     "pwsh-sandbox",
     "tool-pwsh",
     "hmr",
-    "session-title-llm"
+    "session-title-llm",
+    "skill-badge"
   ],
 
   "$comment_platform": [

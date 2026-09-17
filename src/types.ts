@@ -69,6 +69,17 @@ export interface ReviewBatchListItem extends ReviewBatch {
 // ---------------------------------------------------------------------------
 
 /** 模型配置摘要：前端唯一可见的模型信息，绝不包含 API Key 或 secret UUID。 */
+/**
+ * 模型的网络类型（V1.7 阶段二）。
+ *
+ * `DIRECT` 公网模型：Worker 直接请求。
+ * `HOST_PROXY` 内网模型：Worker 经宿主机本机代理请求。
+ *
+ * 它取代了原先"在代理侧维护目标域名白名单"的做法——那层判断放错了地方，既误伤公网模型
+ * （被代理拒成 403），又漏掉了正式评审链路。
+ */
+export type ModelNetworkAccessMode = 'DIRECT' | 'HOST_PROXY'
+
 export interface AiModelConfigSummary {
   id: string
   display_name: string
@@ -78,6 +89,8 @@ export interface AiModelConfigSummary {
   has_api_key: boolean
   max_parallel_tasks: number
   request_timeout_ms: number
+  /** 缺省视为 `DIRECT`：既有配置在本次改造前后行为一致。 */
+  network_access_mode?: ModelNetworkAccessMode
   /** 仅 admin_list_model_configs 返回。 */
   context_window?: number
   max_output_tokens?: number
@@ -94,6 +107,24 @@ export interface AiModelConfigSummary {
   /** 仅 admin_list_model_configs 返回；true 表示已被批次或分析任务引用。 */
   is_referenced?: boolean
   created_by?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type ModelConnectivityTestStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
+
+/** Worker 执行的模型连接测试安全结果，不含 URL、密钥、租约或 claim token。 */
+export interface ModelConnectivityTest {
+  id: string
+  model_config_id: string
+  status: ModelConnectivityTestStatus
+  attempt: number
+  status_code: number | null
+  latency_ms: number | null
+  error_code: string | null
+  error_message: string | null
+  started_at: string | null
+  finished_at: string | null
   created_at: string
   updated_at: string
 }
@@ -983,4 +1014,173 @@ export interface V4CapabilityPolicyEditable {
     'maxRequestsPerAttempt' | 'maxResponseBytes' | 'maxTotalBytes' | 'allowedDomains'
   >
   session: Pick<V4SessionPolicy, 'checkpointEveryEvents' | 'retentionDays'>
+}
+
+// ---------------------------------------------------------------------------
+// V1.6 受管 DSH Skill Bundle
+// ---------------------------------------------------------------------------
+
+/** 技能生命周期。`PUBLISHED` 且有 current_version 才会被新 Job 冻结。 */
+export type ReviewSkillStatus =
+  | 'DRAFT'
+  | 'VALIDATING'
+  | 'PUBLISHED'
+  | 'DISABLED'
+  | 'VALIDATION_FAILED'
+
+export type SkillFileRole = 'ENTRY' | 'REFERENCE' | 'ASSET' | 'TEMPLATE' | 'SCRIPT' | 'OTHER'
+
+/**
+ * manifest 里的一个文件。
+ *
+ * 只有身份信息 —— 路径、hash、大小、MIME、角色。**没有文件正文**：manifest 会随 Job
+ * 冻结并进入数据库，把正文放进来等于把内部规则和脚本写进普通数据库备份。
+ */
+export interface SkillBundleFile {
+  path: string
+  sha256: string
+  sizeBytes: number
+  mediaType: string
+  role: SkillFileRole
+}
+
+export interface SkillBundleManifest {
+  schemaVersion: number
+  skillName: string
+  entry: string
+  archiveSha256: string
+  archiveSizeBytes: number
+  expandedSizeBytes: number
+  containsScripts: boolean
+  files: SkillBundleFile[]
+}
+
+/** 一次尚未发布的 staging 上传及其服务端校验结果。 */
+export interface ReviewSkillUpload {
+  id: string
+  status: 'PENDING' | 'VALIDATED' | 'FAILED' | 'CONSUMED' | 'EXPIRED'
+  error_code: string | null
+  error_message: string | null
+  file_count: number | null
+  archive_size_bytes: number | null
+  expanded_size_bytes: number | null
+  contains_scripts: boolean
+  bundle_manifest: SkillBundleManifest | null
+  entry_frontmatter: SkillEntryFrontmatter | null
+  created_at: string
+}
+
+export interface ReviewSkillListItem {
+  id: string
+  name: string
+  display_name: string
+  status: ReviewSkillStatus
+  current_version_id: string | null
+  current_version: number | null
+  description: string | null
+  when_to_use: string | null
+  file_count: number | null
+  archive_size_bytes: number | null
+  expanded_size_bytes: number | null
+  contains_scripts: boolean
+  bundle_hash: string | null
+  published_at: string | null
+  published_by_name: string | null
+  updated_at: string
+  version_count: number
+  latest_upload: ReviewSkillUpload | null
+}
+
+/** 单个 Bundle 与全技能目录的上限（方案 §8）。由数据库返回，前端不写死。 */
+export interface SkillBundleLimits {
+  archiveBytes: number
+  expandedBytes: number
+  entryCount: number
+  fileBytes: number
+  entryFileBytes: number
+  pathDepth: number
+  pathBytes: number
+  compressionRatio: number
+  validateMs: number
+  catalogBundles: number
+  descriptionChars: number
+  catalogRenderBytes: number
+  catalogArchiveBytes: number
+  catalogExpandedBytes: number
+}
+
+/** 全局目录容量水位（§14.1 页面顶部那五行）。 */
+export interface SkillCatalogCapacity {
+  enabled_bundles: number
+  archive_bytes: number
+  expanded_bytes: number
+  catalog_render_bytes: number
+  script_bundles: number
+  catalog_hash: string
+}
+
+export interface ReviewSkillCatalog {
+  limits: SkillBundleLimits
+  skills: ReviewSkillListItem[]
+  capacity: SkillCatalogCapacity
+}
+
+export interface ReviewSkillVersionDetail {
+  id: string
+  version: number
+  description: string
+  when_to_use: string | null
+  archive_object_key: string
+  archive_sha256: string
+  archive_size_bytes: number
+  bundle_hash: string
+  bundle_manifest: SkillBundleManifest
+  expanded_size_bytes: number
+  file_count: number
+  contains_scripts: boolean
+  published_at: string
+}
+
+export interface ReviewSkillDetail {
+  id: string
+  name: string
+  display_name: string
+  status: ReviewSkillStatus
+  current_version_id: string | null
+  versions: ReviewSkillVersionDetail[]
+}
+
+/** `create-upload` 返回的短期写令牌。绝不落库、不进日志。 */
+export interface SkillUploadTicket {
+  upload_id: string
+  bucket: string
+  path: string
+  token: string
+  expires_in_seconds: number
+}
+
+/**
+ * `SKILL.md` 的 YAML frontmatter。
+ *
+ * 它是 name / description / whenToUse 的**唯一来源**：dsh 的 `skill-filesystem` 在首轮
+ * 目录里渲染的就是这里的 description。发布页只展示它，不让管理员另敲一份 —— 两份文本
+ * 会让管理页显示的、审计里记的和模型实际看到的分叉，而且没有任何机制会发现。
+ */
+export interface SkillEntryFrontmatter {
+  name: string
+  description: string
+  whenToUse?: string
+}
+
+/** `validate` 返回的服务端解析结果，供发布页展示文件树与风险提示。 */
+export interface SkillValidationResult {
+  upload_id: string
+  bundle_hash: string
+  archive_sha256: string
+  archive_size_bytes: number
+  expanded_size_bytes: number
+  file_count: number
+  contains_scripts: boolean
+  tree: SkillBundleFile[]
+  frontmatter: SkillEntryFrontmatter
 }

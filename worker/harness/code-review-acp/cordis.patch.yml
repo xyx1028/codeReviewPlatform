@@ -41,6 +41,13 @@
 - id: hmr
   disabled: true
 
+#    skill-badge 只给交互式客户端画一个"技能已加载"的角标，自动化流程没有客户端 UI。
+#    已安装的 base bundle 本来就把它标成 disabled，这里显式再声明一次是为了让契约的
+#    disabledPlugins 与真实状态自洽 —— manifest 检查要求两者逐项对上，而 V1.6 之前
+#    契约声称它是启用的（方案 §21 第 6 条）。它不提供任何模型工具，modelTools 一字未改。
+- id: skill-badge
+  disabled: true
+
 #    会话标题需要额外一次模型请求，对自动化流程没有价值，却要占预算。
 - id: session-title-llm
   disabled: true

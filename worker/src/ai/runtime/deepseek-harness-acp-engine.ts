@@ -38,6 +38,9 @@ import {
   type MaterializedAttemptProfile,
   type ModelRouteSpec,
 } from '../acp/profile-materializer.js'
+import type { ProvisionedSkill } from '../skills/skill-provisioner.js'
+import { emptyCatalogHash } from '../skills/skill-manifest.js'
+import { SKILL_ERROR_CODES, SkillGovernanceError } from '../skills/skill-errors.js'
 import {
   startAttemptControlBroker,
   type AttemptControlHandle,
@@ -134,10 +137,38 @@ export interface DeepSeekHarnessAcpEngineOptions {
   coveragePolicy: CoveragePolicy
   /** Model key, read from the vault by the worker and never written to disk. */
   apiKey: string
+  /**
+   * 内网模型的代理环境（V1.7 阶段二）。
+   *
+   * 只在冻结快照的 `network_access_mode = HOST_PROXY` 时非空。它进 dsh 子进程的环境，
+   * 让 `llm-pi-ai` 的 fetch 经本机代理发出 —— 那是唯一可行的机制（该库没有 per-provider
+   * 代理配置，底层 pi-ai 也没有自定义 fetch 钩子）。
+   *
+   * 已知代价见 `model-connectivity/network-mode.ts` 的 `hostProxyChildEnv`：这些变量会被
+   * Agent 的 `bash` 继承。公网模型的 attempt 完全不受影响（这里为空）。
+   */
+  modelProxyEnv?: Record<string, string>
   /** Directory that holds per-attempt profile trees. */
   attemptsRoot: string
   /** Session JSONL 的持久卷根目录。 */
   sessionRoot: string
+  /**
+   * V1.6：本次 attempt 已经下载、校验并放进共享 cache 的冻结技能目录。
+   *
+   * 由 factory 在 **构造引擎之前**完成 —— 下载与校验会失败，而失败必须在 spawn dsh
+   * 之前发生（方案 §12）。缺省等价于空目录：`skill-filesystem` 的隔离配置照写，
+   * 只是没有任何技能被发现。
+   */
+  skills?: {
+    catalogHash: string
+    /** Job 冻结值。与 `catalogHash` 不等即拒绝启动。 */
+    frozenCatalogHash: string
+    snapshotVersion: number
+    bundles: readonly ProvisionedSkill[]
+    downloadBytes: number
+    cacheHits: number
+    cacheMisses: number
+  }
   workerId: string
   /** claim 时数据库给出的 fencing revision。 */
   sessionRevision?: number
@@ -185,6 +216,8 @@ export interface DeepSeekHarnessAcpEngineOptions {
       eventCount: number
       harnessVersion: string
       profileHash: string | null
+      /** V1.6：本次 attempt 物化的技能目录身份，恢复门禁按它比对。 */
+      skillCatalogHash?: string | null
     }): Promise<void>
     recordProfile(input: {
       harnessVersion: string
@@ -194,6 +227,8 @@ export interface DeepSeekHarnessAcpEngineOptions {
       rootAgentId: string
       rootSessionId: string
       treeDigest: string
+      /** V1.6：Worker 独立重算的技能目录身份。RPC 会与 Job 冻结值对账。 */
+      skillCatalogHash?: string | null
     }): Promise<void>
     /**
      * 找回一个可恢复的 attempt。
@@ -424,6 +459,13 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       broker = await startAttemptControlBroker({
         taskId: this.options.taskId,
         agentAttempt: this.options.agentAttempt,
+        // 冻结目录的 name → bundleHash。Broker 用它独立核对插件上报的技能名，而不是
+        // 转发上报的 hash（见 resolveSkillAttribution）。
+        skillBundleHashes: new Map(
+          (this.options.skills?.bundles ?? []).map(
+            (provisioned) => [provisioned.bundle.name, provisioned.bundle.bundleHash] as const,
+          ),
+        ),
         snapshots: this.options.snapshots,
         coveragePolicy: this.options.coveragePolicy,
         socketRoot,
@@ -471,6 +513,24 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       // Unix socket 已在监听：这是明确的 await 边界。
       emit({ type: 'BROKER_READY', payload: {} })
 
+      // ---- V1.6 技能目录门禁 ---------------------------------------------
+      //
+      // 在物化 profile **之前**校验：Worker 自己重算出来的 catalog hash 必须等于 Job
+      // 冻结的那一份。不等只有三种可能 —— 对象存储里的字节被换过、解析逻辑漂移了、
+      // 或者 Worker 读的是"当前已发布集合"而不是 Job 快照。三种都不能放行，而且都不能
+      // 退化成"少几个技能继续跑"：一个技能面不完整却跑完的评审结论看起来是有效结果。
+      const skillCatalogHash = this.options.skills?.catalogHash ?? emptyCatalogHash()
+      if (
+        this.options.skills !== undefined &&
+        this.options.skills.frozenCatalogHash !== '' &&
+        this.options.skills.frozenCatalogHash !== skillCatalogHash
+      ) {
+        throw new SkillGovernanceError(
+          SKILL_ERROR_CODES.SESSION_SKILL_SET_MISMATCH,
+          'the recomputed skill catalog hash differs from the hash frozen on this job',
+        )
+      }
+
       profile = materializeAttemptProfile({
         taskId: this.options.taskId,
         agentAttempt: this.options.agentAttempt,
@@ -490,6 +550,22 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         repositories: this.options.snapshots
           .pins()
           .map((pin) => pin.repository as RepositoryName),
+        skills: {
+          catalogHash: skillCatalogHash,
+          bundles: this.options.skills?.bundles ?? [],
+        },
+      })
+      log.info('agent_attempt_skills_materialized', {
+        event: 'agent_attempt_skills_materialized',
+        skill_catalog_hash: skillCatalogHash,
+        skill_snapshot_version: this.options.skills?.snapshotVersion ?? 0,
+        skill_catalog_count: profile.skills.skills.length,
+        skill_files: profile.skills.fileCount,
+        skill_bytes: profile.skills.bytes,
+        skill_cache_hits: this.options.skills?.cacheHits ?? 0,
+        skill_cache_misses: this.options.skills?.cacheMisses ?? 0,
+        skill_bundle_download_bytes: this.options.skills?.downloadBytes ?? 0,
+        skill_script_bundles: profile.skills.skills.filter((s) => s.containsScripts).length,
       })
 
       // 契约校验：root 的工具面必须正好等于 policy 规定的集合。多一个是 Harness 悄悄加了
@@ -518,6 +594,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         rootAgentId: identity.rootAgentId,
         rootSessionId: identity.rootSessionId,
         treeDigest: authority.treeDigest(),
+        skillCatalogHash,
       })
       // 落库成功才算冻结：recordProfile 失败时上面已经抛出，不会走到这里。
       emit({ type: 'PROFILE_FROZEN', payload: {} })
@@ -538,6 +615,9 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         max_depth: policy.agents.maxDelegationDepth,
         max_parallel_tools: policy.parallelTools.maxPerStep,
         session_root: sessionSlot.sessionRoot,
+        // 这一行让"这次 attempt 的模型请求走了内网代理"在审计里可见 —— 连带它对
+        // Agent Shell 的可达性影响（见 network-mode.ts）也就有了痕迹。
+        model_via_host_proxy: this.options.modelProxyEnv !== undefined,
       })
 
       const startProcess = this.options.startProcess ?? startAcpProcess
@@ -554,7 +634,10 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         brokerToken: broker.token,
         rootCapability: authority.rootCapabilityToken,
         // dsh 进程的非机密环境；Harness 在 spawn Shell 前会重建环境并剥掉凭据类变量名。
-        extraEnv: workspace.shellSpec().env,
+        //
+        // 内网模型的代理环境放在后面：它必须真的到达 dsh 的 fetch，而 shellSpec().env 里
+        // 不该出现网络路由这类与 Workspace 无关的东西。
+        extraEnv: { ...workspace.shellSpec().env, ...(this.options.modelProxyEnv ?? {}) },
         // rlimit 由后代继承，所以设在 dsh 上就等于设在 Shell 与 Jobs 起的每个进程上。
         ulimits: workspace.shellSpec().limits,
       })
@@ -569,8 +652,16 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       // 开始 —— 长任务的 Todo、Goal 和已完成的取证全部白做，而且平台无从察觉。所以格式
       // 不兼容、日志 torn、被别的写者改过这三种情况都终止本次 attempt，由平台开新 attempt。
       let resumeSessionId: string | undefined
-      const resume = await this.resolveResume(profile.configHash, policyHash, log)
+      const resume = await this.resolveResume(profile.configHash, policyHash, skillCatalogHash, log)
       if (resume.decision.code !== null) {
+        // 技能类拒绝用 SkillGovernanceError：它的码不在冻结契约里（见 skill-errors.ts
+        // 的说明），用 V4GovernanceError 会把一个契约外的码塞进契约类型。
+        if (resume.decision.code === SKILL_ERROR_CODES.SESSION_SKILL_SET_MISMATCH) {
+          throw new SkillGovernanceError(
+            SKILL_ERROR_CODES.SESSION_SKILL_SET_MISMATCH,
+            `session recovery refused: ${resume.decision.reason}`,
+          )
+        }
         throw new V4GovernanceError(
           resume.decision.code as never,
           `session recovery refused: ${resume.decision.reason}`,
@@ -701,6 +792,9 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
                 sessionFormatVersion: described.formatVersion,
               }),
               profileHash: profile.configHash,
+              // 恢复门禁要比对它。不落库的话，重启后平台无从判断"这段历史是在哪套技能
+              // 目录下产生的"，只能盲目重放。
+              skillCatalogHash,
             })
             .catch((err) =>
               log.error('session_checkpoint_failed', {
@@ -1018,6 +1112,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
   private async resolveResume(
     profileHash: string,
     policyHash: string,
+    skillCatalogHash: string,
     log: Logger,
   ): Promise<{ decision: ResumeDecision; candidate: ResumeCandidate | null }> {
     if (!this.options.db || !this.options.policy.capabilities.sessionResume) {
@@ -1056,6 +1151,9 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       // checkpoint 里记的 harness_version 是兼容键，形如 `0.1.5-rc.1/v3`；压缩形态从
       // locator 后缀判断。
       compressed: String(row.storage_locator ?? '').endsWith('.zstd'),
+      // V1.6：checkpoint 与 Job 各自的技能目录身份。两者都参与门禁，见 evaluateResume。
+      skillCatalogHash: (row.skill_catalog_hash as string | null) ?? null,
+      jobSkillCatalogHash: (row.job_skill_catalog_hash as string | null) ?? null,
     }
     // 当前 Worker 的兼容键：包版本来自契约，格式版本来自这份日志的文件名。认不出文件名
     // 时给出一个不可能匹配的值，让 evaluateResume 走 SESSION_FORMAT_UNSUPPORTED。
@@ -1070,6 +1168,8 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
               sessionFormatVersion: candidateFormat,
             }),
       policyHash,
+      profileHash,
+      skillCatalogHash,
       // 走到这里说明数据库没有 receipt：它对已提交的 attempt 返回 null。
       alreadyCommitted: false,
       maxResumes: MAX_SESSION_RESUMES,
@@ -1081,6 +1181,9 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         reason: decision.reason,
         candidate_profile_hash: candidate.profileHash,
         current_profile_hash: profileHash,
+        candidate_skill_catalog_hash: candidate.skillCatalogHash,
+        job_skill_catalog_hash: candidate.jobSkillCatalogHash,
+        current_skill_catalog_hash: skillCatalogHash,
       })
     }
     return { decision, candidate }

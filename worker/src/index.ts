@@ -19,6 +19,8 @@ import { AGENT_REVIEW_PROMPT_VERSION } from './ai/prompts/agent-review-v1.js'
 import type { ReviewRunner } from './ai/runtime/contracts.js'
 import { buildDeepSeekHarnessReview } from './ai/runtime/factory.js'
 import { enforceSessionRetention } from './ai/session/session-retention.js'
+import { SkillCache } from './ai/skills/skill-cache.js'
+import { SupabaseSkillStorageClient, type SkillStorageClient } from './ai/skills/skill-storage.js'
 import { cleanOrphanedOverlays } from './ai/workspace/overlay-cleaner.js'
 import { loadConfig, type WorkerConfig } from './config.js'
 import { SlotPool } from './coordination/concurrency.js'
@@ -28,7 +30,7 @@ import {
   WorkerAlreadyRunningError,
 } from './coordination/instance-lock.js'
 import { SupabaseDbClient } from './db/client.js'
-import { JobsDb, type StoryTask } from './db/jobs.js'
+import { JobsDb, type ModelConnectivityTestClaim, type StoryTask } from './db/jobs.js'
 import {
   prepareRepositoryAtSnapshot,
   type PreparedRepository,
@@ -38,6 +40,14 @@ import { rootLogger, type Logger } from './logger.js'
 import { finalizeJob } from './pipeline/finalize-job.js'
 import { prepareJob } from './pipeline/prepare-job.js'
 import { redactError } from './security/redaction.js'
+import {
+  ModelConnectivityProbeError,
+  probeModelConnectivity,
+} from './model-connectivity/probe.js'
+import {
+  ModelNetworkRouteError,
+  resolveModelNetworkRoute,
+} from './model-connectivity/network-mode.js'
 import {
   buildRuntimeEventReporter,
   type RuntimeEventReporterLike,
@@ -98,7 +108,16 @@ export async function runStoryTask(
   jobsDb: JobsDb,
   task: StoryTask,
   logger: Logger,
-  options: { signal?: AbortSignal } = {},
+  options: {
+    signal?: AbortSignal
+    /**
+     * 共享 Skill Cache 与下载通道（V1.6）。
+     *
+     * 从调用方传进来而不是在这里 new：它们必须跨 attempt 共享，而这个函数每个 Story
+     * 都跑一次。缺省时本次 attempt 使用空技能目录 —— 单测走的就是这条路。
+     */
+    skills?: { cache: SkillCache; storage: SkillStorageClient }
+  } = {},
 ): Promise<void> {
   const log = logger.child({
     job_id: task.job_id,
@@ -204,17 +223,31 @@ export async function runStoryTask(
       agentAttemptsRoot: config.agentAttemptsRoot,
       sessionRoot: config.sessionRoot,
       // Workspace 绝不能触及这些：pinned 快照缓存（写它会污染证据源）、attempt 树根、
-      // Session 卷、Worker 自己的工作目录。
+      // Session 卷、Worker 自己的工作目录、共享 Skill Cache（写它会污染其他 attempt 的
+      // 不可变技能包）。
       forbiddenRoots: [
         config.codeCacheRoot,
         config.agentAttemptsRoot,
         config.sessionRoot,
         config.workspaceRoot,
+        config.skillCacheRoot,
       ],
       infrastructure: {
         supabaseUrl: config.supabaseUrl,
         gitlabBaseUrl: config.gitlabBaseUrl,
       },
+      modelImageInputEnabled: config.modelImageInputEnabled,
+      // 内网模型的代理配置。与连接测试用的是同一份 Worker 配置，于是"测得通"与"跑得通"
+      // 不可能因为配置来源不同而分叉 —— 阶段一正是在这一点上出的问题。
+      hostProxy: config.modelConnectivityProxy,
+      skills:
+        options.skills === undefined
+          ? undefined
+          : {
+              cache: options.skills.cache,
+              storage: options.skills.storage,
+              cacheMaxBytes: config.skillCacheMaxBytes,
+            },
       logger: log,
       isLeaseValid: () => lease.leaseHeld() && !cancelRequested,
       isCancelRequested: () => cancelRequested,
@@ -380,16 +413,127 @@ export function recordSetupFailure(
   })
 }
 
+export async function runModelConnectivityTest(
+  config: WorkerConfig,
+  jobsDb: JobsDb,
+  claim: ModelConnectivityTestClaim,
+  logger: Logger,
+  signal: AbortSignal,
+): Promise<void> {
+  const log = logger.child({ model_connectivity_test_id: claim.id })
+  let apiKey: string | null = null
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  signal.addEventListener('abort', abort, { once: true })
+  const lease = new Heartbeat({
+    taskId: claim.id,
+    workerId: config.workerId,
+    intervalMs: Math.min(config.heartbeatIntervalMs, 15000),
+    send: (testId, workerId) => jobsDb.heartbeatModelConnectivityTest({
+      testId,
+      workerId,
+      claimToken: claim.claim_token,
+      leaseSeconds: config.modelConnectivityTestLeaseSeconds,
+    }),
+    onLeaseLost: abort,
+    logger: log,
+  })
+  lease.start()
+  try {
+    apiKey = await jobsDb.getModelSecretForConnectivityTest({
+      testId: claim.id,
+      workerId: config.workerId,
+      claimToken: claim.claim_token,
+    })
+    /*
+     * 按**冻结的**网络类型决定走不走代理。
+     *
+     * 阶段一在这里无条件传了 `config.modelConnectivityProxy`，于是公网模型的请求也被送进
+     * 代理，被代理的域名白名单拒成 HTTP 403 —— 用户看到"模型返回 403"，而真正的拒绝方
+     * 是我们自己。判定统一交给 resolveModelNetworkRoute，与正式评审链路共用一套规则。
+     */
+    const route = resolveModelNetworkRoute({
+      mode: claim.network_access_mode_snapshot,
+      configuredProxy: config.modelConnectivityProxy,
+    })
+    log.info('model_connectivity_test_route_resolved', {
+      event: 'model_connectivity_test_route_resolved',
+      network_access_mode: route.mode,
+      via_host_proxy: route.proxy !== null,
+    })
+    const result = await probeModelConnectivity({
+      baseUrl: claim.base_url_snapshot,
+      modelName: claim.model_name_snapshot,
+      apiKey,
+      timeoutMs: claim.request_timeout_ms_snapshot,
+      proxy: route.proxy,
+      signal: controller.signal,
+    })
+    const completed = await jobsDb.completeModelConnectivityTest({
+      testId: claim.id,
+      workerId: config.workerId,
+      claimToken: claim.claim_token,
+      statusCode: result.statusCode,
+      latencyMs: result.latencyMs,
+    })
+    if (completed) log.info('model_connectivity_test_succeeded', {
+      event: 'model_connectivity_test_succeeded', latency_ms: result.latencyMs,
+    })
+  } catch (error) {
+    if (signal.aborted) {
+      await jobsDb.releaseModelConnectivityTestClaim({
+        testId: claim.id,
+        workerId: config.workerId,
+        claimToken: claim.claim_token,
+      }).catch(() => false)
+      return
+    }
+    // 未配置代理却选了内网模型：以稳定错误码明确失败，绝不静默直连。
+    const routeError = error instanceof ModelNetworkRouteError ? error : null
+    const probeError = error instanceof ModelConnectivityProbeError ? error : null
+    await jobsDb.failModelConnectivityTest({
+      testId: claim.id,
+      workerId: config.workerId,
+      claimToken: claim.claim_token,
+      // 路由错误优先：它的原因（这台 Worker 没配代理）与模型端点无关，混进
+      // MODEL_TEST_FAILED 会让管理员去查模型，而该查的是 Worker 的配置。
+      code: routeError?.code ?? probeError?.code ?? 'MODEL_TEST_FAILED',
+      message: routeError?.message ?? probeError?.message ?? '模型连接测试失败',
+      statusCode: probeError?.statusCode,
+      latencyMs: probeError?.latencyMs,
+    }).catch(() => false)
+    log.warn('model_connectivity_test_failed', {
+      event: 'model_connectivity_test_failed',
+      error_code: routeError?.code ?? probeError?.code ?? 'MODEL_TEST_FAILED',
+    })
+  } finally {
+    apiKey = null
+    lease.stop()
+    signal.removeEventListener('abort', abort)
+    controller.abort()
+  }
+}
+
 /** Start the polling worker. */
 export function startWorker(config: WorkerConfig): WorkerRuntime {
   const logger = rootLogger.child({ worker_id: config.workerId })
   const jobsDb = new JobsDb(new SupabaseDbClient(config))
+  /*
+   * 共享只读 Skill Cache 与 service-role 下载通道（V1.6）。
+   *
+   * 每个 Worker 进程一份，而不是每个 attempt 一份：cache 的全部价值来自跨 attempt 复用。
+   * `SkillCache` 本身无状态（所有判定都读文件系统），所以同一个实例可以被并发 slot 共用；
+   * 并发发布靠临时目录 + 原子 rename 裁决，不靠进程内互斥。
+   */
+  const skillCache = new SkillCache({ cacheRoot: config.skillCacheRoot })
+  const skillStorage = new SupabaseSkillStorageClient(config)
   let stopped = false
   const shutdownController = new AbortController()
   let stopPromise: Promise<void> | null = null
 
   const pool = new SlotPool(config.workerStoryConcurrency)
   const inFlight = new Set<Promise<void>>()
+  let modelTestLoopPromise: Promise<void> | null = null
   let resolveRanOnce: () => void
   const ranOnce = new Promise<void>((resolve) => {
     resolveRanOnce = resolve
@@ -587,6 +731,7 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
           const release = await pool.acquire()
           const run = runStoryTask(config, jobsDb, task, logger, {
             signal: shutdownController.signal,
+            skills: { cache: skillCache, storage: skillStorage },
           })
             .catch((error) =>
               logger.error('slot_run_error', {
@@ -631,7 +776,44 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
     logger.info('worker_stopped', { event: 'worker_stopped' })
   }
 
+  const modelTestLoop = async (): Promise<void> => {
+    while (!stopped) {
+      try {
+        const claim = await jobsDb.claimNextModelConnectivityTest(
+          config.workerId,
+          config.modelConnectivityTestLeaseSeconds,
+        )
+        if (!claim) {
+          await sleep(config.pollIntervalMs)
+          continue
+        }
+        if (stopped) {
+          await jobsDb.releaseModelConnectivityTestClaim({
+            testId: claim.id,
+            workerId: config.workerId,
+            claimToken: claim.claim_token,
+          })
+          break
+        }
+        await runModelConnectivityTest(
+          config,
+          jobsDb,
+          claim,
+          logger,
+          shutdownController.signal,
+        )
+      } catch (error) {
+        logger.error('model_connectivity_test_loop_error', {
+          event: 'model_connectivity_test_loop_error',
+          error_message: redactError(error),
+        })
+        await sleep(config.pollIntervalMs)
+      }
+    }
+  }
+
   void loop()
+  modelTestLoopPromise = modelTestLoop()
 
   return {
     stop(): Promise<void> {
@@ -639,7 +821,10 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
       stopped = true
       clearInterval(availabilityHeartbeat)
       shutdownController.abort()
-      stopPromise = Promise.allSettled([...inFlight]).then(() => undefined)
+      stopPromise = Promise.allSettled([
+        ...inFlight,
+        ...(modelTestLoopPromise ? [modelTestLoopPromise] : []),
+      ]).then(() => undefined)
       return stopPromise
     },
     ranOnce,

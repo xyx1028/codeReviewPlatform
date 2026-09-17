@@ -47,6 +47,15 @@ services:
       AGENT_ATTEMPTS_ROOT: /workspace/agent-attempts
       # Session JSONL 的持久卷根目录。必须落在持久卷上，见下方 volumes 注释。
       AGENT_SESSION_ROOT: /workspace/agent-sessions
+      # V1.6 共享只读 Skill Cache。必须是命名卷：cache 的全部价值来自跨 attempt、跨 Job
+      # 复用，放在容器可写层上等于每次重启都把整个技能目录重新下载一遍。
+      SKILL_CACHE_ROOT: /workspace/skill-cache
+      # MODEL_IMAGE_INPUT_ENABLED **刻意不在这里**。
+      #
+      # compose 的 `environment:` 优先级高于 `env_file:`：在这里写一行
+      # `${MODEL_IMAGE_INPUT_ENABLED:-false}` 会让运维在 .docker/worker.env 里设的 true
+      # 被静默改回 false —— 而那正是这个开关唯一该住的地方（它是"这个部署接的模型支持
+      # 什么"的事实，和路径常量不同）。Worker 侧缺省即 false，所以不写它是安全的。
       # ---- V4 容量与孤儿回收（留空即用 config.ts 默认值）-----------------
       # Session 卷容量上限（字节），默认 20GiB；超过即按最旧优先回收并告警。
       # AGENT_SESSION_VOLUME_MAX_BYTES: "21474836480"
@@ -112,6 +121,12 @@ services:
       - worker-attempts:/workspace/agent-attempts
       # Worker instance lock 目录。按 WORKER_ID 命名，每副本唯一。
       - worker-jobs:/workspace/jobs
+      # V1.6 共享只读 Skill Cache（`<bundle-hash>/{bundle.zip,manifest.json,files/}`）。
+      # 多副本共享是**设计意图**而不是妥协：内容按 bundle hash 寻址且发布后只读，
+      # 并发发布由临时目录 + 原子 rename 裁决（失败者复用胜出者）。
+      # 与 Session 卷不同，它的回收是**无损**的：每个 bundle 都能按冻结 locator 重新下载，
+      # 所以它不需要备份，容量上限（SKILL_CACHE_MAX_BYTES）可以设得比较紧。
+      - worker-skill-cache:/workspace/skill-cache
     deploy:
       replicas: 4
       restart_policy:
@@ -123,3 +138,4 @@ volumes:
   worker-cache:
   worker-attempts:
   worker-jobs:
+  worker-skill-cache:

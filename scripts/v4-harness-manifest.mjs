@@ -165,9 +165,33 @@ function check() {
   )
 }
 
-function generateMigration(number) {
-  if (!/^\d{4}$/.test(number ?? '')) {
-    fail('usage: npm run harness:manifest:new-migration -- <four-digit migration number>')
+/** `YYYYMMDDHHMMSS`（UTC）。迁移文件名的唯一合法前缀形式。 */
+function utcStamp(now = new Date()) {
+  const pad = (value, width = 2) => String(value).padStart(width, '0')
+  return (
+    `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}` +
+    `${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`
+  )
+}
+
+/**
+ * 生成下一份 manifest 迁移。
+ *
+ * 文件名**必须**是时间戳前缀，不再接受四位序号。这不是命名偏好：迁移按**字典序**应用，
+ * 而 `0042_*` 排在 `2026...` **之前**（`'0' < '2'`）。于是一个四位序号的 manifest 迁移会
+ * 在同批次的时间戳迁移**之前**执行 —— 对本仓库就意味着"先切契约、后建表"，正好落进
+ * OPERATIONS §17.2 警告的那个空档：契约哈希对上了，但新 RPC 还不存在。
+ *
+ * 不传参数就按当前 UTC 时间生成；显式传值必须是 14 位时间戳。两种情况都必须严格大于
+ * 目录里现有的最大文件名，否则新迁移会插到已有迁移之前。
+ */
+function generateMigration(stamp) {
+  const chosen = stamp === undefined || stamp === '' ? utcStamp() : stamp
+  if (!/^\d{14}$/.test(chosen)) {
+    fail(
+      'usage: npm run harness:manifest:new-migration [-- <14-digit UTC timestamp>]\n' +
+        '       migration names must be timestamp-prefixed; four-digit numbers sort before them',
+    )
   }
   const current = loadManifest()
   const manifestMigrations = migrationMetadataFiles()
@@ -176,20 +200,16 @@ function generateMigration(number) {
     fail(`manifestRevision must be ${latestRevision + 1} before generating the next migration`)
   }
   const allMigrationNames = readdirSync(migrationsDir).filter((name) => name.endsWith('.sql'))
-  if (allMigrationNames.some((name) => name.startsWith(`${number}_`))) {
-    fail(`migration number ${number} already exists`)
+  if (allMigrationNames.some((name) => name.startsWith(`${chosen}_`))) {
+    fail(`migration ${chosen} already exists`)
   }
-  const maxMigrationNumber = Math.max(
-    0,
-    ...allMigrationNames.map((name) => Number(name.match(/^(\d{4})_/)?.[1] ?? 0)),
-  )
-  if (Number(number) <= maxMigrationNumber) {
-    fail(`migration number must be greater than current latest ${String(maxMigrationNumber).padStart(4, '0')}`)
+  // 字典序守卫：新名字必须排在现有全部迁移之后，包括历史上的四位序号文件。
+  const latestName = [...allMigrationNames].sort().at(-1) ?? ''
+  const candidate = `${chosen}_v4_harness_manifest_r${current.manifest.manifestRevision}.sql`
+  if (latestName !== '' && candidate <= latestName) {
+    fail(`migration name ${candidate} must sort after the current latest ${latestName}`)
   }
-  const output = join(
-    migrationsDir,
-    `${number}_v4_harness_manifest_r${current.manifest.manifestRevision}.sql`,
-  )
+  const output = join(migrationsDir, candidate)
   if (existsSync(output)) fail(`${output} already exists`)
   const escapedPolicy = current.policyJson.replaceAll("'", "''")
   const sql = `-- Generated from worker/harness/code-review-acp/v4-capability-contract.json.\n-- Do not edit the policy JSON by hand.\n-- v4-manifest-revision: ${current.manifest.manifestRevision}\n-- v4-manifest-source-sha256: ${current.sourceHash}\n-- v4-manifest-hash: ${current.manifestHash}\n\nbegin;\n\nupdate public.v4_harness_manifest set is_active = false where is_active;\ninsert into public.v4_harness_manifest (\n  manifest_revision, contract_version, harness_version, manifest_hash, default_policy, is_active\n) values (\n  ${current.manifest.manifestRevision}, ${current.manifest.contractVersion}, '${current.manifest.harnessVersion}',\n  '${current.manifestHash}',\n  '${escapedPolicy}'::jsonb,\n  true\n);\n\ncommit;\n`

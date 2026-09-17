@@ -35,8 +35,25 @@ import {
   resolveToolsForRole,
   type V4CapabilityPolicy,
 } from '../policy/v4-capability-policy.js'
+import {
+  materializeSkillTree,
+  relaxSkillTree,
+  SKILLS_DIR_NAME,
+  type MaterializedSkillTree,
+} from '../skills/skill-materializer.js'
+import type { ProvisionedSkill } from '../skills/skill-provisioner.js'
+import { emptyCatalogHash } from '../skills/skill-manifest.js'
 
 export const ACP_PROFILE_NAME = 'code-review-acp'
+
+/**
+ * 没有真实 attempt 树时使用的占位 DSH_HOME。
+ *
+ * 只出现在 `buildAttemptPatch` 被单独调用的场景（单测、hash 稳定性检查）。真实路径
+ * 由 `materializeAttemptProfile` 传入，而两者在 configHash 里都被归一化成同一个占位符，
+ * 所以"用了占位路径"不会让 profile 身份漂移。
+ */
+const PLACEHOLDER_DSH_HOME = '/attempt/dsh-home'
 
 /** Plugin packages the profile patch references by name. */
 export const HARNESS_PLUGIN_PACKAGES = {
@@ -58,6 +75,20 @@ export interface ModelRouteSpec {
   /** Name of the environment variable holding the key. Never the key itself. */
   apiKeyEnvVar: string
   requestTimeoutMs: number
+  /**
+   * 这条路由接受的请求模态。
+   *
+   * **必须显式声明，不能靠 llm-pi-ai 的默认值。** 那个默认值是 `['text']`，而
+   * `read_image` 的准入检查读的正是 `resolveModelInfo(...).inputModalities` —— 不声明
+   * 就意味着 Bundle 里的 `assets/*.png` 永远读不出来，报错还是
+   * "model does not declare image input"，看起来像模型的问题而不是配置的问题。
+   * 这是实测出来的（见 v16-skill-dsh-runtime.test.ts）。
+   *
+   * 反过来**过度声明同样危险**：dsh 的注释说得很直白 —— under-claiming 在图片发出去
+   * 之前就拒绝它，over-claiming 会把图片发给一个处理不了它的 provider。两个错误的代价
+   * 不一样。所以默认只声明 `text`，由运维在确认模型端点真的接受图片后显式打开。
+   */
+  inputModalities?: readonly ('text' | 'image')[]
 }
 
 /** V4 的根身份。id 写进 attempt patch；capability token 只走环境变量，不落盘。 */
@@ -85,6 +116,19 @@ export interface AttemptProfileSpec {
   sessionRoot: string
   /** Repository names pinned for this job, surfaced in tool descriptions. */
   repositories?: string[]
+  /**
+   * V1.6：本次 attempt 要物化的冻结技能目录。
+   *
+   * 缺省（`undefined`）等价于**空目录**，不等价于"不隔离"：`skill-filesystem` 的
+   * `includeDefaultRoots: false` 与显式 `bundledSkillDir` 永远都会写进 patch。否则
+   * Workspace 里的 `.dsh/skills` 或宿主用户目录里的同名技能就能覆盖平台 Bundle ——
+   * 那正是 §19 第 13 条要排除的情况。
+   */
+  skills?: {
+    /** 冻结目录的身份。进 configHash，于是"技能集合变了"必然导致 profile hash 变。 */
+    catalogHash: string
+    bundles: readonly ProvisionedSkill[]
+  }
 }
 
 export interface MaterializedAttemptProfile {
@@ -100,6 +144,8 @@ export interface MaterializedAttemptProfile {
   contractHash: string
   /** 根 Agent 解析出来的工具面，启动后与 resolved inventory 比对。 */
   rootTools: readonly string[]
+  /** 本次 attempt 的技能物化结果。空目录时 `skills.skills` 为空数组。 */
+  skills: MaterializedSkillTree
   cleanup(): void
 }
 
@@ -195,6 +241,21 @@ export function childToolSurface(policy: V4CapabilityPolicy): readonly string[] 
 }
 
 /**
+ * 一次 attempt 的技能挂载点。
+ *
+ * 路径是 per-attempt 随机的（attemptRoot 用 mkdtemp 生成），所以它在 configHash 里被
+ * 归一化成 `[per-attempt-skills]`；真正进 hash 的身份是 `catalogHash`。
+ */
+export interface AttemptSkillMount {
+  /** per-attempt 的 `<dshHome>` 绝对路径。 */
+  dshHome: string
+  /** `<dshHome>/skills` 的绝对路径。 */
+  dir: string
+  /** 冻结目录的 catalog hash。空目录用 `emptyCatalogHash()`。 */
+  catalogHash: string
+}
+
+/**
  * Build the per-attempt overlay. It is emitted as JSON, which is valid YAML,
  * so no hand-rolled escaping can corrupt a path or a token.
  *
@@ -202,8 +263,23 @@ export function childToolSurface(policy: V4CapabilityPolicy): readonly string[] 
  * （见 `harness-plugins/shared/credential-env.ts`）：patch 文件落在 dshHome 下，而
  * `workspace-write` 沙箱只限制写不限制读，凭据写进这个文件等于交给任何拿到 Shell 的
  * 子 Agent。
+ *
+ * `skills` 可省略：省略时使用一个占位挂载点（空目录 hash + 占位路径），于是**隔离配置
+ * 依然存在**。这一点很关键 —— 隔离不能是"传了参数才有"的可选项，否则某条忘记传参的
+ * 调用路径就会静默恢复默认 roots，让 Workspace 里的同名技能覆盖平台 Bundle。
  */
-export function buildAttemptPatch(spec: AttemptProfileSpec): unknown[] {
+export function buildAttemptPatch(
+  spec: AttemptProfileSpec,
+  skills?: AttemptSkillMount,
+): unknown[] {
+  const skillMount: AttemptSkillMount = skills ?? {
+    // 占位路径。它只出现在没有真实 attempt 树的调用（单测、hash 稳定性检查）里，
+    // 而且在 computeConfigHash 里被归一化成 `[per-attempt-skills]`，所以它不影响
+    // profile 身份。隔离配置本身仍然照写。
+    dshHome: PLACEHOLDER_DSH_HOME,
+    dir: join(PLACEHOLDER_DSH_HOME, SKILLS_DIR_NAME),
+    catalogHash: spec.skills?.catalogHash ?? emptyCatalogHash(),
+  }
   const brokerConfig = {
     socketPath: spec.broker.socketPath,
     taskId: spec.taskId,
@@ -233,6 +309,8 @@ export function buildAttemptPatch(spec: AttemptProfileSpec): unknown[] {
                 name: spec.route.modelName,
                 contextWindow: spec.route.contextWindow,
                 maxTokens: spec.route.maxTokens,
+                // 显式声明模态。缺省是 `['text']` —— 那会让技能包里的图片资源永远不可读。
+                input: [...(spec.route.inputModalities ?? ['text'])],
               },
             ],
           },
@@ -432,6 +510,39 @@ export function buildAttemptPatch(spec: AttemptProfileSpec): unknown[] {
       },
     },
 
+    // ---- V1.6 Skills：只允许发现平台物化的冻结目录 ------------------------
+    //
+    // 三个字段各自挡掉一条真实的覆盖路径，缺一条整条就不成立：
+    //
+    //   * `includeDefaultRoots: false` —— 去掉 `<project>/.dsh/skills`、
+    //     `<project>/.agents/skills`、`<DSH_HOME>/skills`（user 档）和
+    //     `~/.agents/skills` 四个默认 root。前两个位于**模型可写的 Workspace 里**，
+    //     而且 rank 比 bundled root 更高（100/200 vs 600），也就是说不关掉它们的话，
+    //     模型只要在 Workspace 写一个同名 `SKILL.md` 就能顶替平台 Bundle。这正是
+    //     §19 第 13 条要排除的情况。
+    //   * `bundledSkillDir` —— 显式指向 per-attempt 的 `<dshHome>/skills`。它带
+    //     `trustedHost: true`，语义上就是"平台提供的、可信的技能"。
+    //   * `watch: false` / `watchFollowSymlinks: false` —— 冻结目录在 attempt 生命周期
+    //     内不会变，监听它没有意义；而"跟随 symlink 去监听"会把路径解析引出 attempt 树。
+    //     物化时已经保证树内无 symlink，这一行是第二道。
+    //
+    // `dshHome` / `agentsHome` 也显式指向 attempt 树内部：即使将来某条代码路径在
+    // `includeDefaultRoots: false` 下仍然用到它们，也只会落在私有目录里，而不是宿主
+    // 用户的 home。
+    {
+      id: 'skill-filesystem',
+      config: {
+        providerName: 'filesystem',
+        includeDefaultRoots: false,
+        dshHome: skillMount.dshHome,
+        agentsHome: join(skillMount.dshHome, 'agents-home'),
+        customSkillDirs: [],
+        bundledSkillDir: skillMount.dir,
+        watch: false,
+        watchFollowSymlinks: false,
+      },
+    },
+
     // ---- 平台治理插件 ---------------------------------------------------
     {
       id: 'agent-authority-policy',
@@ -444,6 +555,13 @@ export function buildAttemptPatch(spec: AttemptProfileSpec): unknown[] {
         // `tools.restrict()`。这是唯一覆盖全部委派路径的收窄点，`tool-subagent` 的 toolFilter
         // 只管经那个工具创建的子 Agent。
         childTools: [...childToolSurface(spec.policy)],
+        // V1.6 技能审计归因（方案 §16）。只用于把"读了哪个技能的哪个资源"记进现有的
+        // tool-audit 通道，不是权限边界 —— 权限边界仍是沙箱与角色工具面。
+        skillsDir: skillMount.dir,
+        skills: (spec.skills?.bundles ?? []).map((provisioned) => ({
+          name: provisioned.bundle.name,
+          bundleHash: provisioned.bundle.bundleHash,
+        })),
       },
     },
     {
@@ -468,14 +586,23 @@ export function buildAttemptPatch(spec: AttemptProfileSpec): unknown[] {
 /**
  * Hash the resolved configuration.
  *
- * patch 里已经没有凭据（见 `buildAttemptPatch`），只剩 per-attempt 的 socket 路径需要
+ * patch 里已经没有凭据（见 `buildAttemptPatch`），只剩 per-attempt 的随机路径需要
  * 归一化 —— 否则每个 attempt 的 profile hash 都不一样，"生产 Job 能追溯到唯一
  * Harness/profile/policy 组合"这条就无从成立。
+ *
+ * V1.6 追加两件事：
+ *
+ *   1. `skill-filesystem` 的四个 per-attempt 绝对路径归一化成占位符；
+ *   2. **`skillCatalogHash` 作为独立输入进 hash。** 它不在 patch 里 —— 塞进某个插件的
+ *      config 会被 schema 拒（那里没有这个键）。但 configHash 必须纳入它：技能集合是
+ *      模型能看到的能力面的一部分，集合变了而 profile hash 不变，等于让恢复门禁放过
+ *      一个"技能已经换了"的 Session。
  */
 export function computeConfigHash(
   templateDir: string,
   patch: unknown[],
   pluginEntries: Record<string, string>,
+  skillCatalogHash?: string,
 ): string {
   const redactedPatch = JSON.parse(JSON.stringify(patch)) as Array<{
     id?: string
@@ -486,12 +613,26 @@ export function computeConfigHash(
     if (typeof row.config.socketPath === 'string') {
       row.config.socketPath = '[per-attempt-socket]'
     }
+    // `skillsDir` 出现在 agent-authority-policy 里（审计归因用）。它是 per-attempt 随机
+    // 路径，不归一化会让每个 attempt 的 profile hash 都不同 —— 而 profile hash 现在是
+    // 恢复门禁的判定项之一，那等于让**所有**恢复都被拒。
+    if (typeof row.config.skillsDir === 'string') {
+      row.config.skillsDir = '[per-attempt-skills]'
+    }
+    if (row.id === 'skill-filesystem') {
+      for (const key of ['bundledSkillDir', 'dshHome', 'agentsHome'] as const) {
+        if (typeof row.config[key] === 'string') {
+          row.config[key] = '[per-attempt-skills]'
+        }
+      }
+    }
   }
   const hash = createHash('sha256')
   hash.update(readFileSync(join(templateDir, 'package.json')))
   hash.update(readFileSync(join(templateDir, 'cordis.patch.yml')))
   hash.update(JSON.stringify(redactedPatch))
   hash.update(JSON.stringify(Object.keys(pluginEntries).sort()))
+  hash.update(`skill-catalog:${skillCatalogHash ?? emptyCatalogHash()}`)
   return hash.digest('hex')
 }
 
@@ -569,7 +710,26 @@ export function materializeAttemptProfile(
       )
     }
 
-    const patch = buildAttemptPatch(spec)
+    // ---- V1.6 技能物化 ---------------------------------------------------
+    //
+    // 必须在写 patch **之前**完成：patch 里的 `bundledSkillDir` 指向这棵树，而
+    // configHash 又要纳入 catalog hash。顺序颠倒的后果是 profile hash 记录的是一份
+    // 与磁盘不一致的配置。
+    //
+    // 空目录（`spec.skills` 缺省或 bundles 为空）同样会创建 `<dshHome>/skills`：
+    // 一个不存在的 root 与一个空 root 对 DSH 是同一个结果，但对运维不是 ——
+    // 目录存在意味着"平台确实处理过技能这件事"，而不是"这段代码没跑到"。
+    const skillTree = materializeSkillTree({
+      dshHome,
+      bundles: spec.skills?.bundles ?? [],
+    })
+    const skillCatalogHash = spec.skills?.catalogHash ?? emptyCatalogHash()
+
+    const patch = buildAttemptPatch(spec, {
+      dshHome,
+      dir: skillTree.skillsDir,
+      catalogHash: skillCatalogHash,
+    })
     assertPatchHasNoCredentials(patch)
     const patchPath = join(dshHome, 'attempt-route.patch.yml')
     writeFileSync(patchPath, `${JSON.stringify(patch, null, 2)}\n`, { mode: 0o600 })
@@ -580,18 +740,23 @@ export function materializeAttemptProfile(
       profileName: ACP_PROFILE_NAME,
       profileDir,
       patchPath,
-      configHash: computeConfigHash(templateDir, patch, pluginEntries),
+      configHash: computeConfigHash(templateDir, patch, pluginEntries, skillCatalogHash),
       contractHash: contractHash(loadCapabilityContract()),
       rootTools: resolveToolsForRole({
         role: 'root-reviewer',
         policy: spec.policy,
         delegationDepth: 0,
       }),
+      skills: skillTree,
       cleanup: () => {
+        // 技能树是 0500/0400 的只读树：不先放宽权限，`rmSync` 会在它上面失败，而失败
+        // 的表现是 attempt 目录残留、磁盘慢慢满。
+        relaxSkillTree(dshHome)
         rmSync(attemptRoot, { recursive: true, force: true })
       },
     }
   } catch (err) {
+    relaxSkillTree(join(attemptRoot, 'dsh-home'))
     rmSync(attemptRoot, { recursive: true, force: true })
     throw err
   }

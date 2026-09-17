@@ -21,7 +21,12 @@ const config: WorkerConfig = {
   storyTaskLeaseSeconds: 900,
   heartbeatIntervalMs: 30000,
   workerStoryConcurrency: 2,
+  modelConnectivityTestLeaseSeconds: 90,
+  modelConnectivityProxy: null,
   agentAttemptsRoot: '/tmp/agent-attempts',
+  skillCacheRoot: '/tmp/skill-cache',
+  skillCacheMaxBytes: 4 * 1024 * 1024 * 1024,
+  modelImageInputEnabled: false,
   // V4：Session 卷必须与 attempt 临时目录分开，恢复才成立；容量与孤儿回收也随之进 config。
   sessionRoot: '/tmp/agent-sessions',
   sessionRetentionDays: 7,

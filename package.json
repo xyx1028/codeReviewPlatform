@@ -21,7 +21,10 @@
     "test": "npm run harness:manifest:check && vitest run",
     "monitor:attempt": "node scripts/runtime-report.mjs attempt",
     "monitor:trend": "node scripts/runtime-report.mjs trend",
-    "monitor:findings": "node scripts/runtime-report.mjs findings"
+    "monitor:findings": "node scripts/runtime-report.mjs findings",
+    "proxy:model-vpn": "node scripts/model-vpn-proxy.mjs",
+    "proxy:model-vpn:install": "bash scripts/install-model-vpn-proxy.sh",
+    "proxy:model-vpn:uninstall": "bash scripts/uninstall-model-vpn-proxy.sh"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",

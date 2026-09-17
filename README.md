@@ -123,6 +123,51 @@ Phase 3 之前的 Workflow/Job 实例树）。它们全部落在 `unattributed_m
 运维面（环境变量、清理调度归属、三级停写、告警判据与 SQL、事件量与切分区时机、
 上线顺序与验收清单）见 `worker/OPERATIONS.md` 第 16 节。
 
+## 受管 DSH Skills（V1.6）
+
+管理员在 `/skills` 维护多文件 Skill Bundle。链路是：
+
+```text
+上传 ZIP 到 staging → 服务端解析并生成规范 manifest → 发布成不可变版本
+→ 新 Analysis Job 冻结全部「已发布且启用」的版本
+→ Worker 按 bundle hash 复用共享 cache（miss 时 service-role 下载并三层校验）
+→ 复制到 per-attempt DSH_HOME/skills/<name>/
+→ dsh 首轮只披露 name + description，Agent 调用 skill(name) 后才读到 SKILL.md 正文
+```
+
+关键约束：
+
+- **技能包不进代码 Workspace。** 它属于 dsh 运行配置，生命周期跟随 per-attempt
+  `DSH_HOME`；Workspace 只放被评审代码、overlay、artifacts 和临时文件。
+- **三层 hash 各自独立重算**：`archive_sha256`（字节完整）、`bundle_hash`（展开后的逻辑
+  文件集合）、`skill_catalog_hash`（Job 冻结的集合身份）。Edge Function 与 Worker 各算一遍，
+  数据库再算一遍 —— 三处共用一份**行式**规范格式，`collate "C"` 对齐 JS 的码元序。
+- **`SKILL.md` 必须带 YAML frontmatter**（`name` 与技能名相同、`description` 非空）。
+  dsh 的 `skill-filesystem` 缺了它只写一行 warn 就忽略整个技能 —— 文件在磁盘上、Job 也建成了，
+  模型的目录里就是没有它，而平台侧没有任何错误码。所以发布时就拒。`description` 与
+  `whenToUse` **只**来自 frontmatter，数据库里的那份是它的投影，不让管理员另敲一遍。
+- **归档解析 fail closed**：Zip Slip、绝对路径、`..`、反斜杠、重复与大小写冲突路径、
+  symlink / 设备 / FIFO / socket、加密归档、CRC 不符、Zip Bomb（20:1）、未在允许列表里的
+  文件类型、非严格 UTF-8 文本、magic 与扩展名不符的图片，全部拒绝发布。禁止"先解压后检查"。
+- **发布后不可覆盖**：version 行与正式对象都不可变；被 Job 快照引用即不可删除。
+  发布 V2 只影响之后新建的 Job。
+- **恢复门禁**：`profile hash` 与 `skill_catalog_hash` 都参与判定，不一致时以
+  `SESSION_FORMAT_UNSUPPORTED` / `SESSION_SKILL_SET_MISMATCH` 拒绝恢复，绝不退化成空技能目录。
+- **脚本不会因加载技能而执行**，但拥有 `bash` 的 Agent 可以显式运行；含 `scripts/` 的版本
+  必须在发布页额外确认。
+
+共享 cache 需要一个命名卷：
+
+```bash
+# docker-compose.worker.yml 已声明 worker-skill-cache:/workspace/skill-cache
+SKILL_CACHE_ROOT=/workspace/skill-cache
+SKILL_CACHE_MAX_BYTES=4294967296
+```
+
+上线顺序、错误码表、告警判据、清理归属与回滚见 `worker/OPERATIONS.md` 第 17 节；
+上传服务的安全模型见
+[`supabase/functions/skill-bundle-admin/README.md`](supabase/functions/skill-bundle-admin/README.md)。
+
 ## 微信扫码登录与账号绑定
 
 登录页支持微信开放平台网站应用扫码登录，邮箱老用户可在“个人中心”绑定微信并继续使用原账号。部署前需要应用 `0013_wechat_identity.sql`、配置微信服务端 Secrets，并以公开回调模式部署 Edge Function。

@@ -18,6 +18,19 @@ import type { CoveragePolicy } from '../snapshot/search-coverage-ledger.js'
 import { checkoutPinnedCommit } from '../../git/prepare.js'
 import { DeepSeekHarnessAcpEngine } from './deepseek-harness-acp-engine.js'
 import {
+  parseFrozenSkillCatalog,
+  provisionSkillCatalog,
+  type ProvisionedSkill,
+} from '../skills/skill-provisioner.js'
+import { SkillCache } from '../skills/skill-cache.js'
+import { bundleHashDirName, emptyCatalogHash } from '../skills/skill-manifest.js'
+import type { SkillStorageClient } from '../skills/skill-storage.js'
+import {
+  hostProxyChildEnv,
+  resolveModelNetworkRoute,
+  type HostProxySettings,
+} from '../../model-connectivity/network-mode.js'
+import {
   NullRuntimeEventReporter,
   type RuntimeEventReporterLike,
 } from '../../monitoring/runtime-event-reporter.js'
@@ -48,6 +61,34 @@ export interface BuildDeepSeekHarnessReviewInput {
    * 此时全部插桩点走 NullRuntimeEventReporter，现有分析流程一字不改。
    */
   runtimeEvents?: RuntimeEventReporterLike
+  /**
+   * V1.6：共享只读 Skill Cache 与 service-role 下载通道。
+   *
+   * 两者都缺省时，本次 attempt 使用**空技能目录** —— 这是单测与"该部署没有启用技能"
+   * 的路径。注意它不等于"跳过隔离"：`skill-filesystem` 的 `includeDefaultRoots: false`
+   * 永远生效，所以 Workspace 里的同名技能在任何配置下都无法被发现。
+   */
+  skills?: {
+    cache: SkillCache
+    storage: SkillStorageClient
+    /** cache 容量上限，attempt 启动后按 LRU 回收。 */
+    cacheMaxBytes?: number
+  }
+  /**
+   * 模型端点是否接受图片输入。默认 false（只声明 `text`）。
+   *
+   * 它决定 Bundle 里的 `assets/*.png` 能不能被 `read_image` 读到 —— 关掉时那些字节对
+   * 模型不可见。见 worker/src/config.ts 里 `modelImageInputEnabled` 的取舍说明。
+   */
+  modelImageInputEnabled?: boolean
+  /**
+   * 本机内网代理配置（V1.7 阶段二）。
+   *
+   * 它回答的是"这台 Worker 有没有通往内网的路"；模型的 `network_access_mode` 回答的是
+   * "这个模型在哪张网上"。只有两者都成立才走代理，两者的组合判定在
+   * `resolveModelNetworkRoute` 里，与连接测试链路共用。
+   */
+  hostProxy?: HostProxySettings | null
 }
 
 /** Coverage required before an attempt may claim a story is not implemented. */
@@ -196,6 +237,36 @@ export async function buildDeepSeekHarnessReview(
     agentAttempt: input.task.agent_attempt,
   }
 
+  /*
+   * V1.6：下载并校验 Job 冻结的技能目录。
+   *
+   * 位置很关键 —— 在 `new DeepSeekHarnessAcpEngine` **之前**。理由：这一步会因为下载失败、
+   * hash 不符、归档非法或超限而抛错，而方案 §12 要求这些失败发生在 spawn dsh 之前。
+   * 放到引擎内部去做也能满足这一点，但那会让"技能不可用"与"Harness 起不来"混在同一段
+   * 错误处理里，运维分不清是哪一层坏了。
+   */
+  const skills = await resolveFrozenSkills(input)
+
+  /*
+   * V1.7 阶段二：按**冻结快照**里的网络类型决定模型请求走不走本机代理。
+   *
+   * 读的是 `input.task.model`（即 `analysis_job.model_snapshot`），不是当前的模型配置 ——
+   * 任务执行期间管理员改了网络类型，不能把一个在跑的 attempt 搬到另一张网上。
+   *
+   * `HOST_PROXY` 但这台 Worker 没配代理时，`resolveModelNetworkRoute` 会抛
+   * `MODEL_PROXY_NOT_CONFIGURED`，attempt 明确失败 —— 绝不静默直连：那会把内网模型的
+   * 请求（连带 API Key）发到公网 DNS 解析出来的某个同名主机上。
+   */
+  const networkRoute = resolveModelNetworkRoute({
+    mode: model.network_access_mode,
+    configuredProxy: input.hostProxy ?? null,
+  })
+  input.logger.info('model_network_route_resolved', {
+    event: 'model_network_route_resolved',
+    network_access_mode: networkRoute.mode,
+    via_host_proxy: networkRoute.proxy !== null,
+  })
+
   return new DeepSeekHarnessAcpEngine({
     taskId: input.task.id,
     agentAttempt: input.task.agent_attempt,
@@ -218,6 +289,7 @@ export async function buildDeepSeekHarnessReview(
       maxTokens: model.max_output_tokens ?? 8192,
       apiKeyEnvVar: AGENT_MODEL_API_KEY_ENV,
       requestTimeoutMs: model.request_timeout_ms ?? 180000,
+      inputModalities: input.modelImageInputEnabled === true ? ['text', 'image'] : ['text'],
     },
     policy,
     frozenPolicyHash,
@@ -225,8 +297,11 @@ export async function buildDeepSeekHarnessReview(
       input.repositories.map((repo) => repo.repository),
     ),
     apiKey,
+    modelProxyEnv:
+      networkRoute.proxy === null ? undefined : hostProxyChildEnv(networkRoute.proxy),
     attemptsRoot: input.agentAttemptsRoot,
     sessionRoot: input.sessionRoot,
+    skills,
     workerId: input.workerId,
     // claim 返回的 fencing revision：恢复时数据库会在此基础上再推进一格。
     sessionRevision: input.task.session_revision,
@@ -279,6 +354,91 @@ export async function buildDeepSeekHarnessReview(
       requestAttemptCancel: (reason) => input.jobsDb.requestAttemptCancel(input.task.id, reason),
     },
   })
+}
+
+export interface ResolvedFrozenSkills {
+  catalogHash: string
+  frozenCatalogHash: string
+  snapshotVersion: number
+  bundles: readonly ProvisionedSkill[]
+  downloadBytes: number
+  cacheHits: number
+  cacheMisses: number
+}
+
+/**
+ * 取 Job 冻结目录 → 下载/复用 cache → 重算 catalog hash。
+ *
+ * 未接线 cache/storage 时返回一个显式的空目录，而不是 `undefined`：调用方拿到的永远是
+ * 一个"我确实处理过技能"的结构，于是"忘了传参"和"这个 Job 真的没有技能"在日志里长得
+ * 不一样。
+ */
+export async function resolveFrozenSkills(
+  input: BuildDeepSeekHarnessReviewInput,
+): Promise<ResolvedFrozenSkills> {
+  const empty: ResolvedFrozenSkills = {
+    catalogHash: emptyCatalogHash(),
+    frozenCatalogHash: '',
+    snapshotVersion: 0,
+    bundles: [],
+    downloadBytes: 0,
+    cacheHits: 0,
+    cacheMisses: 0,
+  }
+  if (input.skills === undefined) return empty
+
+  const raw = await input.jobsDb.getStoryTaskSkillSnapshot({
+    taskId: input.task.id,
+    workerId: input.workerId,
+    claimToken: input.task.claim_token,
+  })
+  const catalog = parseFrozenSkillCatalog(raw)
+  if (catalog.bundles.length === 0) {
+    return {
+      ...empty,
+      frozenCatalogHash: catalog.catalogHash,
+      snapshotVersion: catalog.snapshotVersion,
+    }
+  }
+
+  const outcome = await provisionSkillCatalog({
+    catalog,
+    cache: input.skills.cache,
+    storage: input.skills.storage,
+    onEvent: (event) =>
+      input.logger.info('skill_bundle_provisioned', {
+        event: 'skill_bundle_provisioned',
+        kind: event.kind,
+        skill_name: event.name,
+        // hash 是内容寻址标识，不是秘密；日志里绝不出现 Bundle 正文或 signed URL。
+        skill_bundle_hash: event.bundleHash,
+        bytes: event.bytes ?? null,
+      }),
+  })
+
+  // 回收在**物化之前**做：本次要用的 bundle 全部排除在外，所以不会删掉马上要复制的目录。
+  // 放在 attempt 结束时做反而更糟 —— 那时进程可能已经因为异常退出了。
+  const reclaimed = input.skills.cache.reclaim({
+    maxBytes: input.skills.cacheMaxBytes ?? 4 * 1024 * 1024 * 1024,
+    keep: new Set(catalog.bundles.map((bundle) => bundleHashDirName(bundle.bundleHash))),
+  })
+  if (reclaimed.removed > 0) {
+    input.logger.info('skill_cache_reclaimed', {
+      event: 'skill_cache_reclaimed',
+      removed: reclaimed.removed,
+      bytes: reclaimed.bytes,
+    })
+  }
+
+  return {
+    catalogHash: outcome.catalogHash,
+    frozenCatalogHash: catalog.catalogHash,
+    snapshotVersion: catalog.snapshotVersion,
+    bundles: outcome.bundles,
+    downloadBytes: outcome.downloadBytes,
+    cacheHits: outcome.cacheHits,
+    cacheMisses: outcome.cacheMisses,
+  }
 }
 
 /** Assemble requirement text from the imported row when legacy columns are absent. */

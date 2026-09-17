@@ -30,3 +30,4 @@ coverage
 
 # Supabase CLI runtime state and generated local credentials.
 supabase/.temp/
+.docker/*.env

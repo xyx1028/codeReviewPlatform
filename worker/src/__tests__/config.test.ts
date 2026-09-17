@@ -138,4 +138,34 @@ describe('loadConfig', () => {
       '/workspace/agent-attempts',
     )
   })
+
+  it('loads the V1.6 skill cache root and capacity ceiling', () => {
+    // 默认必须落在 /workspace 下的命名卷上：cache 的全部价值来自跨 attempt、跨 Job 复用。
+    expect(loadConfig(baseEnv()).skillCacheRoot).toBe('/workspace/skill-cache')
+    expect(loadConfig(baseEnv({ SKILL_CACHE_ROOT: '  /data/skills  ' })).skillCacheRoot).toBe(
+      '/data/skills',
+    )
+    expect(loadConfig(baseEnv()).skillCacheMaxBytes).toBe(4 * 1024 * 1024 * 1024)
+    expect(
+      loadConfig(baseEnv({ SKILL_CACHE_MAX_BYTES: String(512 * 1024 * 1024) })).skillCacheMaxBytes,
+    ).toBe(512 * 1024 * 1024)
+    // 下限存在的理由：小于全目录展开上限（256 MiB）的 cache 会让每个 attempt 必然 miss，
+    // 那时 cache 只剩开销没有收益。
+    expect(() => loadConfig(baseEnv({ SKILL_CACHE_MAX_BYTES: '1024' }))).toThrow(
+      /SKILL_CACHE_MAX_BYTES/,
+    )
+  })
+
+  it('defaults the model image-input declaration to off and rejects a typo', () => {
+    // 默认必须是 false：声明了 image 而模型其实不支持，图片会被发给一个处理不了它的
+    // provider —— 那比"读不到图片"严重得多。
+    expect(loadConfig(baseEnv()).modelImageInputEnabled).toBe(false)
+    expect(loadConfig(baseEnv({ MODEL_IMAGE_INPUT_ENABLED: 'true' })).modelImageInputEnabled).toBe(
+      true,
+    )
+    // 一个拼错的 `ture` 必须报错，而不是被当成 false 静默关掉。
+    expect(() => loadConfig(baseEnv({ MODEL_IMAGE_INPUT_ENABLED: 'ture' }))).toThrow(
+      /MODEL_IMAGE_INPUT_ENABLED/,
+    )
+  })
 })

@@ -71,6 +71,14 @@ export const KNOWN_DB_ERROR_CODES = [
   // 对 Worker 是"这条写入路径不该走"的明确信号，不是可重试的抖动。
   'V4_HARNESS_MANIFEST_MISSING',
   'V4_CAPABILITY_POLICY_MISSING',
+  // V1.6 受管 Skill Bundle。漏登记会让技能供给链的拒绝退化成裸 SQLSTATE，Worker
+  // 无从区分"目录超限"（治理问题，需要管理员处理）与"租约丢了"（可重试的接管）。
+  'SKILL_CATALOG_LIMIT_EXCEEDED',
+  'SKILL_VERSION_IMMUTABLE',
+  'SKILL_OBJECT_REFERENCED',
+  'SKILL_BUNDLE_INVALID',
+  'SKILL_BUNDLE_LIMIT_EXCEEDED',
+  'SESSION_SKILL_SET_MISMATCH',
 ] as const
 
 export type KnownDbErrorCode = (typeof KNOWN_DB_ERROR_CODES)[number]

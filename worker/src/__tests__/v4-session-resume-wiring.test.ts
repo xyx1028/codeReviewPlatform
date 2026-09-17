@@ -123,10 +123,22 @@ interface Harness {
     harnessVersion: string
     storageLocator: string
     contentHash: string
+    /** V1.6：恢复门禁按 profile hash 与技能目录 hash 判定，所以往返测试必须取到真值。 */
+    profileHash: string | null
+    skillCatalogHash: string | null
   }>
   sessionRoot: string
+  attemptsRoot: string
   processStarts: { count: number }
   persistedNodes: string[]
+  /**
+   * 引擎报给 `record_analysis_attempt_profile` 的身份。
+   *
+   * 恢复门禁比对 profile hash 与技能目录 hash，所以测试**不能手写**这两个值：手写的
+   * 常量与引擎实际算出来的值一旦分叉，测试会变成"检查我抄对了没有"，而不是"检查装配
+   * 对不对"。这一条正是这个文件开头那段说明要防的失效模式。
+   */
+  profiles: Array<{ profileHash: string; skillCatalogHash: string | null }>
   /** fence 钩子实际收到的原因，用来断言收敛真的落到了数据库。 */
   cancels: string[]
   /** 每条终态路径都必须落一次真实 usage。 */
@@ -174,6 +186,15 @@ function build(input: {
   resumable: Record<string, unknown> | null
   /** 复用一个已经播种过 checkpoint 的持久卷。 */
   sessionRoot?: string
+  /**
+   * 复用同一个 attempt 树根。
+   *
+   * 恢复必须能跨"进程重启"复现同一个 profile hash，而 profile hash 里含 Harness cwd
+   * （`<attemptsRoot>/<task>-<attempt>/workspace`）和 Session 根。生产环境这两个都是固定
+   * 卷路径，所以 hash 稳定；测试里每次 `build` 都换一个临时目录，则必然不稳定。要测
+   * "重启后能恢复"，就必须像生产那样把两个根固定住。
+   */
+  attemptsRoot?: string
   recordProfile?: () => Promise<void>
   registerAgentNode?: (agentId: string) => Promise<void>
   /** 调度侧告知的收敛原因，用来断言 LEASE_LOST / WORKER_SHUTDOWN 不再坍缩成 USER_CANCELLED。 */
@@ -182,12 +203,13 @@ function build(input: {
   /** turn 进行中的回调。真实的 lease 丢失与 Worker 关停都发生在这一刻，而不是启动之前。 */
   onTurn?: () => void
 }): Harness {
-  const attemptsRoot = tempRoot('crp-resume-att-')
+  const attemptsRoot = input.attemptsRoot ?? tempRoot('crp-resume-att-')
   const sessionRoot = input.sessionRoot ?? tempRoot('crp-resume-sess-')
   const turnOptions: AcpSessionOptions[] = []
   const checkpoints: Harness['checkpoints'] = []
   const processStarts = { count: 0 }
   const persistedNodes: string[] = []
+  const profiles: Harness['profiles'] = []
   const cancels: string[] = []
   const usageCommits: Array<Record<string, number | null>> = []
   const spawnOptions: Array<Record<string, unknown>> = []
@@ -236,9 +258,17 @@ function build(input: {
           harnessVersion: checkpoint.harnessVersion,
           storageLocator: checkpoint.storageLocator,
           contentHash: checkpoint.contentHash,
+          profileHash: checkpoint.profileHash,
+          skillCatalogHash: checkpoint.skillCatalogHash ?? null,
         })
       },
-      recordProfile: input.recordProfile ?? (async () => undefined),
+      recordProfile: async (profile) => {
+        profiles.push({
+          profileHash: profile.profileHash,
+          skillCatalogHash: profile.skillCatalogHash ?? null,
+        })
+        await input.recordProfile?.()
+      },
       reserveBudget: async () => ({ allowed: true, scope: null }),
       commitUsage: async (usage) => {
         usageCommits.push(usage)
@@ -274,8 +304,10 @@ function build(input: {
     turnOptions,
     checkpoints,
     sessionRoot,
+    attemptsRoot,
     processStarts,
     persistedNodes,
+    profiles,
     cancels,
     usageCommits,
     spawnOptions,
@@ -284,6 +316,28 @@ function build(input: {
 
 async function run(harness: Harness, signal?: AbortSignal) {
   return harness.engine.runReview({ signal: signal ?? new AbortController().signal, logger })
+}
+
+/**
+ * 跑一次抛弃式 attempt，取回引擎自己算出来的 profile / 技能目录身份。
+ *
+ * 恢复 fixture 必须用这两个真值：写死常量的 fixture 在门禁上线那天会集体变红，
+ * 而变红的原因与被测行为无关。
+ */
+async function recordedProfileIdentity(roots: {
+  attemptsRoot: string
+  sessionRoot: string
+}): Promise<{
+  profileHash: string
+  skillCatalogHash: string | null
+}> {
+  const probe = build({ resumable: null, ...roots })
+  await run(probe)
+  const identity = probe.profiles[0]
+  if (identity === undefined) {
+    throw new Error('the engine did not record an attempt profile')
+  }
+  return identity
 }
 
 describe('engine session resume wiring', () => {
@@ -337,9 +391,14 @@ describe('engine session resume wiring', () => {
   it('resumes the recorded session instead of opening a new one', async () => {
     // checkpoint 必须落在引擎自己会去读的那个持久卷上，否则测的就不是恢复而是"文件不见了"。
     const sessionRoot = tempRoot('crp-resume-live-')
+    const attemptsRoot = tempRoot('crp-resume-live-att-')
     const seed = seedSessionLog(sessionRoot, 'session-live')
+    // profile / 技能目录身份取引擎自己算的值：门禁比对的就是它们。两个根必须与被测
+    // harness 一致，否则算出来的是"另一台机器上的 profile"。
+    const identity = await recordedProfileIdentity({ attemptsRoot, sessionRoot })
     const harness = build({
       sessionRoot,
+      attemptsRoot,
       resumable: {
         agent_run_id: 'run-1',
         root_agent_id: 'root-x',
@@ -350,8 +409,10 @@ describe('engine session resume wiring', () => {
         storage_locator: seed.storageLocator,
         content_hash: seed.contentHash,
         harness_version: HARNESS,
-        profile_hash: 'profile-1',
+        profile_hash: identity.profileHash,
         policy_hash: hashPolicy(V4_DEFAULT_POLICY),
+        skill_catalog_hash: identity.skillCatalogHash,
+        job_skill_catalog_hash: identity.skillCatalogHash,
         resume_count: 1,
       },
     })
@@ -644,7 +705,8 @@ describe('engine convergence and checkpoint wiring', () => {
     // 第一次 attempt 走 session/new，引擎拿到的 sessionId 是桩里的 'fresh-session-id'，
     // 所以日志必须种在那个 id 下，checkpoint 才描述得到它。
     const seed = seedSessionLog(sessionRoot, 'fresh-session-id')
-    const first = build({ sessionRoot, resumable: null })
+    const attemptsRoot = tempRoot('crp-resume-roundtrip-att-')
+    const first = build({ sessionRoot, attemptsRoot, resumable: null })
     await run(first)
     const written = first.checkpoints.find((row) => row.sessionId === 'fresh-session-id')
     expect(written).toBeDefined()
@@ -653,6 +715,9 @@ describe('engine convergence and checkpoint wiring', () => {
 
     const second = build({
       sessionRoot,
+      // 与第一次同一个 attempt 树根：生产环境重启后这个路径不变，测试也必须如此，
+      // 否则 profile hash 天然不同，测的就不是恢复而是"路径变了"。
+      attemptsRoot,
       resumable: {
         agent_run_id: 'run-rt',
         root_agent_id: 'root-rt',
@@ -663,8 +728,11 @@ describe('engine convergence and checkpoint wiring', () => {
         content_hash: seed.contentHash,
         // 关键：用引擎自己写出来的值，而不是测试手写的裸版本号。
         harness_version: written!.harnessVersion,
-        profile_hash: written!.sessionId,
+        // 同理：profile hash 与技能目录 hash 也用引擎写出来的那份。
+        profile_hash: written!.profileHash,
         policy_hash: hashPolicy(V4_DEFAULT_POLICY),
+        skill_catalog_hash: written!.skillCatalogHash,
+        job_skill_catalog_hash: written!.skillCatalogHash,
         resume_count: 0,
       },
     })

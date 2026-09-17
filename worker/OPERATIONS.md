@@ -1105,3 +1105,333 @@ migration 做「建分区表 → 搬数据 → 改名切换」，需要停机窗
 回滚：前端回退到无 `/monitoring` 的版本即可（事件表保留，不做 destructive down migration）；
 Worker 用 16.3 第 2 级；数据库用第 3 级。页面看到 `last_event_at` 陈旧时显示「监控数据已暂停」，
 **不得把任务判定为失败**。
+
+---
+
+# 17. V1.6：受管 DSH Skill Bundle
+
+管理员在前端维护多文件 Skill Bundle；版本元数据与冻结快照进数据库，归档字节进专用私有
+对象存储；创建 Analysis Job 时冻结**全部已发布且启用**的版本；Worker 下载、校验、缓存
+不可变 Bundle，并在每次 attempt 启动前物化到私有 `DSH_HOME/skills/<name>/`。
+
+一句话记住边界：**技能包不物化到代码 Workspace。** Workspace 只放被评审代码、可写
+overlay、artifacts 和临时文件；Skill Bundle 属于 dsh 运行配置，生命周期跟随 per-attempt
+`DSH_HOME`。
+
+## 17.1 新增环境变量
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `SKILL_CACHE_ROOT` | `/workspace/skill-cache` | 共享只读 Skill Cache 根。**必须是命名卷** |
+| `SKILL_CACHE_MAX_BYTES` | `4294967296`（4 GiB） | 超过即按最后访问时间从旧到新回收 |
+| `MODEL_IMAGE_INPUT_ENABLED` | `false` | 模型路由是否声明 image 输入。决定 `assets/*.png` 能不能被 `read_image` 读到，见 17.9 |
+
+Compose 已声明 `worker-skill-cache` 卷。它与 Session 卷有一个关键区别：
+
+* **Session 卷必须备份、必须加密**：Session JSONL 是恢复未提交会话的唯一依据，丢了就没了。
+* **Skill Cache 卷不需要备份**：里面每一个 bundle 都能按 Job 冻结的 locator 从对象存储
+  重新下载。回收是无损的，所以容量上限可以设得比较紧 —— 卷满会让所有在跑的 attempt 一起
+  失败，而重新下载只多花一次带宽。
+
+多副本共享同一个 cache 卷是**设计意图**：内容按 `bundle_hash` 寻址、发布后只读，并发发布
+由临时目录 + 原子 `rename` 裁决（失败者清理自己的临时目录并复用胜出者）。这里刻意不用文件
+锁 —— 锁需要持有者活着，而 Worker 可能在任何时刻被 kill，留下一把永不释放的锁。
+
+## 17.2 上线顺序
+
+1. 应用迁移 `supabase/migrations/20260917100000_managed_dsh_skill_bundles.sql`。它建表、
+   建私有 `skill-bundles` bucket、装 RLS 与不可变触发器、改 `enqueue_analysis_job`，并把
+   **全部历史 Job 回填成空技能目录**（`skill_snapshot_version = 0` +
+   `empty_skill_catalog_hash()`）。
+2. 应用 `supabase/migrations/20260917121000_v4_harness_manifest_r2.sql`。它只做一件事：把
+   `skill-badge` 从 `enabledPlugins` 移到 `disabledPlugins`，与已安装 base bundle 的真实
+   状态对齐。**它会换掉 contract hash**，所以必须在没有在途 Job 的窗口里做（见 17.7）。
+3. 部署 Edge Function：`supabase functions deploy skill-bundle-admin`（**不要**
+   `--no-verify-jwt`），并设置 `ALLOWED_ORIGINS`。
+4. 部署前端（`/skills`，导航仅 ADMIN）。
+5. 发布初始 Bundle，确认列表里的容量水位与 catalog hash 都出来了。
+6. 部署带 `worker-skill-cache` 卷的新 Worker。
+7. 建一个新 Job，逐项核对：
+   - `analysis_job.skill_snapshot_version = 1`、`skill_catalog_hash` 非空且不等于空目录 hash；
+   - `analysis_job_skill_snapshot` 的 `archive_object_key` 是固定 locator（不是 signed URL）；
+   - Worker 日志出现 `skill_bundle_provisioned`（首次 `CACHE_MISS` + `DOWNLOADED`）与
+     `agent_attempt_skills_materialized`；
+   - 第二个 Story Task 的日志里 `skill_cache_hits` 增长、`skill_bundle_download_bytes` 为 0；
+   - `agent_attempt_started` 之前没有任何技能相关错误码。
+
+## 17.3 三层 hash 与"哪一层坏了"
+
+| hash | 证明什么 | 不能证明什么 |
+|---|---|---|
+| `archive_sha256` | 下载的**字节**完整 | 不能证明它是同一份逻辑内容（同一份文件用不同压缩参数重打包，字节就变了） |
+| `bundle_hash` | 展开后的**逻辑文件集合**一致 | 不能证明这个集合属于本 Job |
+| `skill_catalog_hash` | 本 Job 冻结的**集合身份**一致 | — |
+
+规范格式是显式的行式文本（`skill-bundle-v1` / `skill-catalog-v1`），SQL 与 TypeScript 逐
+字节一致，排序用 `collate "C"` 对齐 JS 的码元序。**刻意不用 JSON 序列化**：Postgres 的
+`jsonb::text` 渲染成 `{"a": 1}`，`JSON.stringify` 渲染成 `{"a":1}`，两侧各自序列化必然
+对不上。`src/lib/__tests__/skill-limits-consistency.test.ts` 机械守住这一点。
+
+## 17.4 错误码表
+
+| 码 | 触发 | 处理动作 |
+|---|---|---|
+| `SKILL_BUNDLE_DOWNLOAD_FAILED` | 对象存储不可达 / 404 / 字节数不符 | 查 Storage 可用性与 service-role key；对象是否被误删（`analysis_job_skill_snapshot` 引用的对象**不该**可删） |
+| `SKILL_ARCHIVE_HASH_MISMATCH` | 下载字节的 SHA-256 与冻结值不同 | **按安全事件处理**：已发布对象本应不可覆盖，出现即说明有人绕过了发布链路 |
+| `SKILL_BUNDLE_INVALID` | 归档结构非法、`SKILL.md` frontmatter 非法，或 Worker 重算的 bundle hash / 展开大小 / 脚本标记与冻结值不符 | 同上；若是刚发布的包，先看 Edge Function 的 `validation_rejected` 日志 |
+| `SKILL_BUNDLE_LIMIT_EXCEEDED` | 超出单包或全目录上限 | 管理员减包或拆技能。**不要**上调上限来"解决"它，上限保护的是首轮上下文与磁盘 |
+| `SKILL_CACHE_CORRUPT` | 共享 cache 内容与它的 bundle hash 不再一致 | 自愈：Worker 会删掉该目录并重新下载。反复出现说明卷有问题 |
+| `SESSION_SKILL_SET_MISMATCH` | Job 冻结目录、checkpoint 记录、Worker 重算三方不一致 | 不恢复，开新 attempt。若持续出现，核对是否有旧 Worker 在跑 |
+
+全部是**终态**：方案 §12 明确不允许回退到空技能、不允许改用当前已发布版本、不允许静默
+新建 Session。一个"少了三个技能但跑完了"的评审结论比一个明确失败的 attempt 危险得多 ——
+它看起来是有效结果。
+
+## 17.5 告警判据
+
+| 指标 | 判据 | 含义 |
+|---|---|---|
+| `SKILL_ARCHIVE_HASH_MISMATCH` / `SKILL_BUNDLE_INVALID` | 出现 ≥ 1 次 | 安全事件，立刻查 |
+| `skill_cache_misses / (hits + misses)` | 稳态 > 0.3 | cache 卷太小或被反复回收；核对 `SKILL_CACHE_MAX_BYTES` |
+| `skill_cache_reclaimed` | 每小时 > 5 次 | 同上 |
+| `SKILL_BUNDLE_LIMIT_EXCEEDED` | 出现 | 目录已撞上限，新 Job 会建不出来 |
+| Skill Cache 卷用量 | > 85% | 回收没跟上；卷满会让所有 attempt 失败 |
+| 含脚本技能数 | 变化 | 每一次增减都应当有对应的发布审计 |
+
+查询示例：
+
+```sql
+-- 冻结目录与实际调用的对照：哪些技能被冻结了却从没被加载过？
+select snapshot.name, snapshot.source_version, count(invocation.id) as loads
+from public.analysis_job_skill_snapshot snapshot
+left join public.analysis_skill_invocation invocation
+  on invocation.skill_snapshot_id = snapshot.id
+where snapshot.job_id = $1
+group by snapshot.name, snapshot.source_version
+order by loads, snapshot.name;
+
+-- 资源读取分布（只有安全的规范相对路径，没有正文）。
+select skill_name, resource_relative_path, count(*)
+from public.analysis_tool_audit
+where agent_run_id = $1 and skill_name is not null
+group by skill_name, resource_relative_path
+order by 3 desc;
+
+-- 目录容量水位（与管理页顶部那五行同源）。
+select public.admin_list_review_skills() -> 'capacity';
+```
+
+## 17.6 清理归属
+
+| 对象 | 谁清 | 依据 |
+|---|---|---|
+| staging 上传对象与行 | `expire_review_skill_uploads()`（返回要删的 key，由调用方走 Storage API 删） | `expires_at`，默认 24 小时 |
+| 正式对象 | **不清**。有 `analysis_job_skill_snapshot` 引用即永久保留 | 迁移装了 `storage.objects` 的 before-delete 触发器；即使触发器因权限装不上，`skill-bundles` 也没有任何 DELETE 策略 |
+| Skill Cache | Worker 每次 attempt 启动前按容量 + 最后访问时间回收，本次要用的 hash 排除在外 | `SKILL_CACHE_MAX_BYTES` |
+| per-attempt `DSH_HOME/skills` | 正常收敛随 profile cleanup 删；崩溃残留由 attempt orphan cleaner 回收 | — |
+
+物化后的技能树是 `0500`（目录）/ `0400`（文件）。删除只读树需要先放宽权限 —— cleanup 会
+先调 `relaxSkillTree`。**不要手工 `rm -rf` 一个 attempt 树**：失败是静默的，表现是磁盘几周
+后慢慢满。
+
+## 17.7 回滚
+
+1. 暂停新 Job（前端不再触发 enqueue）。
+2. 排空或取消带 Bundle snapshot 的 Job（`analysis_job.skill_snapshot_version >= 1`）。
+3. 回滚 Worker / 前端 / Edge Function。
+4. **保留**数据库版本行、manifest、正式对象与审计。不做 destructive down migration：
+   已发布对象与快照是"这个 Job 当时用的是什么"的唯一证据。
+5. 旧 Worker 不得 claim 带 Bundle snapshot 的新 Job —— 它不理解那份快照，会用空技能目录
+   跑出一个看起来有效的结论。r2 迁移的 contract hash 变更正好提供了这道闸门：旧 Worker 的
+   契约摘要与新 Job 冻结的不同，`factory.ts` 会以 `SESSION_FORMAT_UNSUPPORTED` 拒绝。
+
+## 17.8 为什么 frontmatter 是发布前置条件
+
+dsh 的 `skill-filesystem.parseSkillFile` 对以下情况**只写一行 `logger.warn` 然后 return**：
+
+* 缺 YAML frontmatter；
+* frontmatter 里没有非空的 `name` 或 `description`；
+* `name` 不是合法 dsh 技能名；
+* 出现 `disableModelInvocation` / `modelInvocable` / `userInvocable` 这类旧式驼峰键。
+
+后果是一个**没有任何平台错误码的静默失败**：Bundle 发布成功、Job 冻结成功、Worker 下载
+校验物化全部成功、`<DSH_HOME>/skills/<name>/SKILL.md` 确实在磁盘上 —— 而模型的首轮目录里
+就是没有这个技能。排查时唯一的线索藏在 Harness 子进程的 stderr 里。
+
+所以平台在**发布**时就拒。校验器（Worker 与 Edge Function 各一份）只接受一个很窄的 YAML
+子集（平铺 `key: value`）：接受集合必须是 dsh 接受集合的子集，宽容的自制解析器会放过
+dsh 会拒的东西，把问题推回运行时。额外两条比 dsh 更严的规则：
+
+* frontmatter 的 `name` 必须**等于**平台技能名。dsh 只要求它形如合法名字，于是一个目录叫
+  `a`、frontmatter 写 `b` 的 Bundle 会被注册成 `b` —— 冻结目录的身份、审计归因和
+  `skill(name)` 调用会全部对不上。
+* `disable-model-invocation: true` 直接拒。这个平台唯一的技能消费者就是模型，发布一个
+  模型不可调用的包只会白占首轮目录预算。
+
+`description` / `whenToUse` **只**来自 frontmatter。数据库里的那份是投影，发布 RPC 从
+`review_skill_upload.entry_frontmatter` 取值，不接受调用方另给一段文字 —— 否则管理页显示的、
+审计里记的和模型实际看到的会是三份不同的文本，而且没有任何机制会发现这个分叉。
+
+## 17.9 图片资源需要一条声明了 image 输入的模型路由
+
+技能包可以带 `assets/*.png|jpg|webp|gif`，模型用 `read_image` 读它们。但 `read_image` 的
+准入检查读的是**模型路由声明的输入模态**，而 `llm-pi-ai` 的默认值是 `['text']`。不显式
+声明的后果是实测出来的：
+
+```
+Error: cannot read "…/assets/flow.png" as an image:
+model "…" does not declare image input; switch to an image-capable model to read images
+```
+
+所以 attempt patch **总是显式声明**模态，取值由 `MODEL_IMAGE_INPUT_ENABLED` 决定：
+
+| 取值 | 声明 | 后果 |
+|---|---|---|
+| `false`（默认） | `['text']` | 图片在发出去**之前**被拒，错误可读且明确指向配置 |
+| `true` | `['text','image']` | 图片真的被读进上下文 |
+
+默认取 false 是刻意的：dsh 自己的注释说得很直白 —— under-claiming 在图片发出去之前就拒绝
+它，over-claiming 会把图片发给一个处理不了它的 provider，**两个错误的代价不一样**。打开
+之前必须确认端点真的接受图片输入。
+
+关掉时含图片的 Bundle 仍然可以发布 —— 那些字节对人和脚本仍有价值，只是模型读不到。这一点
+写在这里而不是留给现场猜。
+
+两种取值都有真实进程用例覆盖：`worker/src/__tests__/v16-skill-dsh-runtime.test.ts`。
+
+## 17.10 §19 验收标准怎么复跑
+
+§19 的 20 条里，有 5 条问的是"dsh 实际做了什么"，只能由真实进程回答：
+
+```bash
+# 真实 dsh 进程 + 脚本化 mock 模型端点，秒级，不烧任何真实预算。
+RUN_ACP_INTEGRATION=1 npx vitest run worker/src/__tests__/v16-skill-dsh-runtime.test.ts
+```
+
+它逐条断言：
+
+| 断言 | 覆盖 |
+|---|---|
+| 首轮请求含 name + description，**不含** SKILL.md 正文与资源正文 | §19.9 |
+| `skill(name)` 结果含正文，且 `Base directory for this skill:` 正好是 per-attempt 物化目录 | §19.10 |
+| 绝对 resourceBase 下的文本资源可读；图片按 17.9 的两种模态各断言一次 | §19.11 |
+| 只调 `skill` 时 Workspace 内哨兵不出现；显式 `bash` 调用时出现 | §19.12 |
+| Workspace 里同名的 `.dsh/skills` 技能全程不可见 | §19.13 |
+| 脚本对 Workspace 之外的写被沙箱拦住（`sandbox: file access denied`） | §7.4 |
+
+哨兵**必须**放在 Workspace 之内。放在外面时沙箱会拦住写入，于是"脚本跑了但写被拦"和
+"脚本没跑"长得一模一样 —— 那条断言就退化成永远为真。这是写这份用例时实测踩到的坑。
+
+数据库侧的那些条（§19.4/5/6/14/15/16/17/20）由
+`supabase/tests/20260917100000_managed_dsh_skill_bundles_test.sql` 覆盖：
+
+```bash
+psql -v ON_ERROR_STOP=1 -f supabase/tests/20260917100000_managed_dsh_skill_bundles_test.sql
+```
+
+## 17.11 脚本类 Bundle 的风险与关闭方式
+
+DSH **不会**因为加载技能而执行任何脚本。但拥有 `bash` 的 Agent 可以按绝对路径显式运行
+`scripts/` 下的文件，受角色权限、Sandbox、命令超时与容器资源限制约束。物化时统一 `0400`、
+不继承 ZIP 的 executable bit —— 但要说清楚：**`bash x.sh` 不需要 `+x`**，把 mode 位当成
+执行闸门是危险的误解。
+
+若生产安全要求不能接受这个语义，正确的做法是**通过部署策略不发布脚本类 Bundle**（发布页
+的额外确认就是这个闸门的落点），而不是假设"文件没有 +x 就不能执行"。紧急情况下可以用
+`V4_BREAKER_DISABLE_SHELL_WRITE` 把沙箱压到 `read-only`，但那会同时关掉实现型 Agent 的
+全部写操作。
+
+---
+
+# 18. V1.7：模型网络类型（公网 / 内网）
+
+模型走不走宿主机代理，由**模型自己的属性**决定，不再由代理侧的域名白名单决定。
+
+| 模型网络类型 | 数据库取值 | 访问方式 |
+|---|---|---|
+| 公网模型 | `DIRECT`（默认） | Worker 直接请求 |
+| 内网模型 | `HOST_PROXY` | Worker 经 `host.docker.internal:17890` 本机代理请求 |
+
+在页面「模型管理 → 网络类型」里选。既有模型全部是 `DIRECT`，所以这次改造对它们零影响。
+
+## 18.1 为什么不再用域名白名单
+
+阶段一把判断放在代理侧（`MODEL_VPN_PROXY_ALLOWED_HOSTS`），实测出两个缺陷：
+
+1. **公网模型被误伤。** 连接测试无条件把请求送进代理，代理发现主机不在白名单就回
+   `HTTP 403` —— 管理员看到"模型返回 403"，而真正的拒绝方是我们自己的代理。
+2. **正式评审链路没走代理。** 代理只接在"测试连接"上，于是内网模型**测得通、真跑必挂**。
+   绿灯之后才失败是最坏的一种不一致。
+
+现在两条链路共用同一个判定函数（`worker/src/model-connectivity/network-mode.ts`
+的 `resolveModelNetworkRoute`），不可能再分叉。
+
+## 18.2 冻结语义
+
+网络类型随 Job 冻结进 `analysis_job.model_snapshot`，随连接测试冻结进
+`model_connectivity_test.network_access_mode_snapshot`。任务执行期间管理员改配置，**不会**
+把在跑的 attempt 搬到另一张网上。
+
+在途旧 Job 的快照里没有这个字段，缺失一律按 `DIRECT` 处理 —— 那是改造前的行为。
+
+## 18.3 未配置代理时的行为
+
+`HOST_PROXY` 的模型落到一台**没有**配 `MODEL_CONNECTIVITY_PROXY_*` 的 Worker 上时，
+连接测试与正式评审都以稳定错误码 `MODEL_PROXY_NOT_CONFIGURED` 失败，错误文案直接指向
+Worker 配置。
+
+**绝不静默直连**：内网域名交给公网 DNS 解析可能命中一个同名的外部主机，而 API Key 会
+跟着请求发出去。
+
+## 18.4 正式评审链路的机制与已知代价
+
+`llm-pi-ai` 没有 per-provider 代理配置，底层 `@earendil-works/pi-ai` 也没有自定义 fetch
+钩子，所以只能用 Node 的环境代理：给 dsh 子进程注入
+`NODE_USE_ENV_PROXY=1` + `HTTP(S)_PROXY`。实测三组对照确认了必要条件（只设
+`HTTPS_PROXY` 会被 Node 24 忽略）。
+
+**已知代价**：`@deepseek-ai/dsh-subprocess` 的 `scrubbedParentEnv()` 只按
+`/KEY|PASSWORD|SECRET|TOKEN/i` 与 `DSH_*` 过滤变量名，所以这些变量会被 Agent 的 `bash`
+继承（真实 dsh 进程实测确认，见
+`worker/src/__tests__/v17-model-network-dsh.test.ts`）。也就是说：**选了内网模型的 attempt，
+Agent 的 Shell 命令也能经这条代理访问公司内网。**
+
+边界与缓解：
+
+- 只有 `HOST_PROXY` 的 attempt 会下传，公网模型的 attempt 完全不受影响；
+- 容器本来就有公网出口（Shell 网络访问与 platform-web 白名单不等价，V1.6 §7.4 已承担），
+  本次增量只是**内网可达性**；
+- 代理要求认证、只监听 `127.0.0.1`、只放行 80/443（`MODEL_VPN_PROXY_ALLOWED_PORTS` 可覆盖）；
+- 代理拒绝 loopback、链路本地/云元数据、Docker 管理地址与通配地址（`isDeniedTarget`，有单测）；
+- `agent_attempt_started` 日志带 `model_via_host_proxy`，这件事在审计里可见。
+
+不接受这个语义时，正确做法是**不把模型标成内网模型**（改回公网并另想办法打通网络），
+而不是指望 mode 位或环境变量顺序去阻止它。
+
+## 18.5 代理保留的边界
+
+删掉的是域名白名单。保留的是：
+
+| 边界 | 位置 |
+|---|---|
+| Basic 认证（`timingSafeEqual` 比较） | `isAuthorized` |
+| 仅监听 `127.0.0.1` | `MODEL_VPN_PROXY_BIND` |
+| 仅放行 80/443（可覆盖） | `MODEL_VPN_PROXY_ALLOWED_PORTS` |
+| 拒绝 loopback / 云元数据 / Docker 管理地址 / 通配地址 | `isDeniedTarget`（纯函数，有单测） |
+| 日志不含 Authorization / API Key / 请求正文 | `logEvent` 的固定字段 |
+
+## 18.6 怎么复跑验证
+
+```bash
+# 单测：判定函数 + 代理 SSRF 守卫 + claim 字段映射
+npx vitest run worker/src/__tests__/v17-model-network-mode.test.ts
+
+# 真实 dsh 进程：代理环境按模式下传，且记录 Shell 继承这一代价
+RUN_ACP_INTEGRATION=1 npx vitest run worker/src/__tests__/v17-model-network-dsh.test.ts
+
+# 数据库契约：默认 DIRECT、快照冻结、无残留重载、审计逐字段 diff 未被破坏
+psql -v ON_ERROR_STOP=1 -f supabase/tests/20260917130000_model_network_access_mode_test.sql
+```
+
+端到端（本地库 + 本地 Worker 容器 + 真实 launchd 代理）三个场景的实测结果见
+`需求开发评审一致性平台/V1.7-内网模型连接/…-最终执行方案.md` 第 10 节。

@@ -4,7 +4,6 @@
 // 职责：
 //   * 严格校验调用者为已登录的 ADMIN。
 //   * create / update：向 Supabase Vault 写入或轮换 API Key，ai_model_config 只保存 secret UUID。
-//   * test：对模型接口发起最小连通性测试，不携带任何代码或需求。
 // 安全约束：
 //   * 绝不在日志中输出 API Key、Authorization Header、请求体或 Vault secret 明文。
 //   * 响应体绝不返回 api_key_secret_id 或 API Key。
@@ -68,8 +67,21 @@ interface AgentSettings {
   max_output_tokens?: number
 }
 
+/**
+ * 模型网络类型。取值只能是这两个之一——非法取值直接拒，不做"猜一个默认值"的兜底：
+ * 一个既不直连也不走代理的模型会在 Worker 侧 fail closed，那时错误已经离开了它的来源。
+ */
+type NetworkAccessMode = 'DIRECT' | 'HOST_PROXY'
+
+function normalizeNetworkAccessMode(raw: unknown, fallback: NetworkAccessMode | null): NetworkAccessMode | null {
+  if (raw === undefined || raw === null || raw === '') return fallback
+  if (raw === 'DIRECT' || raw === 'HOST_PROXY') return raw
+  throw new Error('network_access_mode must be DIRECT or HOST_PROXY')
+}
+
 interface CreatePayload extends AgentSettings {
   action: 'create'
+  network_access_mode?: string
   display_name: string
   base_url: string
   model_name: string
@@ -81,6 +93,7 @@ interface CreatePayload extends AgentSettings {
 interface UpdatePayload extends AgentSettings {
   action: 'update'
   id: string
+  network_access_mode?: string
   display_name?: string
   base_url?: string
   model_name?: string
@@ -95,16 +108,7 @@ interface DeletePayload {
   id: string
 }
 
-interface TestPayload {
-  action: 'test'
-  // 使用现有配置 id 测试，或直接传入临时凭据测试
-  id?: string
-  base_url?: string
-  model_name?: string
-  api_key?: string
-}
-
-type Payload = CreatePayload | UpdatePayload | DeletePayload | TestPayload
+type Payload = CreatePayload | UpdatePayload | DeletePayload
 
 // 请求作用域 CORS 头（在 Deno.serve 入口按 Origin 计算后设置）。
 let CURRENT_CORS: Record<string, string> = {}
@@ -242,6 +246,8 @@ async function handleCreate(userId: string, p: CreatePayload): Promise<Response>
     p_request_timeout_ms: p.request_timeout_ms ?? 180000,
     p_context_window: p.context_window ?? 131072,
     p_max_output_tokens: p.max_output_tokens ?? 8192,
+    // 网络类型：缺省 DIRECT，保证已有调用方（和已有配置）行为不变。
+    p_network_access_mode: normalizeNetworkAccessMode(p.network_access_mode, 'DIRECT'),
     // agent_max_*_requests 不传：让 RPC 的列默认值生效，之后由「默认能力策略」页调整。
   })
 
@@ -285,6 +291,8 @@ async function handleUpdate(userId: string, p: UpdatePayload): Promise<Response>
     p_request_timeout_ms: p.request_timeout_ms ?? null,
     p_context_window: p.context_window ?? null,
     p_max_output_tokens: p.max_output_tokens ?? null,
+    // null 表示"不改"，与其余可选参数一致。
+    p_network_access_mode: normalizeNetworkAccessMode(p.network_access_mode, null),
     // agent_max_*_requests 不传：RPC 里这些参数默认 null，coalesce 会保留现值，
     // 不会把「默认能力策略」页刚保存的预算冲掉。
   })
@@ -340,86 +348,6 @@ async function handleDelete(userId: string, p: DeletePayload): Promise<Response>
   return json({ id: deletedId })
 }
 
-// 最小连通性测试：不发送任何代码或需求，只发送一个极短探测消息。
-async function handleTest(userId: string, p: TestPayload): Promise<Response> {
-  const svc = serviceClient()
-  let baseUrl = p.base_url
-  let modelName = p.model_name
-  let apiKey: string | null = p.api_key ?? null
-  let timeoutMs = 30000
-
-  // 使用已存在配置测试：从库读取元数据 + 通过 public RPC 从 Vault 读取密钥（仅服务端内存）。
-  if (p.id) {
-    const { data: cfg, error: cfgErr } = await svc
-      .from('ai_model_config')
-      .select('base_url, model_name, request_timeout_ms')
-      .eq('id', p.id)
-      .maybeSingle()
-    if (cfgErr || !cfg) return json({ error: 'model config not found' }, 404)
-
-    baseUrl = cfg.base_url as string
-    modelName = cfg.model_name as string
-    timeoutMs = Math.min((cfg.request_timeout_ms as number) ?? 30000, 30000)
-
-    const { data: secret, error: secErr } = await svc.rpc('admin_get_model_secret_by_config', {
-      p_id: p.id,
-    })
-    if (secErr || !secret) return json({ error: 'model secret missing' }, 400)
-    apiKey = secret as string
-  }
-
-  if (!baseUrl || !modelName || !apiKey) {
-    return json({ error: 'base_url, model_name, api_key are required for test' }, 400)
-  }
-
-  // 所有模型端点统一使用 OpenAI-compatible chat/completions。
-
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  const startedAt = Date.now()
-  let ok = false
-  let statusCode = 0
-  try {
-    const url = baseUrl.replace(/\/+$/, '') + '/chat/completions'
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: modelName,
-        messages: [{ role: 'user', content: 'ping' }],
-        max_tokens: 1,
-      }),
-      signal: controller.signal,
-    })
-    statusCode = resp.status
-    ok = resp.ok
-    // 读取并丢弃响应体，避免任何内容进入日志。
-    await resp.text().catch(() => '')
-  } catch {
-    ok = false
-  } finally {
-    clearTimeout(timer)
-    apiKey = null // 清空密钥
-  }
-
-  const latencyMs = Date.now() - startedAt
-  logEvent('tested', { userId, ok, statusCode, latency_ms: latencyMs })
-  // 前端展示 latency_ms 与 message，缺失时它只能显示兜底文案。
-  return json({
-    ok,
-    statusCode,
-    latency_ms: latencyMs,
-    message: ok
-      ? undefined
-      : statusCode > 0
-        ? `模型返回 HTTP ${statusCode}`
-        : '请求未能到达模型端点（超时或网络不可达）',
-  })
-}
-
 Deno.serve(async (req: Request): Promise<Response> => {
   CURRENT_CORS = corsHeaders(req)
 
@@ -458,8 +386,6 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return await handleUpdate(admin.userId, payload as UpdatePayload)
     case 'delete':
       return await handleDelete(admin.userId, payload as DeletePayload)
-    case 'test':
-      return await handleTest(admin.userId, payload as TestPayload)
     default:
       return json({ error: 'unknown action' }, 400)
   }

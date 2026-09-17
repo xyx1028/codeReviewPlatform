@@ -20,6 +20,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { V4_ERROR_CODES, V4GovernanceError } from '../policy/v4-errors.js'
+import { SKILL_ERROR_CODES, SkillGovernanceError } from '../skills/skill-errors.js'
 
 export interface ResumeCandidate {
   agentRunId: string
@@ -35,6 +36,15 @@ export interface ResumeCandidate {
   resumeCount: number
   /** 日志是否压缩存储。压缩形态下平台无法逐行验证已提交前缀。 */
   compressed?: boolean
+  /**
+   * checkpoint 记录的技能目录身份（V1.6）。
+   *
+   * 可选：迁移之前写的 checkpoint 没有这个字段。缺失时不比对 —— 一个在途 attempt 不该
+   * 因为"我们后来加了一个字段"而永久不可恢复。它一旦存在就必须匹配。
+   */
+  skillCatalogHash?: string | null
+  /** Job 冻结的技能目录身份。它总是存在（历史 Job 是 empty catalog hash）。 */
+  jobSkillCatalogHash?: string | null
 }
 
 export interface ResumeDecision {
@@ -56,6 +66,23 @@ export interface EvaluateResumeInput {
   harnessVersion: string
   /** 当前 attempt 的 policy hash。 */
   policyHash: string
+  /**
+   * 当前 attempt 的 profile hash（`materializeAttemptProfile` 的 configHash）。
+   *
+   * V1.6 之前这个值只被**记进日志**，从不参与判定。那是一个真实的漏洞：profile hash
+   * 覆盖了模型路由、sandbox 根、并发上限、Session 根、子 Agent 工具面和（现在）技能
+   * 目录。它变了而恢复照走，等于把一段"在另一套配置下产生的"历史重放给模型。
+   */
+  profileHash: string
+  /**
+   * 当前 attempt 实际物化的技能目录身份。
+   *
+   * 单独比一次而不是只靠 profileHash：catalog hash 是 profileHash 的输入之一，所以
+   * 技能变了必然导致 profileHash 也变。但两者的**错误码不同** ——
+   * `SESSION_SKILL_SET_MISMATCH` 直接告诉运维"是技能集合变了"，而
+   * `SESSION_FORMAT_UNSUPPORTED` 只说"配置变了"。事故期间这个区别值一次判断。
+   */
+  skillCatalogHash: string
   /** 已提交的 receipt。存在即不恢复。 */
   alreadyCommitted: boolean
   /** 单次 attempt 允许的最大恢复次数，防止"崩溃—恢复"死循环。 */
@@ -119,6 +146,39 @@ export function evaluateResume(input: EvaluateResumeInput): ResumeDecision {
       resume: false,
       code: V4_ERROR_CODES.SESSION_FORMAT_UNSUPPORTED,
       reason: 'the checkpoint was written under a different capability policy',
+    }
+  }
+  if (candidate.profileHash !== null && candidate.profileHash !== input.profileHash) {
+    // V1.6 补齐的门禁。profile hash 覆盖模型路由、sandbox 根、并发上限、Session 根、
+    // 子 Agent 工具面和技能目录 —— 它变了而恢复照走，就是在另一套配置下重放历史。
+    return {
+      resume: false,
+      code: V4_ERROR_CODES.SESSION_FORMAT_UNSUPPORTED,
+      reason: 'the checkpoint was written under a different attempt profile',
+    }
+  }
+  if (
+    candidate.skillCatalogHash !== null &&
+    candidate.skillCatalogHash !== undefined &&
+    candidate.skillCatalogHash !== input.skillCatalogHash
+  ) {
+    return {
+      resume: false,
+      code: SKILL_ERROR_CODES.SESSION_SKILL_SET_MISMATCH,
+      reason: 'the checkpoint was written with a different frozen skill catalog',
+    }
+  }
+  if (
+    candidate.jobSkillCatalogHash !== null &&
+    candidate.jobSkillCatalogHash !== undefined &&
+    candidate.jobSkillCatalogHash !== input.skillCatalogHash
+  ) {
+    // 这一条抓的是"Worker 物化的目录不是 Job 冻结的那一份"。它与上一条的区别是参照物：
+    // 上一条比的是历史，这一条比的是 Job 的权威冻结值。
+    return {
+      resume: false,
+      code: SKILL_ERROR_CODES.SESSION_SKILL_SET_MISMATCH,
+      reason: 'the materialized skill catalog differs from the catalog frozen on this job',
     }
   }
   if (candidate.resumeCount >= input.maxResumes) {
@@ -252,8 +312,23 @@ export function inspectSessionLog(
   return { ok: true, eventCount, verified: true }
 }
 
-/** 把判定结果转成一个错误，供上层直接抛出。 */
-export function resumeDecisionError(decision: ResumeDecision): V4GovernanceError | null {
+/**
+ * 把判定结果转成一个错误，供上层直接抛出。
+ *
+ * 技能类拒绝返回 `SkillGovernanceError` 而不是 `V4GovernanceError`：
+ * `SESSION_SKILL_SET_MISMATCH` 刻意**不在** `v4-capability-contract.json` 的错误码集合
+ * 里（那份集合被冻结进数据库 manifest，往里加码会换掉 contract hash 并让在途 Job 全部
+ * 失败）。两个类都带稳定的 `code` 字段，上层按字符串码映射终态，所以调用方不受影响。
+ */
+export function resumeDecisionError(
+  decision: ResumeDecision,
+): V4GovernanceError | SkillGovernanceError | null {
   if (decision.resume || decision.code === null) return null
+  if (decision.code === SKILL_ERROR_CODES.SESSION_SKILL_SET_MISMATCH) {
+    return new SkillGovernanceError(
+      SKILL_ERROR_CODES.SESSION_SKILL_SET_MISMATCH,
+      decision.reason,
+    )
+  }
   return new V4GovernanceError(decision.code as never, decision.reason)
 }

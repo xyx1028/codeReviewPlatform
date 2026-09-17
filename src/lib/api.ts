@@ -26,9 +26,15 @@ import type {
   HumanReviewResult,
   ImportFileRecord,
   ImportFileType,
+  ModelConnectivityTest,
+  ModelNetworkAccessMode,
   ReviewBatch,
   ReviewBatchListItem,
+  ReviewSkillCatalog,
+  ReviewSkillDetail,
   ReviewStory,
+  SkillUploadTicket,
+  SkillValidationResult,
   SourceStoryInput,
   UserProfile,
   UserRole,
@@ -637,6 +643,12 @@ export interface ModelConfigInput {
   max_parallel_tasks: number
   request_timeout_ms: number
   /**
+   * 网络类型。决定 Worker 直连还是经宿主机代理访问该模型。
+   *
+   * 只在这里选一次，不需要再改代理配置——这正是它取代域名白名单的原因。
+   */
+  network_access_mode?: ModelNetworkAccessMode
+  /**
    * DeepSeek Harness Agent 的 token 窗口。
    *
    * 请求次数预算（总量 / 根 / 子 Agent / 重试 / 压缩 / Ralph）不在这里：
@@ -727,9 +739,22 @@ export async function adminSetModelEnabled(id: string, enabled: boolean) {
   return unwrap<string>({ data, error })
 }
 
-/** ADMIN：连接测试（仅最小测试请求，不携带代码或需求），经 Edge Function 完成。 */
-export async function adminTestModelConfig(id: string) {
-  return invokeAdminModelConfig<{ ok: boolean; message?: string; latency_ms?: number }>('test', { id })
+/** ADMIN：创建异步连接测试，由本地 Worker 领取执行。返回测试任务 id。 */
+export async function enqueueModelConnectivityTest(modelConfigId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('enqueue_model_connectivity_test', {
+    p_model_config_id: modelConfigId,
+  })
+  return unwrap<string>({ data, error })
+}
+
+/** ADMIN：读取连接测试的安全状态与结果。 */
+export async function getModelConnectivityTest(testId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('get_model_connectivity_test', {
+    p_test_id: testId,
+  })
+  return unwrap<ModelConnectivityTest>({ data, error })
 }
 
 /** 批次管理者：为未开始任务的批次选择已启用模型（历史批次补选）。返回批次 id。 */
@@ -938,4 +963,132 @@ export async function getAnalysisRuntimeTaskEvents(
     p_limit: limit,
   })
   return unwrap<RuntimeTaskEventHistoryResponse>({ data, error })
+}
+
+// ---------------------------------------------------------------------------
+// V1.6 受管 DSH Skill Bundle
+// ---------------------------------------------------------------------------
+
+/**
+ * 调用 `skill-bundle-admin` Edge Function。
+ *
+ * 写操作一律走它，而不是直接 `client.from('review_skill_version').insert(...)`：
+ * 浏览器能直接写版本表就意味着它能自报 locator 与 hash，而 §15 明确禁止这一点。
+ */
+async function invokeSkillBundleAdmin<T>(body: Record<string, unknown>): Promise<T> {
+  const client = requireSupabase()
+  const { data, error } = await client.functions.invoke('skill-bundle-admin', { body })
+  if (error) {
+    const context = (error as { context?: unknown }).context
+    let message: string | undefined
+    if (context instanceof Response) {
+      try {
+        const responseBody = (await context.clone().json()) as { error?: string }
+        message = responseBody.error
+      } catch {
+        // 非 JSON 错误响应退回 SDK 默认信息。
+      }
+    }
+    throw new Error(message ?? error.message)
+  }
+  const result = data as T & { error?: string }
+  if (result && typeof result === 'object' && 'error' in result && result.error) {
+    throw new Error(String(result.error))
+  }
+  return result
+}
+
+/** 技能列表 + 全局容量水位。只读，函数体第一句是 ensure_admin()。 */
+export async function adminListReviewSkills() {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_list_review_skills')
+  return unwrap<ReviewSkillCatalog>({ data, error })
+}
+
+export async function adminGetReviewSkill(skillId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_get_review_skill', { p_skill_id: skillId })
+  return unwrap<ReviewSkillDetail>({ data, error })
+}
+
+export function adminCreateReviewSkill(input: { name: string; displayName: string }) {
+  return invokeSkillBundleAdmin<{ skill_id: string }>({
+    action: 'create-skill',
+    name: input.name,
+    display_name: input.displayName,
+  })
+}
+
+export function adminSetReviewSkillEnabled(skillId: string, enabled: boolean) {
+  return invokeSkillBundleAdmin<{ ok: boolean }>({
+    action: 'set-enabled',
+    skill_id: skillId,
+    enabled,
+  })
+}
+
+/**
+ * 上传一个 Skill Bundle ZIP 到 staging 并请求服务端校验。
+ *
+ * 三步都必须按顺序发生，而且 key 与 token 都来自服务端：
+ *
+ *   1. `create-upload` —— 服务端拼 `staging/<admin>/<uuid>.zip` 并签发短期写令牌；
+ *   2. 浏览器用该令牌直传（大文件不经 Edge Function，省一次 10 MiB 的转发）；
+ *   3. `validate` —— 服务端用 service-role 把字节读回来解析。
+ *
+ * 浏览器全程不知道正式 key，也不参与任何 hash 计算。
+ */
+export async function adminUploadSkillBundle(skillId: string, file: File) {
+  const client = requireSupabase()
+  const ticket = await invokeSkillBundleAdmin<SkillUploadTicket>({
+    action: 'create-upload',
+    skill_id: skillId,
+  })
+  const { error } = await client.storage
+    .from(ticket.bucket)
+    .uploadToSignedUrl(ticket.path, ticket.token, file, {
+      contentType: 'application/zip',
+    })
+  if (error) throw new Error(error.message)
+  return adminValidateSkillUpload(ticket.upload_id)
+}
+
+export function adminValidateSkillUpload(uploadId: string) {
+  return invokeSkillBundleAdmin<SkillValidationResult>({ action: 'validate', upload_id: uploadId })
+}
+
+/**
+ * 发布已校验的上传。
+ *
+ * 刻意**不接受** description / whenToUse：它们由服务端从 `SKILL.md` 的 frontmatter 取。
+ * 前端能自定义 description 的话，库里存的文本就会与 dsh 渲染给模型的文本分叉。
+ */
+export function adminPublishSkillVersion(input: {
+  uploadId: string
+  acknowledgeScripts?: boolean
+}) {
+  return invokeSkillBundleAdmin<{
+    skill_id: string
+    version_id: string
+    version: number
+    bundle_hash: string
+    contains_scripts: boolean
+  }>({
+    action: 'publish',
+    upload_id: input.uploadId,
+    acknowledge_scripts: input.acknowledgeScripts ?? false,
+  })
+}
+
+/**
+ * 请求已发布 Bundle 的短期下载 URL。
+ *
+ * 只有 ADMIN 能调用。返回的 URL 是**短期访问凭据**：不落库、不进日志，也永远不作为
+ * 冻结 locator —— Worker 走 service-role + 冻结 bucket/key 那条路。
+ */
+export function adminCreateSkillDownloadUrl(versionId: string) {
+  return invokeSkillBundleAdmin<{ signed_url: string; expires_in_seconds: number }>({
+    action: 'create-download-url',
+    version_id: versionId,
+  })
 }

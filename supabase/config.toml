@@ -1,4 +1,18 @@
 project_id = "codeReviewPlatform"
 
+[auth]
+# Local Vite frontend. Supabase Auth uses this URL when constructing email
+# confirmation links and only redirects to explicitly allowed local origins.
+site_url = "http://localhost:5173"
+additional_redirect_urls = ["http://localhost:5173", "http://127.0.0.1:5173"]
+enable_signup = true
+
+[auth.email]
+enable_signup = true
+double_confirm_changes = true
+# Match the cloud flow: newly registered users must confirm their email before
+# they can sign in. Local confirmation messages are captured by Mailpit.
+enable_confirmations = true
+
 [functions.wechat-auth]
 verify_jwt = false

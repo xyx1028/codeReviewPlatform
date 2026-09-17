@@ -578,6 +578,13 @@ describe('database error-code normalization', () => {
       // 0031 冻结契约
       'V4_HARNESS_MANIFEST_MISSING',
       'V4_CAPABILITY_POLICY_MISSING',
+      // V1.6 受管 Skill Bundle
+      'SKILL_CATALOG_LIMIT_EXCEEDED',
+      'SKILL_VERSION_IMMUTABLE',
+      'SKILL_OBJECT_REFERENCED',
+      'SKILL_BUNDLE_INVALID',
+      'SKILL_BUNDLE_LIMIT_EXCEEDED',
+      'SESSION_SKILL_SET_MISMATCH',
     ]
 
     expect(KNOWN_DB_ERROR_CODES).toEqual(expectedCodes)

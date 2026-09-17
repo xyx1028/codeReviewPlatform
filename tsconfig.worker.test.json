@@ -9,7 +9,14 @@
   // 这份配置只做检查、不产出文件。
   "extends": "./tsconfig.worker.json",
   "compilerOptions": {
-    "noEmit": true
+    "noEmit": true,
+    // 这份配置只做检查、不产出文件，所以 rootDir 放宽到仓库根。
+    //
+    // 必要性很具体：Worker 与 Edge Function 的归档校验器是**故意重复**的两份实现
+    // （见 worker/src/__tests__/v16-skill-validator-parity.test.ts 的说明），而那份等价性
+    // 测试要同时 import 两边。继承 tsconfig.worker.json 的 `rootDir: ./worker/src` 会以
+    // TS6059 拒绝 `supabase/functions/**`，于是"两份实现是否还等价"就永远没人检查。
+    "rootDir": "."
   },
   "include": ["worker/src/**/*.ts"],
   "exclude": ["node_modules", "dist-worker"]

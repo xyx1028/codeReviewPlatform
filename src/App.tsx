@@ -42,7 +42,8 @@ import {
   adminDeleteModelConfig,
   adminListModelConfigs,
   adminSetModelEnabled,
-  adminTestModelConfig,
+  enqueueModelConnectivityTest,
+  getModelConnectivityTest,
   adminUpdateModelConfig,
   AuthActionError,
   claimInitialAdmin,
@@ -94,12 +95,15 @@ import { WorkerManagementPage } from './pages/WorkerManagementPage'
 import { RuntimeMonitoringPage } from './pages/RuntimeMonitoringPage'
 import { AgentRunDetailPage } from './pages/AgentRunDetailPage'
 import { HarnessPolicyPage } from './pages/HarnessPolicyPage'
+import { SkillManagementPage } from './pages/SkillManagementPage'
 import { ProfilePage } from './pages/ProfilePage'
 import { supabaseConfigured } from './lib/supabase'
 import type {
   AdminUserListItem,
   AiImportRecord,
   AiModelConfigSummary,
+  ModelConnectivityTest,
+  ModelNetworkAccessMode,
   AiReviewResult,
   AiVerdict,
   AnalysisJob,
@@ -566,7 +570,9 @@ function Shell({ session }: { session: Session }) {
           ? '/workers'
           : location.pathname.startsWith('/harness-policy')
             ? '/harness-policy'
-            : location.pathname.startsWith('/models')
+            : location.pathname.startsWith('/skills')
+              ? '/skills'
+              : location.pathname.startsWith('/models')
               ? '/models'
               : location.pathname.startsWith('/model-operation-log')
                 ? '/model-operation-log'
@@ -588,6 +594,7 @@ function Shell({ session }: { session: Session }) {
     ...(isAdmin ? [{ key: '/monitoring', label: <Link to="/monitoring">Agent 运行监控</Link> }] : []),
     ...(isAdmin ? [{ key: '/workers', label: <Link to="/workers">调度中心</Link> }] : []),
     ...(isAdmin ? [{ key: '/harness-policy', label: <Link to="/harness-policy">默认能力策略</Link> }] : []),
+    ...(isAdmin ? [{ key: '/skills', label: <Link to="/skills">评审技能</Link> }] : []),
     ...(isAdmin ? [{ key: '/models', label: <Link to="/models">模型管理</Link> }] : []),
     ...(isAdmin ? [{ key: '/users', label: <Link to="/users">用户管理</Link> }] : []),
   ]
@@ -603,7 +610,7 @@ function Shell({ session }: { session: Session }) {
           </div>
         </div>
         <Space>
-          <Text className="header-version">版本 V1.5</Text>
+          <Text className="header-version">版本 V1.7</Text>
           <Tag color={profileQuery.data?.role === 'ADMIN' ? 'green' : 'blue'}>{profileQuery.data?.role ?? '未配置角色'}</Tag>
           {role === 'REVIEWER' ? (
             <Button size="small" onClick={() => claimAdminMutation.mutate()} loading={claimAdminMutation.isPending}>
@@ -642,6 +649,7 @@ function Shell({ session }: { session: Session }) {
             <Route path="/monitoring" element={<RuntimeMonitoringPage isAdmin={isAdmin} />} />
             <Route path="/workers" element={<WorkerManagementPage isAdmin={isAdmin} />} />
             <Route path="/harness-policy" element={<HarnessPolicyPage isAdmin={isAdmin} />} />
+            <Route path="/skills" element={<SkillManagementPage isAdmin={isAdmin} />} />
             <Route path="/models" element={<ModelConfigPage isAdmin={isAdmin} />} />
             <Route path="/users" element={<AdminUsersPage isAdmin={isAdmin} />} />
             <Route path="/batches/:batchId/*" element={<BatchPage canManageBatch={canManageBatch} />} />
@@ -664,6 +672,13 @@ interface ModelFormValues {
   display_name: string
   base_url: string
   model_name: string
+  /**
+   * 网络类型。决定 Worker 直连还是经宿主机本机代理访问该模型（V1.7 阶段二）。
+   *
+   * 它取代了在代理侧维护目标域名白名单的做法：新增内网模型只需在这里选一次，
+   * 不用再改代理配置并重启服务。
+   */
+  network_access_mode: ModelNetworkAccessMode
   max_parallel_tasks: number
   request_timeout_seconds: number
   context_window: number
@@ -676,7 +691,21 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
   const { message, modal } = AntApp.useApp()
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<AiModelConfigSummary | null>(null)
+  // 当前正在观察的连接测试。结果只从查询缓存读取，不镜像进 state：镜像会让"排队中→
+  // 测试中→终态"这条状态机同时存在两份真相，刷新页面后还会显示已经过期的旧结论。
+  const [watchedTest, setWatchedTest] = useState<{ modelId: string; testId: string } | null>(null)
   const [form] = Form.useForm<ModelFormValues>()
+
+  const testQuery = useQuery({
+    queryKey: ['model-connectivity-test', watchedTest?.testId],
+    enabled: Boolean(watchedTest?.testId),
+    queryFn: () => getModelConnectivityTest(watchedTest!.testId),
+    refetchInterval: (query) => {
+      const status = (query.state.data as ModelConnectivityTest | undefined)?.status
+      // 终态停止轮询：否则一次点击会一直向数据库发请求。
+      return status === 'SUCCEEDED' || status === 'FAILED' ? false : 1000
+    },
+  })
 
   const modelsQuery = useQuery({ queryKey: ['admin-model-configs'], enabled: isAdmin, queryFn: adminListModelConfigs })
 
@@ -690,6 +719,7 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
         request_timeout_ms: Math.round(values.request_timeout_seconds * 1000),
         context_window: values.context_window,
         max_output_tokens: values.max_output_tokens,
+        network_access_mode: values.network_access_mode,
         // 留空表示不轮换密钥；编辑时永不回显旧值
         api_key: values.api_key && values.api_key.length ? values.api_key : null,
       }
@@ -733,13 +763,9 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
   })
 
   const testMutation = useMutation({
-    mutationFn: (id: string) => adminTestModelConfig(id),
-    onSuccess: (result) => {
-      if (result?.ok) {
-        message.success(`连接测试通过${result.latency_ms ? `（${result.latency_ms}ms）` : ''}`)
-      } else {
-        message.warning(result?.message ?? '连接测试未通过')
-      }
+    mutationFn: (modelId: string) => enqueueModelConnectivityTest(modelId),
+    onSuccess: (testId, modelId) => {
+      setWatchedTest({ modelId, testId })
     },
     onError: (error) => message.error(error.message),
   })
@@ -752,6 +778,8 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
     setEditing(null)
     form.resetFields()
     form.setFieldsValue({
+      // 默认公网模型：这是改造前的行为，也是不会让人意外走进代理的那个取值。
+      network_access_mode: 'DIRECT',
       max_parallel_tasks: 4,
       request_timeout_seconds: 180,
       context_window: 131072,
@@ -767,6 +795,8 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
       display_name: record.display_name,
       base_url: record.base_url,
       model_name: record.model_name,
+      // 旧行没有这个字段时按公网处理，与数据库的 default 一致。
+      network_access_mode: record.network_access_mode ?? 'DIRECT',
       max_parallel_tasks: record.max_parallel_tasks,
       request_timeout_seconds: Math.round(record.request_timeout_ms / 1000),
       context_window: record.context_window ?? 131072,
@@ -791,6 +821,19 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
     { title: '模型名称', dataIndex: 'display_name' },
     { title: 'Base URL', dataIndex: 'base_url', ellipsis: true },
     { title: 'Model', dataIndex: 'model_name', width: 160 },
+    {
+      title: '网络类型',
+      dataIndex: 'network_access_mode',
+      width: 110,
+      render: (mode: ModelNetworkAccessMode | undefined) =>
+        mode === 'HOST_PROXY' ? (
+          <Tooltip title="Worker 经宿主机本机代理访问该模型；Worker 未配置代理时任务会明确失败，不会静默直连。">
+            <Tag color="gold">内网模型</Tag>
+          </Tooltip>
+        ) : (
+          <Tag>公网模型</Tag>
+        ),
+    },
     {
       title: 'API Key',
       dataIndex: 'has_api_key',
@@ -819,7 +862,7 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
     { title: '更新时间', dataIndex: 'updated_at', width: 180, render: (value: string) => new Date(value).toLocaleString() },
     {
       title: '操作',
-      width: 240,
+      width: 260,
       render: (_value, record) => {
         const deleteDisabled = record.is_referenced !== false
         const deleteTip = record.is_referenced
@@ -827,17 +870,30 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
           : deleteDisabled
             ? '暂时无法确认模型引用状态，请刷新后重试'
             : undefined
+        const currentTest = watchedTest?.modelId === record.id ? testQuery.data : undefined
+        const testPending = currentTest?.status === 'QUEUED' || currentTest?.status === 'RUNNING'
+        const enqueuing = testMutation.isPending && testMutation.variables === record.id
         return (
-          <Space>
+          <Space wrap>
             <Button size="small" onClick={() => openEdit(record)}>编辑</Button>
             <Button
               size="small"
-              loading={testMutation.isPending && testMutation.variables === record.id}
+              loading={enqueuing || testPending}
               disabled={!record.has_api_key}
               onClick={() => testMutation.mutate(record.id)}
             >
               测试连接
             </Button>
+            {currentTest?.status === 'QUEUED' && <Tag color="processing">排队中</Tag>}
+            {currentTest?.status === 'RUNNING' && <Tag color="processing">测试中</Tag>}
+            {currentTest?.status === 'SUCCEEDED' && (
+              <Tag color="green">通过 {currentTest.latency_ms ?? 0}ms</Tag>
+            )}
+            {currentTest?.status === 'FAILED' && (
+              <Tooltip title={currentTest.error_message ?? currentTest.error_code}>
+                <Tag color="red">未通过</Tag>
+              </Tooltip>
+            )}
             <Tooltip title={deleteTip}>
               <span>
                 <Button
@@ -888,6 +944,19 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
           </Form.Item>
           <Form.Item name="model_name" label="Model" rules={[{ required: true, message: '请输入实际模型名称' }]}>
             <Input placeholder="qwen-max" />
+          </Form.Item>
+          <Form.Item
+            name="network_access_mode"
+            label="网络类型"
+            rules={[{ required: true, message: '请选择网络类型' }]}
+            extra="公网模型：Worker 直接请求。内网模型：Worker 经宿主机本机代理请求（需要该 Worker 已配置代理，否则连接测试与正式评审都会明确失败而不会静默直连）。"
+          >
+            <Select
+              options={[
+                { value: 'DIRECT', label: '公网模型（直接访问）' },
+                { value: 'HOST_PROXY', label: '内网模型（经本机代理访问）' },
+              ]}
+            />
           </Form.Item>
           <Form.Item
             name="api_key"

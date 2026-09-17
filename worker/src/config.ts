@@ -21,8 +21,50 @@ export interface WorkerConfig {
   storyTaskLeaseSeconds: number
   heartbeatIntervalMs: number
   workerStoryConcurrency: number
+  /** 独立模型连接测试队列租约，不占用故事任务槽位。 */
+  modelConnectivityTestLeaseSeconds: number
+  /**
+   * 模型请求的 Mac 宿主机代理。
+   *
+   * 只作用于模型端点：公司内网模型只能经宿主机的公司网络/VPN 访问，而 Docker 拿不到那条
+   * 路由。刻意不设全局 HTTP(S)_PROXY —— 那会把 Supabase 与 GitLab 一起改道。
+   * null 表示直连（公网模型）。
+   */
+  modelConnectivityProxy: {
+    url: string
+    username: string | null
+    password: string | null
+  } | null
   /** Per-attempt Harness profile trees live here. */
   agentAttemptsRoot: string
+  /**
+   * 共享只读 Skill Cache 的根目录（V1.6）。
+   *
+   * 必须是**命名卷**，与 attempt 临时目录分开：cache 的价值全部来自跨 attempt、跨
+   * Job 复用，放在 attempt 树里等于每次都重新下载全部技能包。
+   */
+  skillCacheRoot: string
+  /**
+   * Skill Cache 的容量上限，超过即按最后访问时间从旧到新回收。
+   *
+   * 与 Session 卷不同，这里的回收是**无损**的：cache 里的每一个 bundle 都能按冻结
+   * locator 重新下载。所以上限可以设得比较紧，宁可多下载一次也不要让卷满。
+   */
+  skillCacheMaxBytes: number
+  /**
+   * 模型端点是否接受图片输入（V1.6）。
+   *
+   * 决定 attempt patch 给路由声明的模态。默认 **false**，也就是只声明 `text`：
+   *
+   *   * 不声明 image 时，`read_image` 在图片发出去**之前**就被拒，错误可读；
+   *   * 声明了但模型其实不支持时，图片会被发给一个处理不了它的 provider —— 那是一次
+   *     可能拖垮整个 attempt 的上游错误。
+   *
+   * 两个错误的代价不一样，所以默认取保守的那个，由运维在确认端点真的接受图片后打开。
+   * 关掉时技能包里的 `assets/*.png` 仍然可以发布（它们对人和脚本仍有价值），只是模型
+   * 读不到 —— 这一点写在 OPERATIONS §17.10 里，不让它成为一个需要现场猜的行为。
+   */
+  modelImageInputEnabled: boolean
   /**
    * Session JSONL 的持久卷根目录。
    *
@@ -115,6 +157,37 @@ function validUrl(value: string, key: string): string {  try {
   return value
 }
 
+/**
+ * 模型代理地址。
+ *
+ * 只接受 http/https origin：带 path/query/hash 的值说明配置者以为这里能写完整端点，
+ * 而 URL 里内嵌凭据会把口令带进任何打印了配置的地方，两者都必须直接报错而不是"尽力解析"。
+ */
+function validModelProxyUrl(value: string): string {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new ConfigError(
+      'environment variable MODEL_CONNECTIVITY_PROXY_URL must be a valid URL',
+    )
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new ConfigError('MODEL_CONNECTIVITY_PROXY_URL must use http or https')
+  }
+  if (url.username !== '' || url.password !== '') {
+    throw new ConfigError(
+      'MODEL_CONNECTIVITY_PROXY_URL must not embed credentials; use MODEL_CONNECTIVITY_PROXY_USERNAME/PASSWORD',
+    )
+  }
+  if ((url.pathname !== '' && url.pathname !== '/') || url.search !== '' || url.hash !== '') {
+    throw new ConfigError(
+      'MODEL_CONNECTIVITY_PROXY_URL must be an origin without path, query or hash',
+    )
+  }
+  return `${url.protocol}//${url.host}`
+}
+
 function validGitLabBaseUrl(value: string): string {
   try {
     return normalizeGitLabBaseUrl(value)
@@ -172,6 +245,36 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     20,
   )
 
+  const modelConnectivityTestLeaseSeconds = intInRange(
+    env,
+    'MODEL_CONNECTIVITY_TEST_LEASE_SECONDS',
+    90,
+    45,
+    600,
+  )
+
+  const rawProxyUrl = optStr(env, 'MODEL_CONNECTIVITY_PROXY_URL')
+  const proxyUsername = optStr(env, 'MODEL_CONNECTIVITY_PROXY_USERNAME')
+  const proxyPassword = optStr(env, 'MODEL_CONNECTIVITY_PROXY_PASSWORD')
+  if (rawProxyUrl === null && (proxyUsername !== null || proxyPassword !== null)) {
+    throw new ConfigError(
+      'MODEL_CONNECTIVITY_PROXY_USERNAME/PASSWORD require MODEL_CONNECTIVITY_PROXY_URL',
+    )
+  }
+  // 认证是二元的：只配一半会在运行时变成 407，那种失败看起来像"模型不可用"。
+  if (rawProxyUrl !== null && (proxyUsername === null) !== (proxyPassword === null)) {
+    throw new ConfigError(
+      'MODEL_CONNECTIVITY_PROXY_USERNAME and MODEL_CONNECTIVITY_PROXY_PASSWORD must be set together',
+    )
+  }
+  const modelConnectivityProxy = rawProxyUrl === null
+    ? null
+    : {
+        url: validModelProxyUrl(rawProxyUrl),
+        username: proxyUsername,
+        password: proxyPassword,
+      }
+
   if (heartbeatIntervalMs >= storyTaskLeaseSeconds * 1000) {
     throw new ConfigError(
       'HEARTBEAT_INTERVAL_MS must be smaller than STORY_TASK_LEASE_SECONDS',
@@ -192,7 +295,20 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     storyTaskLeaseSeconds,
     heartbeatIntervalMs,
     workerStoryConcurrency,
+    modelConnectivityTestLeaseSeconds,
+    modelConnectivityProxy,
     agentAttemptsRoot: optStr(env, 'AGENT_ATTEMPTS_ROOT', '/workspace/agent-attempts')!,
+    skillCacheRoot: optStr(env, 'SKILL_CACHE_ROOT', '/workspace/skill-cache')!,
+    modelImageInputEnabled: boolFlag(env, 'MODEL_IMAGE_INPUT_ENABLED', false),
+    skillCacheMaxBytes: intInRange(
+      env,
+      'SKILL_CACHE_MAX_BYTES',
+      // 4 GiB。全目录展开上限是 256 MiB，所以这个值大约能同时留住 16 代不同的技能目录；
+      // 回收是无损的（可重新下载），所以不需要留更多。
+      4 * 1024 * 1024 * 1024,
+      256 * 1024 * 1024,
+      1024 * 1024 * 1024 * 1024,
+    ),
     sessionRoot: optStr(env, 'AGENT_SESSION_ROOT', '/workspace/agent-sessions')!,
     sessionVolumeMaxBytes: intInRange(
       env,

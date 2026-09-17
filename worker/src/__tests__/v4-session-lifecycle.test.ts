@@ -330,11 +330,20 @@ describe('evaluateResume', () => {
       profileHash: 'profile-1',
       policyHash: 'policy-1',
       resumeCount: 0,
+      // V1.6：checkpoint 与 Job 各自记录的技能目录身份。
+      skillCatalogHash: 'catalog-1',
+      jobSkillCatalogHash: 'catalog-1',
       ...overrides,
     }
   }
 
-  const base = { harnessVersion: HARNESS, policyHash: 'policy-1', maxResumes: 3 }
+  const base = {
+    harnessVersion: HARNESS,
+    policyHash: 'policy-1',
+    profileHash: 'profile-1',
+    skillCatalogHash: 'catalog-1',
+    maxResumes: 3,
+  }
 
   it('resumes a healthy checkpoint', () => {
     const decision = evaluateResume({ ...base, candidate: candidate(), alreadyCommitted: false })

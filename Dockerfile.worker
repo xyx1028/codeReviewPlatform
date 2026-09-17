@@ -81,8 +81,10 @@ ENV AGENT_SESSION_ROOT=/workspace/agent-sessions
 RUN groupadd --system worker \
   && useradd --system --gid worker --home-dir /workspace worker \
   && mkdir -p /workspace/jobs /workspace/cache /workspace/agent-attempts /workspace/agent-sessions \
+       /workspace/skill-cache \
   && chown -R worker:worker /workspace /app \
-  && chmod 700 /workspace/jobs /workspace/cache /workspace/agent-attempts /workspace/agent-sessions
+  && chmod 700 /workspace/jobs /workspace/cache /workspace/agent-attempts /workspace/agent-sessions \
+       /workspace/skill-cache
 
 USER worker
 

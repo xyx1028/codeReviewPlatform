@@ -21,5 +21,8 @@
     "verbatimModuleSyntax": false
   },
   "include": ["worker/src/**/*.ts"],
-  "exclude": ["worker/src/**/*.test.ts", "node_modules", "dist-worker"]
+  // `__tests__` 整体排除，而不是只排除 `*.test.ts`：那个目录下也有**只服务测试**的
+  // 辅助模块（例如构造恶意 ZIP 的写入器）。只按文件名后缀排除会把它们编译进
+  // dist-worker，等于把"专门用来伪造 symlink 与 CRC"的代码随生产镜像发出去。
+  "exclude": ["worker/src/__tests__/**", "worker/src/**/*.test.ts", "node_modules", "dist-worker"]
 }

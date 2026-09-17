@@ -16,6 +16,14 @@ export interface ModelSnapshot {
   display_name: string
   base_url: string
   model_name: string
+  /**
+   * 模型网络类型，随 Job 冻结（V1.7 阶段二）。
+   *
+   * 可选是为了在途旧 Job：它们的 model_snapshot 里没有这个字段，缺失一律按 `DIRECT`
+   * 处理（见 network-mode.ts 的 parseModelNetworkAccessMode）—— 那是改造之前的行为，
+   * 也是唯一不会让旧任务突然换网络路径的取值。
+   */
+  network_access_mode?: string
   max_parallel_tasks?: number
   request_timeout_ms?: number
   context_window?: number
@@ -91,6 +99,17 @@ export interface StoryTask {
   source_data: Record<string, unknown>
 }
 
+export interface ModelConnectivityTestClaim {
+  id: string
+  model_config_id: string
+  base_url_snapshot: string
+  model_name_snapshot: string
+  request_timeout_ms_snapshot: number
+  /** 入队时冻结的网络类型。与 base_url 同源：测试期间改配置不影响这一次。 */
+  network_access_mode_snapshot?: string
+  claim_token: string
+}
+
 export interface PreparationClaim {
   job: JobContext
   model: ModelSnapshot
@@ -163,6 +182,17 @@ export interface ToolAuditRow {
   durationMs: number
   requestBytes: number
   responseBytes: number
+  /**
+   * V1.6 技能字段（方案 §16）。
+   *
+   * 只有三个键 + 一个安全的规范相对路径，**不含** SKILL.md 正文、资源正文、脚本正文
+   * 和完整命令行。它们通过现有 `/attempt/tool-audit` 通道上报，所以没有新增 Broker
+   * 路由，`v4-capability-contract.json` 的 manifest 哈希不变 —— 新旧 Worker 可以混跑
+   * 同一批次。
+   */
+  skillName?: string | null
+  skillBundleHash?: string | null
+  resourceRelativePath?: string | null
 }
 
 export interface PermissionDecisionRow {
@@ -288,6 +318,98 @@ export class JobsDb {
     return toStoryTask(obj)
   }
 
+  async claimNextModelConnectivityTest(
+    workerId: string,
+    leaseSeconds: number,
+  ): Promise<ModelConnectivityTestClaim | null> {
+    const data = await this.db.rpc<unknown>('claim_next_model_connectivity_test', {
+      p_worker_id: workerId,
+      p_lease_seconds: leaseSeconds,
+    })
+    const row = unwrapMaybeObject<Record<string, unknown>>(data)
+    if (!row?.id) return null
+    const claimToken = row.claim_token
+    if (typeof claimToken !== 'string' || claimToken.length === 0) {
+      throw new Error('claim_next_model_connectivity_test returned no claim token')
+    }
+    return {
+      id: String(row.id),
+      model_config_id: String(row.model_config_id),
+      base_url_snapshot: String(row.base_url_snapshot),
+      model_name_snapshot: String(row.model_name_snapshot),
+      request_timeout_ms_snapshot: Number(row.request_timeout_ms_snapshot ?? 30000),
+      /*
+       * 这一行是端到端测出来的缺口：只给类型加字段不够，这个 mapper 逐字段构造对象，
+       * 漏映射的字段永远是 undefined，于是内网模型被当成公网模型直连。
+       *
+       * 单测发现不了它 —— 它们直接调 resolveModelNetworkRoute，数据根本没经过这里。
+       */
+      network_access_mode_snapshot:
+        typeof row.network_access_mode_snapshot === 'string'
+          ? row.network_access_mode_snapshot
+          : undefined,
+      claim_token: claimToken,
+    }
+  }
+
+  heartbeatModelConnectivityTest(input: {
+    testId: string; workerId: string; claimToken: string; leaseSeconds: number
+  }): Promise<boolean> {
+    return this.db.rpc<boolean>('heartbeat_model_connectivity_test', {
+      p_test_id: input.testId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_lease_seconds: input.leaseSeconds,
+    })
+  }
+
+  getModelSecretForConnectivityTest(input: {
+    testId: string; workerId: string; claimToken: string
+  }): Promise<string> {
+    return this.db.rpc<string>('get_model_secret_for_connectivity_test', {
+      p_test_id: input.testId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+    })
+  }
+
+  completeModelConnectivityTest(input: {
+    testId: string; workerId: string; claimToken: string; statusCode: number; latencyMs: number
+  }): Promise<boolean> {
+    return this.db.rpc<boolean>('complete_model_connectivity_test', {
+      p_test_id: input.testId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_status_code: input.statusCode,
+      p_latency_ms: input.latencyMs,
+    })
+  }
+
+  failModelConnectivityTest(input: {
+    testId: string; workerId: string; claimToken: string; code: string; message: string
+    statusCode?: number | null; latencyMs?: number | null
+  }): Promise<boolean> {
+    return this.db.rpc<boolean>('fail_model_connectivity_test', {
+      p_test_id: input.testId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_error_code: input.code,
+      p_error_message: input.message,
+      p_status_code: input.statusCode ?? null,
+      p_latency_ms: input.latencyMs ?? null,
+    })
+  }
+
+  releaseModelConnectivityTestClaim(input: {
+    testId: string; workerId: string; claimToken: string
+  }): Promise<boolean> {
+    return this.db.rpc<boolean>('release_model_connectivity_test_claim', {
+      p_test_id: input.testId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+    })
+  }
+
   async claimJobForFinalization(workerId: string): Promise<FinalizationClaim | null> {
     const data = await this.db.rpc<unknown>('claim_job_for_finalization', {
       p_worker_id: workerId,
@@ -402,6 +524,9 @@ export class JobsDb {
         duration_ms: entry.durationMs,
         request_bytes: entry.requestBytes,
         response_bytes: entry.responseBytes,
+        skill_name: entry.skillName ?? null,
+        skill_bundle_hash: entry.skillBundleHash ?? null,
+        resource_relative_path: entry.resourceRelativePath ?? null,
       })),
       p_decisions: input.decisions.map((decision) => ({
         agent_id: decision.agentId,
@@ -448,6 +573,8 @@ export class JobsDb {
       eventCount: number
       harnessVersion: string
       profileHash: string | null
+      /** V1.6：本次 attempt 实际物化的技能目录身份。恢复门禁按它比对。 */
+      skillCatalogHash?: string | null
     },
   ): Promise<void> {
     await this.db.rpc<unknown>('save_analysis_session_checkpoint', {
@@ -463,7 +590,27 @@ export class JobsDb {
       p_harness_version: input.harnessVersion,
       p_profile_hash: input.profileHash,
       p_status: 'OPEN',
+      p_skill_catalog_hash: input.skillCatalogHash ?? null,
     })
+  }
+
+  /**
+   * 取 Job 冻结的技能目录（V1.6）。
+   *
+   * claim-fenced：RPC 校验四要素后才返回 locator。Worker 从不接受浏览器、模型或 Story
+   * 自报的 bucket/key —— 这是唯一入口。
+   */
+  async getStoryTaskSkillSnapshot(input: {
+    taskId: string
+    workerId: string
+    claimToken: string
+  }): Promise<Record<string, unknown> | null> {
+    const data = await this.db.rpc<unknown>('get_story_task_skill_snapshot', {
+      p_task_id: input.taskId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+    })
+    return unwrapMaybeObject<Record<string, unknown>>(data)
   }
 
   /** 找回一个可恢复的 attempt。返回 null 表示不可恢复（已提交、已封存或无 checkpoint）。 */
@@ -489,6 +636,14 @@ export class JobsDb {
       rootAgentId: string
       rootSessionId: string
       treeDigest: string
+      /**
+       * V1.6：Worker 独立重算出来的技能目录身份。
+       *
+       * RPC 会把它与 `analysis_job.skill_catalog_hash` 比对，不等即抛
+       * `SESSION_SKILL_SET_MISMATCH`。这是"Worker 不能相信数据库自报的 hash"这条要求
+       * 的兑现点 —— 两边各算一次，然后在数据库里对账。
+       */
+      skillCatalogHash?: string | null
     },
   ): Promise<void> {
     await this.db.rpc<boolean>('record_analysis_attempt_profile', {
@@ -503,6 +658,7 @@ export class JobsDb {
       p_root_agent_id: input.rootAgentId,
       p_root_session_id: input.rootSessionId,
       p_tree_digest: input.treeDigest,
+      p_skill_catalog_hash: input.skillCatalogHash ?? null,
     })
   }
 

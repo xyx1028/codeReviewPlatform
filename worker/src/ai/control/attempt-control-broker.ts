@@ -157,6 +157,16 @@ export interface ToolAuditEntry {
   durationMs: number
   requestBytes: number
   responseBytes: number
+  /**
+   * V1.6 技能归因（方案 §16）。
+   *
+   * 三个键 + 一个安全的规范相对路径，**没有** SKILL.md 正文、资源正文、脚本正文或完整
+   * 命令行。它们随现有 `/attempt/tool-audit` 请求体抵达，所以没有新增 Broker 路由 ——
+   * `brokerRoutes` 进 semanticManifest，加一条就会换掉 manifest 哈希并让在途 Job 全部失败。
+   */
+  skillName?: string | null
+  skillBundleHash?: string | null
+  resourceRelativePath?: string | null
 }
 
 export interface PermissionDecisionEntry {
@@ -178,6 +188,14 @@ export interface AttemptControlBrokerOptions {
   logger: Logger
   policy: V4CapabilityPolicy
   policyHash: string
+  /**
+   * 本次 attempt 冻结的技能目录（`name → bundleHash`）。
+   *
+   * Broker 用它**独立核对**插件上报的技能名，而不是转发上报值：一个能自报 bundle hash 的
+   * 上游等于可以把审计指向一个不存在的版本。目录之外的名字一律丢弃字段（不是丢弃整条
+   * 审计 —— 工具调用确实发生了，只是它与技能无关）。
+   */
+  skillBundleHashes?: ReadonlyMap<string, string>
   /** Agent 身份台账。Broker 的每一次授权都过它。 */
   authority: AgentAuthorityLedger
   /** 分层预算账本。 */
@@ -828,6 +846,7 @@ export function startAttemptControlBroker(
     let accepted = 0
     for (const raw of entries) {
       const entry = raw as Record<string, unknown>
+      const skill = resolveSkillAttribution(entry)
       recordAudit({
         // 归属由令牌决定，不由上报内容决定。
         agentId: identity.agentId,
@@ -848,6 +867,9 @@ export function startAttemptControlBroker(
         requestBytes: typeof entry.requestBytes === 'number' ? Math.max(entry.requestBytes, 0) : 0,
         responseBytes:
           typeof entry.responseBytes === 'number' ? Math.max(entry.responseBytes, 0) : 0,
+        skillName: skill?.skillName ?? null,
+        skillBundleHash: skill?.skillBundleHash ?? null,
+        resourceRelativePath: skill?.resourceRelativePath ?? null,
       })
       accepted++
     }
@@ -889,6 +911,34 @@ export function startAttemptControlBroker(
       }
     }
     return { accepted: true, count: accepted }
+  }
+
+  /**
+   * 核对上报的技能归因。
+   *
+   * 三条规则，每条都对应一个具体的滥用：
+   *
+   *   1. **技能名必须在冻结目录里。** 否则审计会指向一个这个 Job 根本没有的技能。
+   *   2. **bundle hash 由 Broker 自己填，不用上报值。** 上报值只要能进库，审计就可以被
+   *      指向另一个版本。
+   *   3. **相对路径必须是安全规范路径。** 带 `..`、绝对路径、反斜杠或空白的一律丢弃 ——
+   *      审计表不是攻击载荷的转运站。
+   *
+   * 校验失败只丢弃这三个字段，不丢弃整条审计：工具调用确实发生了。
+   */
+  function resolveSkillAttribution(
+    entry: Record<string, unknown>,
+  ): { skillName: string; skillBundleHash: string; resourceRelativePath: string | null } | undefined {
+    const reported = entry.skillName
+    if (typeof reported !== 'string' || reported === '') return undefined
+    const bundleHash = options.skillBundleHashes?.get(reported)
+    if (bundleHash === undefined) return undefined
+    const rawPath = entry.resourceRelativePath
+    let relativePath: string | null = null
+    if (typeof rawPath === 'string' && rawPath !== '' && rawPath.length <= 240) {
+      relativePath = /(^\/)|(\\)|(^[A-Za-z]:)|(\.\.)|(^\s)|(\s$)/.test(rawPath) ? null : rawPath
+    }
+    return { skillName: reported, skillBundleHash: bundleHash, resourceRelativePath: relativePath }
   }
 
   /**

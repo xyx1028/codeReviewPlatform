@@ -17,7 +17,7 @@
 
 换句话说：
 
-- Worker **从不**告诉模型"下一步去搜哪个关键词"。没有固定的检索阶段，`worker/src/ai/prompts/agent-review-v1.ts` 里写得很明确：检索顺序、深度、何时收敛全由 Agent 自己决定。
+- Worker **从不**告诉模型"下一步去搜哪个关键词"。没有固定的检索阶段，`../../worker/src/ai/prompts/agent-review-v1.ts` 里写得很明确：检索顺序、深度、何时收敛全由 Agent 自己决定。
 - DSH **从不**持有任何特权。它拿不到数据库凭据、拿不到快照根目录、发不出网络请求、也不能自己决定"提交成功"。
 
 一句更精确的说法：**Worker 编排的是"一次 attempt 的生命周期与权力边界"，DSH 编排的是"这一次 attempt 内部的思考过程"。**
@@ -67,8 +67,8 @@ flowchart TB
 
 **跨进程通道有且只有两条**，这是整套安全模型的地基：
 
-1. **ACP（stdio）** — Worker 当 ACP client，dsh 当 ACP agent。Worker 用它做三件事：开 session、发一次 prompt、必要时发 `session/cancel`。见 `worker/src/ai/acp/acp-client.ts`。
-2. **Broker（Unix domain socket）** — dsh 进程内的插件回头请求 Worker。socket 文件 0600、所在目录 0700，请求要带 Bearer token + 每个 Agent 自己的 capability token。见 `worker/src/ai/control/attempt-control-broker.ts`。
+1. **ACP（stdio）** — Worker 当 ACP client，dsh 当 ACP agent。Worker 用它做三件事：开 session、发一次 prompt、必要时发 `session/cancel`。见 `../../worker/src/ai/acp/acp-client.ts`。
+2. **Broker（Unix domain socket）** — dsh 进程内的插件回头请求 Worker。socket 文件 0600、所在目录 0700，请求要带 Bearer token + 每个 Agent 自己的 capability token。见 `../../worker/src/ai/control/attempt-control-broker.ts`。
 
 dsh 子进程手里只有三样东西：一个 0700 的私有目录、一个 socket 路径、两个经**环境变量**下传的令牌。凭据绝不写进 patch 文件 —— `profile-materializer.ts` 里有一道机械闸门 `assertPatchHasNoCredentials()`，patch 里出现任何形似凭据的键就直接拒绝启动。
 
@@ -97,7 +97,7 @@ dsh 子进程手里只有三样东西：一个 0700 的私有目录、一个 soc
 
 ## 3. Worker 做了啥：一个任务的完整时间线
 
-Worker 是个**轮询型**长驻进程（`worker/src/index.ts`），每轮固定做这些事：
+Worker 是个**轮询型**长驻进程（`../../worker/src/index.ts`），每轮固定做这些事：
 
 ```mermaid
 flowchart LR
@@ -109,7 +109,7 @@ flowchart LR
     F --> A
 ```
 
-### 3.1 Job 阶段：先把代码冻住（`worker/src/pipeline/prepare-job.ts`）
+### 3.1 Job 阶段：先把代码冻住（`../../worker/src/pipeline/prepare-job.ts`）
 
 对 4 个白名单仓库逐个跑 `prepareRepository()`：
 
@@ -171,7 +171,7 @@ sequenceDiagram
 
 ## 4. 起 dsh 之前，Worker 铺的三样东西（顺序本身就是安全属性）
 
-`worker/src/ai/runtime/deepseek-harness-acp-engine.ts` 的注释把这点说得很直白 —— 顺序不能换：
+`../../worker/src/ai/runtime/deepseek-harness-acp-engine.ts` 的注释把这点说得很直白 —— 顺序不能换：
 
 ```mermaid
 flowchart LR
@@ -198,7 +198,7 @@ flowchart LR
 
 **两层 patch 的分工很清楚：**
 
-- `worker/harness/code-review-acp/cordis.patch.yml`（进 git 的模板）：只做与 attempt 无关的事 —— 禁掉重复的 `llm-deepseek` adapter、禁掉外部 telemetry、禁掉 PowerShell、把 Harness 原生 web 工具换成平台网关、插入 5 个平台插件。**里面没有任何秘密。**
+- `../../worker/harness/code-review-acp/cordis.patch.yml`（进 git 的模板）：只做与 attempt 无关的事 —— 禁掉重复的 `llm-deepseek` adapter、禁掉外部 telemetry、禁掉 PowerShell、把 Harness 原生 web 工具换成平台网关、插入 5 个平台插件。**里面没有任何秘密。**
 - `attempt-route.patch.yml`（运行时生成）：写入本次 attempt 的模型路由、broker socket 路径、根 Agent id、角色工具集、各项数值上限、session 根目录。
 
 **凭据一律走环境变量**，而且变量名必须命中 Harness 自己的凭据剥离正则 `/KEY|PASSWORD|SECRET|TOKEN/i` —— `acp-process-supervisor.ts` 里的 `assertCredentialEnvIsScrubbed()` 在启动路径上机械检查这一点。这是"模型可见的 Shell 读不到凭据"的唯一依据。
@@ -266,7 +266,7 @@ flowchart TD
 
 ## 6. 平台怎么在 dsh 内部装哨兵：5 个插件
 
-这 5 个插件是**平台自己写的 Cordis 插件**（源码在 `worker/src/harness-plugins/`），通过 profile 的 `node_modules` shim 加载进 dsh 进程，挂在 Harness 的生命周期钩子上。它们是"Worker 的手伸进 Harness 内部"的方式。
+这 5 个插件是**平台自己写的 Cordis 插件**（源码在 `../../worker/src/harness-plugins`），通过 profile 的 `node_modules` shim 加载进 dsh 进程，挂在 Harness 的生命周期钩子上。它们是"Worker 的手伸进 Harness 内部"的方式。
 
 ```mermaid
 flowchart TB
@@ -406,21 +406,26 @@ Session JSONL 明文（`compression: none`）落在**持久卷**上。Worker 重
 
 ## 10. 防漂移：为什么改一行能力配置会让构建失败
 
-能力面只有**一个**人工维护入口：`worker/harness/code-review-acp/v4-capability-contract.json`。
+这里要区分**能力契约**和**运行资源限制**，它们不是同一层配置：
+
+- `../../worker/harness/code-review-acp/v4-capability-contract.json` 是 Harness **能力契约**的唯一人工维护入口：Harness 版本、20 个能力开关、插件和工具清单、角色工具权限、Broker 路由、错误码以及安全边界均由它锁定；前端不能修改。
+- 管理页面 `/harness-policy` 可以按模型维护 **24 项运行资源限制**：Agent 数量与深度、模型请求预算、Shell/Workflow/Job 超时、并发数、Workspace 容量、Web 配额与域名、Session 保留期等。这些值写入 `ai_model_config`，不会修改 manifest。
 
 ```mermaid
 flowchart LR
-    MF["v4-capability-contract.json<br/>manifestRevision / harnessVersion<br/>defaultPolicy / modelTools / roleTools / brokerRoutes"]
-    MF --> W["Worker 的 V4_DEFAULT_POLICY"]
-    MF --> DBM["数据库迁移里的 v4_harness_manifest"]
-    DBM --> UI["管理页面的默认策略"]
-    MF --> CK["npm run harness:manifest:check"]
-    CK -.->|"接入前端构建 / Worker 构建 / Worker 测试"| FAIL["不一致就直接构建失败"]
+    MF["Harness contract<br/>能力 / 工具 / 角色 / 路由 / 安全边界<br/>+ 资源默认基线"]
+    UI["管理页面按模型配置<br/>24 项资源限制"]
+    MF --> BUILD["build_v4_capability_policy"]
+    UI --> BUILD
+    BUILD --> JOB["新 Analysis Job<br/>冻结完整 policy snapshot"]
+    JOB --> TASK["该 Job 的全部 Story Task<br/>始终使用同一快照"]
+    MF --> CK["harness:manifest:check"]
+    CK -.->|"契约、依赖或迁移不一致"| FAIL["构建失败"]
 ```
 
-`harness:manifest:check` 会检查：所有默认能力是否开启、`harnessVersion` 是否与实际安装依赖一致、最新数据库迁移是否由当前 manifest 生成、数据库默认策略是否与 manifest 完全一致、语义摘要是否一致。**只改 manifest 忘了生成迁移，构建直接失败。**
+因此，新 Job 的最终策略是：**manifest 中固定的能力/安全基线 + 前端为所选模型保存的资源限制**。保存前端配置只影响之后创建的 Job；在途和历史 Job 使用已冻结快照，不会被改写。
 
-运行时还有第二道：`factory.ts` 在 spawn 之前比对三个哈希（manifest hash / harness 版本 / policy hash），任一不符就拒绝执行这个任务。所以升级必须走维护窗口排空在途任务，不会出现新旧能力面混跑。
+`harness:manifest:check` 检查的是能力契约及部署副本是否漂移，例如 Harness 版本、工具/插件/角色权限、manifest 数据库迁移不一致；它不会阻止管理员正常修改资源限额。运行时还有第二道：`factory.ts` 在 spawn 前比对 manifest hash、Harness 版本和 Job 冻结的 policy hash，任一不符就拒绝执行，避免旧任务被新 Worker 按新规则继续运行。
 
 ---
 
@@ -441,19 +446,19 @@ dsh 编排 Agent 的行为，Worker 编排 dsh 的一生。
 
 | 关心什么 | 看哪里 |
 |---|---|
-| 主循环、claim、租约、并发槽、关停 | `worker/src/index.ts` |
-| 仓库冻结到精确 SHA | `worker/src/git/prepare.ts`、`verify.ts`、`repositories.ts` |
-| Job 准备 / 批次汇总 | `worker/src/pipeline/prepare-job.ts`、`finalize-job.ts` |
-| Engine 装配与收敛顺序 | `worker/src/ai/runtime/deepseek-harness-acp-engine.ts` |
-| 三段哈希门禁、依赖注入 | `worker/src/ai/runtime/factory.ts` |
-| profile / attempt patch 生成、configHash | `worker/src/ai/acp/profile-materializer.ts` |
-| dsh 启动、最小环境、进程组回收 | `worker/src/ai/acp/acp-process-supervisor.ts` |
-| ACP turn、resume、权限判定 | `worker/src/ai/acp/acp-client.ts` |
-| Broker 13 条路由与鉴权 | `worker/src/ai/control/attempt-control-broker.ts` |
+| 主循环、claim、租约、并发槽、关停 | `../../worker/src/index.ts` |
+| 仓库冻结到精确 SHA | `../../worker/src/git/prepare.ts`、`verify.ts`、`repositories.ts` |
+| Job 准备 / 批次汇总 | `../../worker/src/pipeline/prepare-job.ts`、`finalize-job.ts` |
+| Engine 装配与收敛顺序 | `../../worker/src/ai/runtime/deepseek-harness-acp-engine.ts` |
+| 三段哈希门禁、依赖注入 | `../../worker/src/ai/runtime/factory.ts` |
+| profile / attempt patch 生成、configHash | `../../worker/src/ai/acp/profile-materializer.ts` |
+| dsh 启动、最小环境、进程组回收 | `../../worker/src/ai/acp/acp-process-supervisor.ts` |
+| ACP turn、resume、权限判定 | `../../worker/src/ai/acp/acp-client.ts` |
+| Broker 13 条路由与鉴权 | `../../worker/src/ai/control/attempt-control-broker.ts` |
 | 身份令牌 / 分层预算 / 收敛 | `worker/src/ai/control/*.ts` |
 | 5 个平台插件 | `worker/src/harness-plugins/*/index.ts` |
-| 证据签发与校验 | `worker/src/ai/snapshot/evidence-ledger.ts`、`deterministic-verifier.ts` |
-| 能力契约（唯一人工入口） | `worker/harness/code-review-acp/v4-capability-contract.json` |
-| profile 模板补丁层 | `worker/harness/code-review-acp/cordis.patch.yml` |
-| 根 Agent 的 system prompt | `worker/src/ai/prompts/agent-review-v1.ts` |
-| 运维手册 | `worker/OPERATIONS.md`（§15 V4、§16 监控） |
+| 证据签发与校验 | `../../worker/src/ai/snapshot/evidence-ledger.ts`、`deterministic-verifier.ts` |
+| 能力契约（唯一人工入口） | `../../worker/harness/code-review-acp/v4-capability-contract.json` |
+| profile 模板补丁层 | `../../worker/harness/code-review-acp/cordis.patch.yml` |
+| 根 Agent 的 system prompt | `../../worker/src/ai/prompts/agent-review-v1.ts` |
+| 运维手册 | `../../worker/OPERATIONS.md`（§15 V4、§16 监控） |
