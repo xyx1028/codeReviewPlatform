@@ -10,6 +10,17 @@ import { describe, expect, it } from 'vitest'
 import { resolveAnalysisError } from '../labels'
 
 describe('resolveAnalysisError transport truncation', () => {
+  it('classifies host-proxy 502 as retryable endpoint unavailability', () => {
+    const r = resolveAnalysisError(
+      '-32603',
+      'Internal error: turn failed: 502 model endpoint unreachable from this Mac',
+    )
+    expect(r.code).toBe('MODEL_ENDPOINT_UNREACHABLE')
+    expect(r.meta.title).toBe('模型服务暂时不可达')
+    expect(r.meta.retryable).toBe(true)
+    expect(r.originalCode).toBe('-32603')
+  })
+
   it('classifies "Stream ended without finish_reason" as retryable stream truncation', () => {
     const r = resolveAnalysisError('-32603', 'Internal error: turn failed: Stream ended without finish_reason')
     expect(r.code).toBe('MODEL_STREAM_TRUNCATED')

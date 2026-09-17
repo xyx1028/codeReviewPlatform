@@ -142,6 +142,12 @@ export const analysisErrorCodeMeta: Record<string, AnalysisErrorMeta> = {
     suggestion: '检查模型服务状态和网络，必要时调整超时后重试。',
     retryable: true,
   },
+  MODEL_ENDPOINT_UNREACHABLE: {
+    title: '模型服务暂时不可达',
+    reason: 'Worker 已连到本机代理，但 Mac 当时无法连到模型端点。',
+    suggestion: '确认 VPN 和模型服务恢复后，可按原 Commit 重试。',
+    retryable: true,
+  },
   MODEL_STREAM_TRUNCATED: {
     title: '模型响应流被中断',
     reason: '模型的流式响应在正常结束前连接被切断（常见于经代理访问的长响应，属传输层瞬时故障）。',
@@ -416,6 +422,18 @@ export function resolveAnalysisError(
 ): { code: string; originalCode: string | null; meta: AnalysisErrorMeta } {
   const originalCode = errorCode?.trim() || null
   const message = errorMessage ?? ''
+  // Mac 本机代理在无法建立上游连接时返回 502；Harness 将其包成
+  // JSON-RPC `-32603`，所以页面需要从脱敏错误文本恢复可操作的错误类别。
+  const endpointUnreachable =
+    /\b502\b.*\bmodel endpoint unreachable from this Mac\b/i.test(message) ||
+    /\bmodel endpoint unreachable from this Mac\b/i.test(message)
+  if (endpointUnreachable && (originalCode === null || analysisErrorCodeMeta[originalCode] === undefined)) {
+    return {
+      code: 'MODEL_ENDPOINT_UNREACHABLE',
+      originalCode,
+      meta: analysisErrorCodeMeta.MODEL_ENDPOINT_UNREACHABLE!,
+    }
+  }
   // 传输层截断：Harness 把「流在收到 finish_reason 前关闭」统一抛成 `-32603` +
   // 文本 `Stream ended without finish_reason`（code 在 Harness 内部是 TRANSPORT，
   // 但冒泡到平台时只剩 -32603，分类信息丢失）。这类是瞬时可重试故障，不该显示成
