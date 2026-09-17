@@ -302,7 +302,26 @@ export function buildAttemptPatch(
             apiKeyEnv: spec.route.apiKeyEnvVar,
             api: 'openai-completions',
             baseURL: spec.route.baseUrl,
-            retryPolicy: { mode: 'normal', maxRetries: 0 },
+            // 重试上限来自冻结 policy 的 `maxRetryRequests`，不是硬编码的 0。
+            //
+            // 曾经写死 0 的后果是实测出来的：内网模型端点（经宿主机 VPN 代理）会以约
+            // 0.5% 的比例出现一次性 socket 失败，代理据实回 `502 model endpoint
+            // unreachable from this Mac`。`maxRetries: 0` 让 `dsh-llm-retry` 对这个
+            // `SERVER` 失败直接放弃，于是**单次**瞬时抖动就把整个 attempt 打成
+            // `ATTEMPT_FAILED`（首个 model 请求即失败、wall_ms 三秒、零证据）。一次
+            // 评审有几十次 model 请求，逐次 0.5% 累起来就是每批必然有若干需求任务无端失败。
+            //
+            // 同时 0 让平台侧的重试预算成了永远花不出去的死账：`fallbackPolicyFromModel`
+            // 与 policy 快照都留了 `maxRetryRequests`，`RequestClassifier` 会把重发认成
+            // `kind:'retry'`，Broker 与 `HierarchicalBudgetLedger` 也按该额度记账并在超额时
+            // 拒绝。真正的上限本来就在账本里，provider 侧再写一个 0 只是把上限提前压成零。
+            //
+            // 取 policy 的额度而不是 Harness 默认的 5：默认值是 Harness 的部署选择，
+            // V4 的上限必须来自冻结 policy（与本文件其余显式数值同一条原则）。预算耗尽后
+            // 账本回的是 `MODEL_BUDGET_EXHAUSTED` / `BROKER_DENIED`，不在 normal 模式的可重试
+            // 码集合（`EMPTY_RESPONSE`/`RATE_LIMIT`/`SERVER`/`TIMEOUT`/`TRANSPORT`）里，
+            // 因此额度用尽会立即终止，不会退化成重试风暴。
+            retryPolicy: { mode: 'normal', maxRetries: spec.policy.modelBudget.maxRetryRequests },
             models: [
               {
                 id: spec.route.modelName,

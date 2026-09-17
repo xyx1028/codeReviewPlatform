@@ -106,8 +106,35 @@ describe('buildAttemptPatch', () => {
     expect(provider.baseURL).toBe('https://model.invalid/v1')
     // The key itself must never appear anywhere in the generated overlay.
     expect(JSON.stringify(patch)).not.toContain(SECRET_KEY)
-    // Provider retries are disabled: retry accounting belongs to the governor.
-    expect(provider.retryPolicy).toEqual({ mode: 'normal', maxRetries: 0 })
+    // Provider retries follow the frozen policy's retry allowance, not the Harness
+    // default and not a hardcoded zero. Zero was a real outage: one sporadic 502
+    // from the host VPN proxy ended an entire attempt on its first model request,
+    // while the retry budget the governor reserves stayed permanently unspendable.
+    expect(provider.retryPolicy).toEqual({
+      mode: 'normal',
+      maxRetries: V4_DEFAULT_POLICY.modelBudget.maxRetryRequests,
+    })
+    // Guard the regression direction explicitly: a policy that silently normalizes
+    // the allowance back to 0 would re-disable recovery without failing the
+    // equality above.
+    expect(V4_DEFAULT_POLICY.modelBudget.maxRetryRequests).toBeGreaterThan(0)
+  })
+
+  it('scales provider retries with the frozen policy instead of a fixed constant', () => {
+    const narrowed = spec({
+      policy: {
+        ...V4_DEFAULT_POLICY,
+        modelBudget: { ...V4_DEFAULT_POLICY.modelBudget, maxRetryRequests: 2 },
+      },
+    })
+    const patch = buildAttemptPatch(narrowed) as Array<{
+      id: string
+      config: Record<string, unknown>
+    }>
+    const providers = (patch.find((row) => row.id === 'llm-pi-ai')?.config.providers ??
+      {}) as Record<string, Record<string, unknown>>
+
+    expect(providers['review-route'].retryPolicy).toEqual({ mode: 'normal', maxRetries: 2 })
   })
 
   it('pins the agent surface to the same route as the model adapter', () => {

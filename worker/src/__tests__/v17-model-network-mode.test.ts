@@ -168,6 +168,57 @@ describe('host proxy SSRF guard', () => {
   })
 })
 
+describe('host proxy upstream failure reason', () => {
+  /**
+   * 这条用例守的是一个**排查缺口**，不是一个安全边界。
+   *
+   * 代理原本把上游 error 整个丢掉、只记 host，于是连接被重置、DNS 解析失败和 300 秒空闲
+   * 超时（超时路径也是 `destroy(new Error('upstream timeout'))` 进同一个 handler）在日志里
+   * 完全同形。而这三种的处置完全不同：重置查内网端点，DNS 查 VPN 路由，超时调
+   * `MODEL_VPN_PROXY_UPSTREAM_TIMEOUT_MS`。同时这里也钉住"不许把 message 原文写进日志"，
+   * 因为上游完全可能把响应内容塞进 message。
+   */
+  async function meta(): Promise<(error: unknown) => Record<string, unknown>> {
+    const specifier = '../../../scripts/model-vpn-proxy.mjs'
+    const module = (await import(/* @vite-ignore */ specifier)) as unknown as {
+      upstreamErrorMeta: (error: unknown) => Record<string, unknown>
+    }
+    return module.upstreamErrorMeta
+  }
+
+  it('reports the syscall-level code and syscall', async () => {
+    const meta_ = await meta()
+    expect(meta_(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }))).toEqual({
+      reason: 'ECONNRESET',
+    })
+    expect(
+      meta_(Object.assign(new Error('getaddrinfo EAI_AGAIN'), { code: 'EAI_AGAIN', syscall: 'getaddrinfo' })),
+    ).toEqual({ reason: 'EAI_AGAIN', syscall: 'getaddrinfo' })
+  })
+
+  it('distinguishes the proxy-side idle timeout from a transport error', async () => {
+    const meta_ = await meta()
+    const result = meta_(new Error('upstream timeout'))
+    expect(result.reason).toBe('idle_timeout')
+    expect(result.idle_timeout_ms).toBe(300000)
+  })
+
+  it('never puts the upstream message into the log record', async () => {
+    const meta_ = await meta()
+    const secretish = 'Bearer sk-should-never-be-logged'
+    const result = meta_(Object.assign(new Error(secretish), { code: 'ECONNREFUSED' }))
+    expect(JSON.stringify(result)).not.toContain('sk-should-never-be-logged')
+    expect(result).toEqual({ reason: 'ECONNREFUSED' })
+  })
+
+  it('falls back to UNKNOWN rather than dropping the field', async () => {
+    const meta_ = await meta()
+    // 没有 code 的 error 仍要留下一条可 grep 的 reason；缺字段会让告警规则漏掉这类失败。
+    expect(meta_(new Error('opaque'))).toEqual({ reason: 'UNKNOWN' })
+    expect(meta_(undefined)).toEqual({ reason: 'UNKNOWN' })
+  })
+})
+
 describe('claim mapper carries the frozen mode', () => {
   /**
    * 这条用例守的是一个**端到端才暴露出来的**缺口。

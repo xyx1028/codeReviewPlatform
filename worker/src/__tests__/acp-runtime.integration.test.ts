@@ -43,18 +43,36 @@ interface ScriptedToolCall {
 type ScriptedTurn = ScriptedToolCall | ((requestBody: string) => ScriptedToolCall)
 
 /** Minimal OpenAI-compatible streaming endpoint with scripted turns. */
-function startMockModelServer(script: ScriptedTurn[]): Promise<{
+function startMockModelServer(
+  script: ScriptedTurn[],
+  /**
+   * Reply `502` to the first N `/chat/completions` requests before serving the
+   * script. This reproduces the host VPN proxy's own failure body: when the
+   * intranet endpoint drops a socket, `scripts/model-vpn-proxy.mjs` answers
+   * `502 model endpoint unreachable from this Mac`, which pi-ai classifies as
+   * `SERVER`. Failed requests do not consume the script.
+   */
+  transientServerFailures = 0,
+): Promise<{
   baseUrl: string
   requestCount: () => number
+  failedCount: () => number
   close: () => Promise<void>
 }> {
   let requestCount = 0
+  let failedCount = 0
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const chunks: Buffer[] = []
     req.on('data', (c: Buffer) => chunks.push(c))
     req.on('end', () => {
       if (!req.url?.includes('/chat/completions')) {
         res.writeHead(404).end('{}')
+        return
+      }
+      if (failedCount < transientServerFailures) {
+        failedCount++
+        res.writeHead(502, { 'content-type': 'text/plain' })
+        res.end('model endpoint unreachable from this Mac')
         return
       }
       const index = requestCount++
@@ -118,6 +136,7 @@ function startMockModelServer(script: ScriptedTurn[]): Promise<{
       resolveServer({
         baseUrl: `http://127.0.0.1:${port}/v1`,
         requestCount: () => requestCount,
+        failedCount: () => failedCount,
         close: () => closeServer(server),
       })
     })
@@ -209,6 +228,58 @@ function startMockBroker(socketPath: string, expectedToken: string): Promise<{
 
 function closeServer(server: Server): Promise<void> {
   return new Promise((resolveClose) => server.close(() => resolveClose()))
+}
+
+/**
+ * Broker stand-in that accepts the first submission.
+ *
+ * Separate from `startMockBroker` on purpose: that one rejects the first
+ * submission to exercise model self-correction, which would confound a test whose
+ * whole subject is how many model requests the transport failure costs.
+ */
+function startMockBrokerAlwaysAccepting(
+  socketPath: string,
+  expectedToken: string,
+): Promise<{ calls: BrokerCall[]; close: () => Promise<void> }> {
+  const calls: BrokerCall[] = []
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (c: Buffer) => chunks.push(c))
+    req.on('end', () => {
+      const reply = (payload: unknown): void => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(payload))
+      }
+      if (req.headers.authorization !== `Bearer ${expectedToken}`) {
+        res.writeHead(401, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ accepted: false, reason: 'unauthorized' }))
+        return
+      }
+      const route = req.url ?? ''
+      if (route === '/attempt/reserve-model-request') {
+        // The ledger's own denial path is not under test here; the retry ceiling
+        // being measured is the provider-side one written into the profile.
+        reply({ allowed: true, reserved: 1 })
+        return
+      }
+      if (route === '/attempt/report-usage' || route === '/attempt/tool-audit') {
+        reply({ accepted: true })
+        return
+      }
+      if (route === '/attempt/submit-review') {
+        calls.push(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as BrokerCall)
+        reply({ accepted: true, runId: 'run-transient-1', committedAt: new Date().toISOString() })
+        return
+      }
+      reply({ accepted: false, code: 'BROKER_UNKNOWN_ROUTE', reason: `unused route ${route}` })
+    })
+  })
+
+  return new Promise((resolveServer) => {
+    server.listen(socketPath, () => {
+      resolveServer({ calls, close: () => closeServer(server) })
+    })
+  })
 }
 
 /** Recursively collect files that look like a persisted session log. */
@@ -368,6 +439,174 @@ describe.skipIf(!ENABLED)('ACP runtime POC (real dsh process)', () => {
         rmSync(cwd, { recursive: true, force: true })
         rmSync(attemptsRoot, { recursive: true, force: true })
       }
+    },
+    180000,
+  )
+})
+
+/**
+ * The transient-502 regression, reproduced against a real dsh process.
+ *
+ * Production evidence (2026-09-17, batch 032bea72): the intranet model endpoint
+ * reached through `scripts/model-vpn-proxy.mjs` dropped roughly 0.5% of sockets,
+ * and the proxy answered `502 model endpoint unreachable from this Mac`. Because
+ * the attempt profile pinned `retryPolicy.maxRetries` to 0, `dsh-llm-retry`
+ * delegated that `SERVER` failure instead of retrying, so a single blip ended the
+ * whole attempt on its first model request — `ATTEMPT_FAILED`, `wall_ms` 3002,
+ * zero evidence, while the governor's retry allowance sat unspent.
+ *
+ * Both directions are asserted here on purpose. "Recovers when the policy allows
+ * retries" alone would still pass if the retry executor were unmounted and the
+ * 502 simply never reached it; pinning that `maxRetries: 0` still dies proves the
+ * profile field is what decides the outcome.
+ */
+describe.skipIf(!ENABLED)('transient upstream 502 (real dsh process)', () => {
+  interface TransientRunResult {
+    stopReason: string
+    error: string | null
+    submissions: number
+    failedRequests: number
+    stderr: string
+  }
+
+  async function runWithTransient502(input: {
+    retryAllowance: number
+    failures: number
+  }): Promise<TransientRunResult> {
+    const socketDir = mkdtempSync(join(tmpdir(), 'acp-502-b-'))
+    const socketPath = join(socketDir, 's.sock')
+    const cwd = mkdtempSync(join(tmpdir(), 'acp-502-cwd-'))
+    const attemptsRoot = mkdtempSync(join(tmpdir(), 'acp-502-att-'))
+    const sessionRoot = mkdtempSync(join(tmpdir(), 'acp-502-sess-'))
+    const token = 'transient-claim-token'
+
+    const model = await startMockModelServer(
+      [
+        {
+          name: 'submit_review_result',
+          args: {
+            verdict: 'IMPLEMENTED',
+            confidence: 90,
+            summary: 'submitted after the upstream recovered',
+            evidence: VALID_EVIDENCE,
+          },
+        },
+      ],
+      input.failures,
+    )
+    const broker = await startMockBrokerAlwaysAccepting(socketPath, token)
+
+    const profile = materializeAttemptProfile({
+      taskId: 'transient-502-task',
+      agentAttempt: 1,
+      attemptsRoot,
+      route: {
+        providerId: 'review-route',
+        displayName: 'Review Route',
+        baseUrl: model.baseUrl,
+        modelName: 'poc-model',
+        contextWindow: 131072,
+        maxTokens: 4096,
+        apiKeyEnvVar: 'REVIEW_MODEL_API_KEY',
+        requestTimeoutMs: 60000,
+      },
+      // The single variable under test: the frozen policy's retry allowance,
+      // which the profile hands to the provider as `retryPolicy.maxRetries`.
+      policy: {
+        ...V4_DEFAULT_POLICY,
+        modelBudget: {
+          ...V4_DEFAULT_POLICY.modelBudget,
+          maxRetryRequests: input.retryAllowance,
+        },
+      },
+      identity: { rootAgentId: 'root-transient', rootSessionId: 'session-transient' },
+      cwd,
+      sessionRoot,
+      broker: { socketPath },
+    })
+
+    const child = startAcpProcess({
+      dshHome: profile.dshHome,
+      profileName: profile.profileName,
+      patchPath: profile.patchPath,
+      cwd,
+      apiKeyEnvVar: 'REVIEW_MODEL_API_KEY',
+      apiKey: 'transient-not-a-real-key',
+      brokerToken: token,
+      rootCapability: 'root-cap-transient',
+      killGraceMs: 3000,
+    })
+
+    const controller = new AbortController()
+    try {
+      const turn = await runSingleAcpTurn(
+        { process: child, cwd, permittedTools: [...profile.rootTools] },
+        'Review story PRJ-001 and submit the result.',
+        controller.signal,
+      ).catch((err: unknown) => ({
+        // An unrecovered transport failure rejects the ACP request rather than
+        // returning a stop reason; the message is the one the Worker logs as
+        // `agent_attempt_failed`, so it is the assertable artifact.
+        stopReason: 'threw',
+        toolNames: [] as string[],
+        error: (err as Error).message,
+      }))
+      return {
+        stopReason: turn.stopReason,
+        error: 'error' in turn ? turn.error : null,
+        submissions: broker.calls.length,
+        failedRequests: model.failedCount(),
+        stderr: child.stderr(),
+      }
+    } finally {
+      controller.abort()
+      await child.terminate()
+      await broker.close()
+      await model.close()
+      profile.cleanup()
+      for (const dir of [socketDir, cwd, attemptsRoot, sessionRoot]) {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }
+  }
+
+  it(
+    'recovers from a single 502 and still commits when the policy allows retries',
+    async () => {
+      const result = await runWithTransient502({ retryAllowance: 12, failures: 1 })
+
+      // The 502 really was served — otherwise this test proves nothing.
+      expect(result.failedRequests).toBe(1)
+      // ...and the turn still reached its normal end through the tool.
+      expect(result.stopReason, `stderr: ${result.stderr}`).toBe('end_turn')
+      expect(result.submissions).toBe(1)
+    },
+    180000,
+  )
+
+  it(
+    'still survives a burst of consecutive 502s within the allowance',
+    async () => {
+      const result = await runWithTransient502({ retryAllowance: 12, failures: 3 })
+
+      expect(result.failedRequests).toBe(3)
+      expect(result.stopReason, `stderr: ${result.stderr}`).toBe('end_turn')
+      expect(result.submissions).toBe(1)
+    },
+    180000,
+  )
+
+  it(
+    'dies on the same single 502 when the retry allowance is zero (the shipped regression)',
+    async () => {
+      const result = await runWithTransient502({ retryAllowance: 0, failures: 1 })
+
+      expect(result.failedRequests).toBe(1)
+      // The turn never reaches the submission tool; it fails outright with the
+      // exact message production logged for batch 032bea72's US-2026-008708.
+      expect(result.stopReason).not.toBe('end_turn')
+      expect(result.error).toContain('turn failed: 502 model endpoint unreachable from this Mac')
+      expect(result.submissions).toBe(0)
     },
     180000,
   )

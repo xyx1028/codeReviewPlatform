@@ -73,6 +73,30 @@ function logEvent(event, meta = {}) {
   console.log(JSON.stringify({ ts: new Date().toISOString(), proxy: 'model-vpn-proxy', event, ...meta }))
 }
 
+/**
+ * 上游失败的**原因**，按允许列表提取。
+ *
+ * 之前 `upstream.on('error', () => ...)` 把 error 整个丢掉，只记 host。后果是排查时
+ * 一次连接被重置、一次 DNS 解析失败、一次 300 秒空闲超时（`upstream.destroy(new
+ * Error('upstream timeout'))` 走的也是同一个 handler）在日志里长得一模一样，只能靠
+ * 请求时间差去猜是哪一种 —— 而这三种的处置完全不同：重置要看内网端点，DNS 要看 VPN
+ * 路由，超时要调 `MODEL_VPN_PROXY_UPSTREAM_TIMEOUT_MS` 与模型超时。
+ *
+ * 只取 `code`/`syscall` 与固定的超时标记：这些是 Node 自己产生的枚举值，不含地址、
+ * Header 或正文。刻意不记 `error.message` 原文，避免上游把响应内容塞进 message 时
+ * 顺带写进日志。
+ */
+export function upstreamErrorMeta(error) {
+  const code = typeof error?.code === 'string' ? error.code : undefined
+  const syscall = typeof error?.syscall === 'string' ? error.syscall : undefined
+  const timedOut = error?.message === 'upstream timeout'
+  return {
+    reason: timedOut ? 'idle_timeout' : (code ?? 'UNKNOWN'),
+    ...(syscall === undefined ? {} : { syscall }),
+    ...(timedOut ? { idle_timeout_ms: UPSTREAM_TIMEOUT_MS } : {}),
+  }
+}
+
 function isAuthorized(headers) {
   const provided = Buffer.from(String(headers['proxy-authorization'] ?? ''))
   const expected = Buffer.from(expectedAuth)
@@ -177,8 +201,8 @@ const server = http.createServer((req, res) => {
   )
 
   upstream.setTimeout(UPSTREAM_TIMEOUT_MS, () => upstream.destroy(new Error('upstream timeout')))
-  upstream.on('error', () => {
-    logEvent('proxy_upstream_error', { host: target.hostname })
+  upstream.on('error', (error) => {
+    logEvent('proxy_upstream_error', { host: target.hostname, ...upstreamErrorMeta(error) })
     if (!res.headersSent) res.writeHead(502)
     res.end('model endpoint unreachable from this Mac')
   })
@@ -213,9 +237,11 @@ server.on('connect', (req, clientSocket, head) => {
     upstream.pipe(clientSocket)
     clientSocket.pipe(upstream)
   })
-  upstream.setTimeout(UPSTREAM_TIMEOUT_MS, () => upstream.destroy())
-  upstream.on('error', () => {
-    logEvent('proxy_upstream_error', { host: targetHost })
+  // 与 HTTP 分支一致地带上原因 destroy：不带 error 的 destroy 不会触发 'error'，
+  // 隧道就会静默断开，日志里连一条 proxy_upstream_error 都没有。
+  upstream.setTimeout(UPSTREAM_TIMEOUT_MS, () => upstream.destroy(new Error('upstream timeout')))
+  upstream.on('error', (error) => {
+    logEvent('proxy_upstream_error', { host: targetHost, ...upstreamErrorMeta(error) })
     clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n')
   })
   clientSocket.on('error', () => upstream.destroy())

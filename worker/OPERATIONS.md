@@ -386,6 +386,63 @@ CONNECTIVITY_COMPONENTS=git GIT_AUTH_MODE=local npm run worker:check-connectivit
 
 一个 Task 的致命错误可能使整个 Job 失败并释放 sibling lease，这是防止不完整结果进入 finalizer 的预期行为。
 
+### 12.1 一个 Task 失败时，sibling 会留下什么日志
+
+上面那条"预期行为"在日志里**不长得像一个原因**，而像三个互不相关的故障。2026-09-17
+批次 `032bea72` 实测：一次瞬时 502 打挂了 1 个 attempt，`fail_agent_review` 随即把
+Job 置为 `FAILED` 并清空**同 Job 全部** Task 的 `worker_id` / `lease_expires_at` /
+`claim_token_digest`，于是另外 7 个正在跑的 attempt 在 22 秒内依次报出：
+
+| 日志 | 真实含义 |
+|---|---|
+| `heartbeat_lease_lost` | `heartbeat_analysis_attempt` 要求 `job.status = 'PROCESSING'` 且 `worker_id` 匹配，两个条件同时失效 |
+| `agent_budget_reserve_rejected_by_db` | 预留走的是同一套 claim 校验，租约没了自然被拒 |
+| `agent_attempt_failed` … `model request denied by the attempt budget`（`BUDGET_DENIED`/`BROKER_DENIED`） | **不是预算不够**。是 Broker 路由返回非 200 被归一成拒绝，根因仍是租约 |
+| `fail_agent_review_error: TASK_LEASE_LOST` | 这些 attempt 想记录自己的失败，但租约已经被上一个失败者清掉 |
+| `run_rollup_compute_failed: ROLLUP_RUN_NOT_TERMINAL` | 承上：`analysis_agent_run` 没能置终态，rollup 自然算不了 |
+
+判据：**看时间窗和 `model_requests`**。真的预算耗尽会出现在 `model_requests` 逼近
+`maxRootRequests` 时，且各 attempt 分散发生；这种连带失败则集中在几十秒内、`model_requests`
+远低于上限（实测 18/21/22/26/30/43/51 对上限 80，且七条的 `model_requests_denied` 全为 0），并且**总有一个更早的 attempt 以别的原因失败**。
+先去找那一个，不要去调预算。
+
+代价要说清：这 7 个 attempt 的模型时间全部作废（实测合计约 1.9 小时）。已 `COMMITTED`
+的结果不受影响，`retry_analysis_job` 只会把非 SUCCEEDED 的 Task 重置为 PENDING。
+所以降低这种连带损失的正确方向不是改 Job 生命周期，而是**别让瞬时故障升级成 attempt 失败**
+（见 §18.7 的 provider 重试）。
+
+### 12.2 `run_rollup_backfilled computed:0 failed:N` 不动
+
+`backfill_analysis_run_rollups` 把每个候选的异常都吞进 `failed` 计数，**不记错误码也不记
+run id**。所以这行日志本身不能告诉你原因，只能告诉你"有 N 个 run 每轮都在失败"。
+
+判据：连续几轮 `failed` 数字**一模一样**（实测 10:43 / 10:49 / 10:53 / 10:59 四轮都是 28），
+说明不是"还没算完"，而是同一批 run 每次抛同一个异常。
+
+已知并已修复的一种：run 从未上报过 `ATTEMPT_INSTRUMENTATION_REPORTED` 时，
+`compute_analysis_run_rollup` 里那次 SELECT INTO 选不到行，PL/pgSQL 把
+`v_events_reported` / `v_events_dropped` 置成 NULL（声明处的 `:= 0` 被覆盖、select 里的
+`coalesce` 没被求值），导致 `= 0` 兜底判定变成 NULL、分支被跳过，NULL 撞上 NOT NULL 约束。
+命中的是两类 run：`RUNTIME_EVENTS_ENABLED` 之前的历史 run，以及**在上报 instrumentation
+之前就被 §12.1 那种租约回收打断的 run**。
+
+修复迁移：`20260917143803_fix_run_rollup_null_events_reported.sql`。推送后这批积压会被
+下一轮 backfill 自动算出来，不需要人工干预；`analysis_agent_run_rollup` 是长期保留的
+跨月对比数据源，算不出来就等于永久缺口。
+
+手工确认某个 run 到底为什么算不出来（backfill 不会告诉你，得自己单点调用）：
+
+```sql
+-- 不吞异常，直接看真实报错
+select public.compute_analysis_run_rollup('<agent_run_id>');
+
+-- 还有多少积压候选
+select count(*) from public.analysis_agent_run run
+left join public.analysis_agent_run_rollup rollup on rollup.agent_run_id = run.id
+where run.status in ('COMMITTED','FAILED')
+  and (rollup.agent_run_id is null or rollup.rollup_version = 0);
+```
+
 ## 13. Worker 重启与扩缩容
 
 重启：
@@ -1423,7 +1480,7 @@ Agent 的 Shell 命令也能经这条代理访问公司内网。**
 ## 18.6 怎么复跑验证
 
 ```bash
-# 单测：判定函数 + 代理 SSRF 守卫 + claim 字段映射
+# 单测：判定函数 + 代理 SSRF 守卫 + 上游失败原因提取 + claim 字段映射
 npx vitest run worker/src/__tests__/v17-model-network-mode.test.ts
 
 # 真实 dsh 进程：代理环境按模式下传，且记录 Shell 继承这一代价
@@ -1435,3 +1492,60 @@ psql -v ON_ERROR_STOP=1 -f supabase/tests/20260917130000_model_network_access_mo
 
 端到端（本地库 + 本地 Worker 容器 + 真实 launchd 代理）三个场景的实测结果见
 `需求开发评审一致性平台/V1.7-内网模型连接/…-最终执行方案.md` 第 10 节。
+
+## 18.7 `502 model endpoint unreachable from this Mac`
+
+这条 502 **只**由宿主机代理产生（`scripts/model-vpn-proxy.mjs` 的上游 error 分支），
+不是模型端点返回的业务错误。Worker 侧看到的是：
+
+```text
+agent_attempt_failed  error_code=-32603
+error_message="Internal error: turn failed: 502 model endpoint unreachable from this Mac"
+```
+
+### 先分清是哪一种失败
+
+代理日志在 `~/Library/Logs/codereviewplatform/model-vpn-proxy.log`，
+每条 `proxy_upstream_error` 都带 `reason`：
+
+| `reason` | 含义 | 先查什么 |
+|---|---|---|
+| `ECONNRESET` | 端点或中间网络重置了连接 | 内网端点自身与 VPN 链路，通常是偶发抖动 |
+| `ECONNREFUSED` | 端口没人监听 | 端点是否在跑、端口是否变了 |
+| `ENOTFOUND` / `EAI_AGAIN` | DNS 解析失败 | Mac 当前是否连着公司 VPN（`dig +short <host>`） |
+| `idle_timeout` | 代理侧空闲超时先掐断（带 `idle_timeout_ms`） | 上调 `MODEL_VPN_PROXY_UPSTREAM_TIMEOUT_MS`，并与 `ai_model_config.request_timeout_ms` 一起对齐 |
+
+统计当天的失败率（判断是"抖动"还是"端点挂了"）：
+
+```bash
+L=~/Library/Logs/codereviewplatform/model-vpn-proxy.log
+grep -c proxy_forwarded "$L"; grep -c proxy_upstream_error "$L"
+grep -o '"reason":"[A-Za-z_]*"' "$L" | sort | uniq -c
+```
+
+2026-09-17 的实测基线：1526 次转发对 7 次 `proxy_upstream_error`（约 0.46%），
+`reason` 为 `ECONNRESET`。这个量级属于链路抖动，**不需要**动代理配置。
+
+### 抖动为什么不该再打挂 attempt
+
+平台侧的恢复由 `dsh-llm-retry` 执行，它读的是 attempt profile 里 provider 的
+`retryPolicy`；而这个值来自**冻结 policy** 的 `modelBudget.maxRetryRequests`
+（`profile-materializer.ts`）。该字段曾被写死为 `0`，后果是一次 0.46% 的抖动就让整个
+需求任务变成 `ATTEMPT_FAILED`（首个模型请求即失败、`wall_ms` 三秒、零证据），而账本里
+预留的重试额度永远花不出去。现在 `maxRetries` 跟随 policy，`SERVER`/`TIMEOUT`/`TRANSPORT`
+等瞬时失败会在**同一个 turn** 内按 500ms→10s 退避重发，每次重发都经
+`/attempt/reserve-model-request` 记账，超出额度才终止。
+
+因此排查顺序是：先看 `reason` 判断链路，再确认该 Job 的
+`capability_policy_snapshot->'modelBudget'->>'maxRetryRequests'` 不是 0 —— 它是 0 时
+恢复会被合法地关掉，届时任何一次抖动仍会打挂 attempt。
+
+```sql
+select id, capability_policy_snapshot->'modelBudget'->>'maxRetryRequests'
+from analysis_job order by created_at desc limit 5;
+```
+
+### 代理里刻意**不**做重试
+
+代理再重发一次会凭空产生一个没有向 Broker 预留的模型请求，直接破坏"用量账本即真值"
+这一前提。恢复只允许发生在记账的那一层。
