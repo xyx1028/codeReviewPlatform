@@ -55,7 +55,17 @@ function assertStartupConfig() {
   }
 }
 
-const UPSTREAM_TIMEOUT_MS = 35000
+// 上游连接的**空闲**超时(两次数据之间的最大间隔),不是请求总时长上限。
+//
+// 关键:reasoning 类模型(如 kimi-k3)在流式响应里会有较长的"思考"停顿——服务端在算,
+// 期间不往回吐任何字节。如果这个值小于该停顿,代理会在流正常结束前 destroy 掉上游连接,
+// 下游 pi-ai 收到的就是"流在没有 finish_reason 时结束"(Stream ended without finish_reason,
+// 分类为 TRANSPORT),连带耗尽 attempt 的重试预算导致评审整批失败。
+//
+// 因此这里必须 >= 模型端点侧的思考停顿上限,并与 ai_model_config.request_timeout_ms 对齐,
+// 让平台侧的超时来兜底,而不是代理抢先掐断。300s 覆盖实测 kimi 评审场景;如仍不足,
+// 与模型超时一并上调。可用 MODEL_VPN_PROXY_UPSTREAM_TIMEOUT_MS 覆盖。
+const UPSTREAM_TIMEOUT_MS = Number(process.env.MODEL_VPN_PROXY_UPSTREAM_TIMEOUT_MS ?? '300000')
 const expectedAuth = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`
 
 /** 事件日志。刻意只允许固定字段，避免顺手把 Header 或正文写进日志。 */

@@ -142,6 +142,12 @@ export const analysisErrorCodeMeta: Record<string, AnalysisErrorMeta> = {
     suggestion: '检查模型服务状态和网络，必要时调整超时后重试。',
     retryable: true,
   },
+  MODEL_STREAM_TRUNCATED: {
+    title: '模型响应流被中断',
+    reason: '模型的流式响应在正常结束前连接被切断（常见于经代理访问的长响应，属传输层瞬时故障）。',
+    suggestion: '这是可重试的瞬时故障；反复出现时，降低批次并发或让该模型直连（避开中间代理对长连接的切断），再重试。',
+    retryable: true,
+  },
   MODEL_PROVIDER_ERROR: {
     title: '模型服务异常',
     reason: '模型提供方返回了无法继续执行的错误。',
@@ -410,6 +416,21 @@ export function resolveAnalysisError(
 ): { code: string; originalCode: string | null; meta: AnalysisErrorMeta } {
   const originalCode = errorCode?.trim() || null
   const message = errorMessage ?? ''
+  // 传输层截断：Harness 把「流在收到 finish_reason 前关闭」统一抛成 `-32603` +
+  // 文本 `Stream ended without finish_reason`（code 在 Harness 内部是 TRANSPORT，
+  // 但冒泡到平台时只剩 -32603，分类信息丢失）。这类是瞬时可重试故障，不该显示成
+  // 「未知错误 / 不建议重试」。用消息特征识别，因为文本里没有任何平台已登记的错误码单词。
+  const transportTruncation =
+    /stream ended (?:before|without)\b/i.test(message) ||
+    /\bTRANSPORT\b/.test(message) ||
+    /\b(?:other side closed|premature close|ECONNRESET|socket hang ?up)\b/i.test(message)
+  if (transportTruncation && (originalCode === null || analysisErrorCodeMeta[originalCode] === undefined)) {
+    return {
+      code: 'MODEL_STREAM_TRUNCATED',
+      originalCode,
+      meta: analysisErrorCodeMeta.MODEL_STREAM_TRUNCATED!,
+    }
+  }
   const embeddedCode = Object.keys(analysisErrorCodeMeta).find((code) =>
     new RegExp(`\\b${code}\\b`).test(message),
   )
