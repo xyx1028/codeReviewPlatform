@@ -87,6 +87,7 @@ async function boot(options: { throwOnReport?: boolean } = {}): Promise<Harness>
   const broker = await startAttemptControlBroker({
     taskId: TASK_ID,
     agentAttempt: ATTEMPT,
+    sessionRevision: 1,
     snapshots: fakeSnapshots(),
     coveragePolicy: { requiredRepositories: ['kdmanage-backend'], minQueriesPerRepository: 0 },
     socketRoot,
@@ -454,6 +455,7 @@ describe('观测通道 fail open', () => {
     const broker = await startAttemptControlBroker({
       taskId: TASK_ID,
       agentAttempt: ATTEMPT,
+      sessionRevision: 1,
       snapshots: fakeSnapshots(),
       coveragePolicy: { requiredRepositories: ['kdmanage-backend'], minQueriesPerRepository: 0 },
       socketRoot,

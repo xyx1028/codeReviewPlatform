@@ -459,6 +459,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       broker = await startAttemptControlBroker({
         taskId: this.options.taskId,
         agentAttempt: this.options.agentAttempt,
+        sessionRevision,
         // 冻结目录的 name → bundleHash。Broker 用它独立核对插件上报的技能名，而不是
         // 转发上报的 hash（见 resolveSkillAttribution）。
         skillBundleHashes: new Map(

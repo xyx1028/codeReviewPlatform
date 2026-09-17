@@ -452,6 +452,7 @@ describe('AttemptControlBroker', () => {
     const handle = await startAttemptControlBroker({
       taskId: TASK_ID,
       agentAttempt: ATTEMPT,
+      sessionRevision: 1,
       snapshots: store(),
       coveragePolicy: { requiredRepositories: [REPO], minQueriesPerRepository: 1 },
       socketRoot,

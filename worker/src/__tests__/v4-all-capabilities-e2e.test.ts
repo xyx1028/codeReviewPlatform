@@ -337,7 +337,10 @@ describe.skipIf(!ENABLED)('V4 governed root-runtime smoke E2E (real dsh process)
 
       const engine = new DeepSeekHarnessAcpEngine({
         taskId: 'e2e-task',
-        agentAttempt: 1,
+        // Reclaimed task: retries receive a fencing revision above 1. This is
+        // the production path that previously ended in SESSION_FENCED even
+        // after submit_review_result had produced a valid conclusion.
+        agentAttempt: 2,
         branch: 'feature_dev',
         story: {
           code: 'PRJ-001',
@@ -368,6 +371,7 @@ describe.skipIf(!ENABLED)('V4 governed root-runtime smoke E2E (real dsh process)
         attemptsRoot,
         sessionRoot,
         workerId: 'worker-e2e',
+        sessionRevision: 5,
         logger,
         infrastructure: { supabaseUrl: 'https://project.supabase.co' },
         forbiddenRoots: [],
@@ -506,7 +510,7 @@ describe.skipIf(!ENABLED)('V4 governed root-runtime smoke E2E (real dsh process)
         // 提交者是平台生成的根身份，不是模型自报的。
         expect(committed.identity.rootAgentId).toMatch(/^root-[0-9a-f]{32}$/)
         expect(committed.identity.treeDigest).toMatch(/^[0-9a-f]{64}$/)
-        expect(committed.identity.sessionRevision).toBeGreaterThanOrEqual(1)
+        expect(committed.identity.sessionRevision).toBe(5)
         // 证据绑定到固定 Commit 与真实 blob，且归属到实际读取它的 Agent。
         expect(committed.evidence).toHaveLength(1)
         expect(committed.evidence[0]!.commitSha).toHaveLength(40)
@@ -536,7 +540,7 @@ describe.skipIf(!ENABLED)('V4 governed root-runtime smoke E2E (real dsh process)
 function sessionRegistryFor(sessionRoot: string): {
   locateFor(sessionId: string): ReturnType<typeof locateSessionLog>
 } {
-  const attemptDir = join(sessionRoot, sessionDirectoryName('e2e-task', 1))
+  const attemptDir = join(sessionRoot, sessionDirectoryName('e2e-task', 2))
   return { locateFor: (sessionId) => locateSessionLog(attemptDir, sessionId) }
 }
 

@@ -181,6 +181,15 @@ export interface PermissionDecisionEntry {
 export interface AttemptControlBrokerOptions {
   taskId: string
   agentAttempt: number
+  /**
+   * Database-issued fencing revision for this attempt.
+   *
+   * Retries start above revision 1, so the broker must receive the claimed
+   * revision before the model can call any tool. Defaulting here would make a
+   * completed retry impossible to commit: save_agent_review_result would
+   * reject the stale revision with SESSION_FENCED.
+   */
+  sessionRevision: number
   snapshots: SnapshotStore
   coveragePolicy: CoveragePolicy
   /** Root directory that will hold the per-attempt socket. */
@@ -300,7 +309,7 @@ export function startAttemptControlBroker(
   let committed: CommitReviewResult | null = null
   let toolCalls = 0
   let configHash: string | null = null
-  let sessionRevision = 1
+  let sessionRevision = options.sessionRevision
   const toolCallsByName: Record<string, number> = {}
   /** lifecycle 上报可能因 IPC 重试重复；同一 correlation 只计一次模型工具调用。 */
   const countedToolCorrelations = new Set<string>()

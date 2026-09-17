@@ -105,6 +105,7 @@ async function boot(
   options: {
     leaseValid?: () => boolean
     policyOverrides?: Record<string, unknown>
+    sessionRevision?: number
     /** 注入落库失败，用来验证审计不会被静默丢弃。 */
     failFlush?: () => boolean
   } = {},
@@ -131,6 +132,7 @@ async function boot(
   const broker = await startAttemptControlBroker({
     taskId: TASK_ID,
     agentAttempt: ATTEMPT,
+    sessionRevision: options.sessionRevision ?? 1,
     snapshots: fakeSnapshots(),
     coveragePolicy: { requiredRepositories: ['kdmanage-backend'], minQueriesPerRepository: 0 },
     socketRoot,
@@ -480,6 +482,31 @@ describe('root-only submit at the broker layer', () => {
     expect(committed.usage.perAgent.map((row) => row.agentId).sort()).toEqual(
       [h.authority.root.agentId, 'child-1'].sort(),
     )
+  })
+
+  it('forwards the database-issued fencing revision on a retried attempt', async () => {
+    const h = await boot({ sessionRevision: 5 })
+    const read = await h.post(
+      '/attempt/read-code',
+      rootEnvelope(
+        h,
+        { repository: 'kdmanage-backend', path: 'src/Order.java', startLine: 1, endLine: 10 },
+        'read_snapshot_code',
+      ),
+    )
+
+    const submitted = await h.post(
+      '/attempt/submit-review',
+      rootEnvelope(
+        h,
+        { submission: validSubmission(String(read.body.evidenceId)) },
+        'submit_review_result',
+      ),
+    )
+
+    expect(submitted.status).toBe(200)
+    expect(submitted.body.accepted).toBe(true)
+    expect(h.commits[0]?.identity.sessionRevision).toBe(5)
   })
 
   it('is idempotent for a retried submission', async () => {
