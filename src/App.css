@@ -2255,6 +2255,16 @@ a.dashboard-distribution-item:focus-visible {
   white-space: nowrap;
 }
 
+.skill-name-link {
+  height: auto;
+  padding: 0;
+  line-height: inherit;
+}
+
+.skill-name-link:hover .skill-name-code {
+  color: #1677ff;
+}
+
 /* 单元格里的次要行（展开大小、更新时间）。比正文小一号并且不换行：
    这些值只是参考，让它们占两行会把表格行高撑起来。 */
 .skill-size-secondary {
@@ -2274,4 +2284,328 @@ a.dashboard-distribution-item:focus-visible {
 .deletion-impact-list {
   margin: 4px 0 0;
   padding-left: 18px;
+}
+
+/* 技能管理弹窗统一为固定画布：标题和操作区固定，内容在主体区域内滚动。 */
+.skill-create-modal .ant-modal,
+.skill-detail-modal .ant-modal,
+.skill-publish-modal .ant-modal,
+.skill-history-modal .ant-modal {
+  height: 660px !important;
+  max-height: calc(100vh - 80px) !important;
+}
+
+.skill-create-modal .ant-modal-container,
+.skill-detail-modal .ant-modal-container,
+.skill-publish-modal .ant-modal-container,
+.skill-history-modal .ant-modal-container {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  height: 100% !important;
+  max-height: 100%;
+  overflow: hidden;
+  border: 1px solid #dbeafe;
+  border-radius: 18px;
+  background: linear-gradient(145deg, #ffffff 0%, #f8fbff 100%);
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.18);
+}
+
+.skill-create-modal .ant-modal-header,
+.skill-detail-modal .ant-modal-header,
+.skill-publish-modal .ant-modal-header,
+.skill-history-modal .ant-modal-header {
+  flex: 0 0 auto;
+  margin-bottom: 0;
+  padding: 20px 28px 16px;
+  border-bottom: 1px solid #e8eef7;
+  background: linear-gradient(135deg, #f8fbff 0%, #ffffff 72%);
+}
+
+.skill-detail-modal .ant-modal-title,
+.skill-publish-modal .ant-modal-title,
+.skill-history-modal .ant-modal-title {
+  color: #172554;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.skill-create-modal .ant-modal-body,
+.skill-detail-modal .ant-modal-body,
+.skill-publish-modal .ant-modal-body,
+.skill-history-modal .ant-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 20px 28px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.skill-history-modal .ant-modal-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.skill-history-table,
+.skill-history-table > .ant-spin,
+.skill-history-table .ant-spin-nested-loading,
+.skill-history-table .ant-spin-container {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.skill-history-table .ant-table-pagination.ant-pagination {
+  margin-top: auto !important;
+  margin-bottom: 0;
+}
+
+.skill-create-modal .ant-modal-footer,
+.skill-detail-modal .ant-modal-footer,
+.skill-publish-modal .ant-modal-footer,
+.skill-history-modal .ant-modal-footer {
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding: 14px 28px 20px;
+  border-top: 1px solid #e8eef7;
+  background: #ffffff;
+}
+
+.skill-create-modal__title {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: #172554;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.skill-create-modal__title .ant-typography {
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.skill-create-modal__steps {
+  margin-bottom: 20px;
+  padding: 6px 2px 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.skill-create-modal__steps .ant-steps-item-title {
+  color: #475569;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.skill-create-modal__steps .ant-steps-item-process .ant-steps-item-title {
+  color: #1d4ed8;
+}
+
+.skill-create-modal__upload-column,
+.skill-create-modal__details-column {
+  display: flex;
+}
+
+.skill-create-modal__upload-column > .ant-form-item,
+.skill-create-modal__details-column > .ant-form {
+  width: 100%;
+}
+
+.skill-create-modal__upload-column > .ant-form-item .ant-form-item-row {
+  display: block;
+}
+
+.skill-create-modal__upload-column > .ant-form-item .ant-form-item-label {
+  padding: 0 0 8px;
+  text-align: left;
+}
+
+.skill-create-modal__upload-column > .ant-form-item .ant-form-item-control {
+  width: 100%;
+}
+
+.skill-upload-dragger .ant-upload-drag {
+  display: flex;
+  min-height: 164px;
+  padding: 18px 16px;
+  border: 1.5px dashed #93c5fd;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #eff6ff 0%, #ffffff 100%);
+  transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+
+.skill-upload-dragger:not(.skill-upload-dragger--imported):hover .ant-upload-drag {
+  border-color: #2563eb;
+  background: #f8fbff;
+  box-shadow: 0 8px 20px rgba(37, 99, 235, 0.1);
+}
+
+.skill-upload-dragger .ant-upload-drag-container {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.skill-upload-dragger .ant-upload-drag-icon {
+  margin-bottom: 12px;
+  color: #2563eb;
+  font-size: 30px;
+  line-height: 1;
+}
+
+.skill-upload-dragger__title {
+  margin: 0 0 4px;
+  color: #1e3a5f;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.skill-upload-dragger__hint {
+  max-width: 100%;
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.skill-upload-dragger--imported .ant-upload-drag {
+  border-style: solid;
+  border-color: #86efac;
+  background: linear-gradient(145deg, #f0fdf4 0%, #ffffff 100%);
+}
+
+.skill-upload-dragger--imported:hover .ant-upload-drag {
+  border-color: #22c55e;
+  box-shadow: 0 8px 20px rgba(22, 163, 74, 0.1);
+}
+
+.skill-upload-dragger--imported .skill-upload-dragger__hint {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.skill-upload-dragger__status-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-bottom: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  color: #ffffff;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 4px 12px rgba(22, 163, 74, 0.24);
+}
+
+.skill-upload-dragger__file-name {
+  max-width: 100%;
+  margin: 0 0 4px;
+  overflow: hidden;
+  color: #166534;
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-create-modal__form {
+  padding: 18px 20px 6px;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
+}
+
+.skill-create-modal__form .ant-form-item-label > label {
+  color: #334155;
+  font-weight: 600;
+}
+
+.skill-create-modal__form .ant-input,
+.skill-create-modal__form .ant-input-outlined {
+  border-color: #cbd5e1;
+}
+
+.skill-create-modal__form .ant-input:focus,
+.skill-create-modal__form .ant-input-focused {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.skill-create-modal__form .skill-create-modal__code-input--readonly {
+  border-color: #e2e8f0;
+  background: #f1f5f9;
+  color: #64748b;
+  cursor: not-allowed;
+}
+
+.skill-create-modal__form .skill-create-modal__code-input--readonly:focus {
+  border-color: #e2e8f0;
+  box-shadow: none;
+}
+
+.skill-create-modal__form .ant-form-item:last-child {
+  margin-bottom: 12px;
+}
+
+.skill-create-modal__primary-action {
+  min-width: 88px;
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  .skill-create-modal .ant-modal,
+  .skill-detail-modal .ant-modal,
+  .skill-publish-modal .ant-modal,
+  .skill-history-modal .ant-modal {
+    height: calc(100vh - 48px) !important;
+    max-height: calc(100vh - 48px) !important;
+  }
+
+  .skill-create-modal .ant-modal-header,
+  .skill-detail-modal .ant-modal-header,
+  .skill-publish-modal .ant-modal-header,
+  .skill-history-modal .ant-modal-header {
+    padding: 18px 20px 14px;
+  }
+
+  .skill-create-modal .ant-modal-body,
+  .skill-detail-modal .ant-modal-body,
+  .skill-publish-modal .ant-modal-body,
+  .skill-history-modal .ant-modal-body {
+    padding: 16px 20px;
+  }
+
+  .skill-create-modal .ant-modal-footer,
+  .skill-detail-modal .ant-modal-footer,
+  .skill-publish-modal .ant-modal-footer,
+  .skill-history-modal .ant-modal-footer {
+    padding: 12px 20px 16px;
+  }
+
+  .skill-create-modal__steps {
+    margin-bottom: 16px;
+    padding: 6px 0 10px;
+  }
+
+  .skill-upload-dragger .ant-upload-drag {
+    min-height: 150px;
+  }
+
+  .skill-upload-dragger--imported .skill-upload-dragger__hint {
+    white-space: normal;
+  }
+
+  .skill-create-modal__form {
+    padding: 16px 14px 4px;
+  }
 }

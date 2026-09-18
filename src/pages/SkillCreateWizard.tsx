@@ -1,7 +1,5 @@
 import {
-  Alert,
   App as AntApp,
-  Checkbox,
   Col,
   Descriptions,
   Form,
@@ -23,6 +21,7 @@ import {
   adminUploadSkillBundle,
 } from '../lib/api'
 import { readSkillBundlePreview, type SkillBundlePreview } from '../lib/skill-bundle-preview'
+import { formatSkillVersion } from '../lib/skill-version'
 import type { SkillValidationResult } from '../types'
 import { BundleFileTree, formatBytes } from './SkillManagementPage'
 
@@ -80,7 +79,6 @@ export function SkillCreateWizard({
   const [preview, setPreview] = useState<SkillBundlePreview | null>(null)
   const [skillId, setSkillId] = useState<string | null>(null)
   const [validation, setValidation] = useState<SkillValidationResult | null>(null)
-  const [acknowledgeScripts, setAcknowledgeScripts] = useState(false)
   const [busy, setBusy] = useState(false)
 
   const reset = () => {
@@ -90,7 +88,6 @@ export function SkillCreateWizard({
     setPreview(null)
     setSkillId(null)
     setValidation(null)
-    setAcknowledgeScripts(false)
     setBusy(false)
   }
 
@@ -145,7 +142,11 @@ export function SkillCreateWizard({
       onDraftChanged()
     } catch (error) {
       const reason = error instanceof Error ? error.message : '未知错误'
-      // 回滚草稿：留着它只会让重试撞上名字唯一约束。
+      const userMessage =
+        reason.includes('review_skill_name_key') || reason.includes('duplicate key')
+          ? `技能编码「${values.name.trim()}」已存在，请在技能列表中上传新版本。`
+          : reason
+      // 回滚草稿：留着它只会让重试撞名字唯一约束。
       if (createdId !== null) {
         try {
           await adminDeleteReviewSkill(createdId)
@@ -155,7 +156,7 @@ export function SkillCreateWizard({
           message.warning('技能草稿未能自动清理，请在列表里手动删除后重试')
         }
       }
-      message.error(reason)
+      message.error(userMessage)
     } finally {
       setBusy(false)
     }
@@ -167,9 +168,9 @@ export function SkillCreateWizard({
     try {
       const result = await adminPublishSkillVersion({
         uploadId: validation.upload_id,
-        acknowledgeScripts,
+        acknowledgeScripts: true,
       })
-      message.success(`已发布 V${result.version}`)
+      message.success(`已发布 ${formatSkillVersion(result.version)}`)
       reset()
       onDone()
     } catch (error) {
@@ -179,13 +180,19 @@ export function SkillCreateWizard({
     }
   }
 
-  const scriptsBlocked = validation?.contains_scripts === true && !acknowledgeScripts
+  const skillCodeReadOnly = preview?.name !== null && preview?.name !== undefined
 
   return (
     <Modal
-      title="新增技能"
+      title={
+        <div className="skill-create-modal__title">
+          <span>新增技能</span>
+          <Text type="secondary">导入、校验并发布 Skill Bundle</Text>
+        </div>
+      }
       open={open}
       width={960}
+      className="skill-create-modal"
       onCancel={() => {
         if (step === 1 && skillId !== null) {
           message.info('已保留为草稿，可稍后在列表里发布或删除')
@@ -194,23 +201,27 @@ export function SkillCreateWizard({
       }}
       okText={step === 0 ? '下一步' : '确定'}
       onOk={() => void (step === 0 ? goToValidation() : publish())}
-      okButtonProps={{ disabled: step === 1 && (validation === null || scriptsBlocked) }}
+      okButtonProps={{
+        disabled: step === 1 && validation === null,
+        className: 'skill-create-modal__primary-action',
+      }}
       cancelText={step === 0 ? '取消' : '稍后再发布'}
       confirmLoading={busy}
       destroyOnHidden
     >
       <Steps
-        className="mb-4"
+        className="skill-create-modal__steps"
         current={step}
         size="small"
         items={[{ title: '基本信息' }, { title: '内容检测' }]}
       />
 
       {step === 0 ? (
-        <Row gutter={24}>
-          <Col xs={24} md={9}>
+        <Row gutter={[24, 24]} className="skill-create-modal__content">
+          <Col xs={24} md={9} className="skill-create-modal__upload-column">
             <Form.Item label="上传技能包" required className="mb-0">
               <Upload.Dragger
+                className={`skill-upload-dragger${file !== null ? ' skill-upload-dragger--imported' : ''}`}
                 accept=".zip"
                 maxCount={1}
                 multiple={false}
@@ -222,32 +233,40 @@ export function SkillCreateWizard({
                 }}
                 disabled={busy}
               >
-                <p className="ant-upload-drag-icon" aria-hidden="true">
-                  ⬆
-                </p>
-                <p>点击或拖拽上传</p>
-                <p className="ant-upload-hint">
-                  支持 .zip 格式，根目录需直接包含 <Text code>SKILL.md</Text>
-                </p>
+                {file === null ? (
+                  <>
+                    <p className="ant-upload-drag-icon" aria-hidden="true">
+                      ⬆
+                    </p>
+                    <p className="skill-upload-dragger__title">点击或拖拽上传</p>
+                    <p className="ant-upload-hint skill-upload-dragger__hint">
+                      支持 .zip 格式，根目录需直接包含 <Text code>SKILL.md</Text>
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <span className="skill-upload-dragger__status-icon" aria-hidden="true">
+                      ✓
+                    </span>
+                    <p className="skill-upload-dragger__title">技能包已导入</p>
+                    <p className="skill-upload-dragger__file-name" title={file.name}>
+                      {file.name}
+                    </p>
+                    <p className="skill-upload-dragger__hint">
+                      {formatBytes(file.size)} · 点击或拖拽 ZIP 以替换
+                    </p>
+                  </>
+                )}
               </Upload.Dragger>
             </Form.Item>
-            {file !== null ? (
-              <Alert
-                className="mt-2"
-                type="success"
-                showIcon
-                message={file.name}
-                description={formatBytes(file.size)}
-              />
-            ) : null}
           </Col>
 
-          <Col xs={24} md={15}>
-            <Form form={form} layout="vertical" requiredMark>
+          <Col xs={24} md={15} className="skill-create-modal__details-column">
+            <Form form={form} layout="vertical" requiredMark className="skill-create-modal__form">
               <Form.Item
                 name="name"
-                label="技能名称（kebab-case）"
-                tooltip="从 SKILL.md 的 frontmatter 自动解析。它同时是 Agent 运行时 DSH_HOME/skills/<name>/ 的目录名，创建后不可修改。"
+                label="技能编码（kebab-case）"
+                tooltip="由 SKILL.md 的 frontmatter 自动解析。它同时是 Agent 运行时 DSH_HOME/skills/<name>/ 的目录名，创建后不可修改。"
                 rules={[
                   { required: true, message: '请上传含 SKILL.md 的 ZIP，或手动填写' },
                   {
@@ -258,8 +277,11 @@ export function SkillCreateWizard({
                 ]}
               >
                 <Input
+                  className={skillCodeReadOnly ? 'skill-create-modal__code-input--readonly' : undefined}
                   placeholder="从 SKILL.md 中自动解析"
-                  readOnly={preview?.name !== null && preview?.name !== undefined}
+                  readOnly={skillCodeReadOnly}
+                  aria-readonly={skillCodeReadOnly}
+                  tabIndex={skillCodeReadOnly ? -1 : 0}
                 />
               </Form.Item>
 
@@ -283,14 +305,6 @@ export function SkillCreateWizard({
                 />
               </Form.Item>
 
-              {preview !== null && preview.containsScripts ? (
-                <Alert
-                  type="warning"
-                  showIcon
-                  message="这个包里有 scripts/ 目录"
-                  description="下一步需要额外确认。Skill 加载不会自动执行脚本，但拥有 bash 的 Agent 可以显式运行。"
-                />
-              ) : null}
             </Form>
           </Col>
         </Row>
@@ -302,12 +316,6 @@ export function SkillCreateWizard({
 
           {validation !== null ? (
             <>
-              <Alert
-                type="success"
-                showIcon
-                message="服务端校验通过"
-                description="以下结果由服务端独立解析归档得出，与浏览器的预读无关。"
-              />
               <Descriptions size="small" column={3} bordered>
                 <Descriptions.Item label="文件数">{validation.file_count}</Descriptions.Item>
                 <Descriptions.Item label="ZIP 大小">
@@ -343,29 +351,6 @@ export function SkillCreateWizard({
                   </Descriptions.Item>
                 ) : null}
               </Descriptions>
-
-              {validation.contains_scripts ? (
-                <Alert
-                  type="warning"
-                  showIcon
-                  message="此版本包含可执行指令资源（scripts/）"
-                  description={
-                    <Space direction="vertical" size="small">
-                      <span>
-                        Skill 加载<Text strong>不会</Text>自动执行任何脚本。但拥有{' '}
-                        <Text code>bash</Text> 的 Agent 可以按绝对路径显式运行它们。脚本不得包含
-                        任何秘密；当前 Shell 的网络请求不等价于平台 Web 白名单。
-                      </span>
-                      <Checkbox
-                        checked={acknowledgeScripts}
-                        onChange={(event) => setAcknowledgeScripts(event.target.checked)}
-                      >
-                        我已确认脚本内容，并承担上述风险
-                      </Checkbox>
-                    </Space>
-                  }
-                />
-              ) : null}
 
               <BundleFileTree files={validation.tree} />
             </>

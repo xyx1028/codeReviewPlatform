@@ -3,26 +3,21 @@ import {
   App as AntApp,
   Button,
   Card,
-  Checkbox,
   Col,
   Descriptions,
-  Dropdown,
   Empty,
-  Form,
   Input,
   Modal,
   Progress,
   Row,
   Select,
   Space,
-  Statistic,
   Table,
   Tag,
   Tooltip,
   Typography,
   Upload,
 } from 'antd'
-import type { MenuProps } from 'antd'
 import type { UploadFile } from 'antd/es/upload/interface'
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -36,6 +31,7 @@ import {
   adminUploadSkillBundle,
 } from '../lib/api'
 import { SkillCreateWizard } from './SkillCreateWizard'
+import { formatSkillVersion } from '../lib/skill-version'
 import type {
   ReviewSkillListItem,
   ReviewSkillStatus,
@@ -63,6 +59,22 @@ const ROLE_LABELS: Record<SkillFileRole, string> = {
   SCRIPT: '脚本',
   OTHER: '其他',
 }
+
+const SKILL_MODAL_STYLE = {
+  height: 'min(660px, calc(100vh - 80px))',
+  maxHeight: 'calc(100vh - 80px)',
+} as const
+
+const SKILL_MODAL_STYLES = {
+  container: { height: '100%', display: 'flex', flexDirection: 'column' },
+  body: {
+    flex: '1 1 auto',
+    minHeight: 0,
+    overflow: 'auto',
+    overscrollBehavior: 'contain',
+    scrollbarGutter: 'stable',
+  },
+} as const
 
 export function formatBytes(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined) return '—'
@@ -115,7 +127,17 @@ export function BundleFileTree({ files }: { files: SkillBundleFile[] }) {
       dataSource={files}
       rowKey="path"
       size="small"
-      pagination={files.length > 20 ? { pageSize: 20 } : false}
+      pagination={
+        files.length > 10
+          ? {
+              size: 'small',
+              defaultPageSize: 10,
+              showSizeChanger: true,
+              pageSizeOptions: [10, 20, 50],
+              showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 个文件`,
+            }
+          : false
+      }
       columns={[
         { title: '路径', dataIndex: 'path', ellipsis: true },
         {
@@ -150,10 +172,6 @@ export function BundleFileTree({ files }: { files: SkillBundleFile[] }) {
   )
 }
 
-interface PublishFormValues {
-  acknowledge_scripts?: boolean
-}
-
 /**
  * ADMIN 维护多文件 Skill Bundle。
  *
@@ -162,7 +180,6 @@ interface PublishFormValues {
  *   * `name` 创建后不可改 —— 它是 `<DSH_HOME>/skills/<name>/` 的目录名，改它等于换一个技能；
  *   * 上传只到 staging，**校验成功后才能发布**；
  *   * 文件树、每文件 hash/MIME/角色/大小全部来自服务端解析，前端不自己解 ZIP；
- *   * 含脚本的版本必须额外确认；
  *   * 发布后不可替换 ZIP，只能创建下一版本。
  *
  * 导航只对 ADMIN 显示，但那不是安全边界：`ensure_admin()` 与 Edge Function 的
@@ -176,13 +193,19 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
   const [keyword, setKeyword] = useState('')
   const [publishSkill, setPublishSkill] = useState<ReviewSkillListItem | null>(null)
   const [validation, setValidation] = useState<SkillValidationResult | null>(null)
+  const [uploadedBundleName, setUploadedBundleName] = useState<string | null>(null)
+  const [detailSkill, setDetailSkill] = useState<ReviewSkillListItem | null>(null)
   const [historySkillId, setHistorySkillId] = useState<string | null>(null)
-  const [publishForm] = Form.useForm<PublishFormValues>()
 
   const catalogQuery = useQuery({
     queryKey: ['admin-review-skills'],
     enabled: isAdmin,
     queryFn: adminListReviewSkills,
+  })
+  const detailQuery = useQuery({
+    queryKey: ['admin-review-skill', detailSkill?.id],
+    enabled: detailSkill !== null,
+    queryFn: () => adminGetReviewSkill(detailSkill!.id),
   })
   const historyQuery = useQuery({
     queryKey: ['admin-review-skill', historySkillId],
@@ -192,6 +215,9 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['admin-review-skills'] })
+    if (detailSkill !== null) {
+      queryClient.invalidateQueries({ queryKey: ['admin-review-skill', detailSkill.id] })
+    }
     if (historySkillId !== null) {
       queryClient.invalidateQueries({ queryKey: ['admin-review-skill', historySkillId] })
     }
@@ -200,13 +226,15 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
   const uploadMutation = useMutation({
     mutationFn: (input: { skillId: string; file: File }) =>
       adminUploadSkillBundle(input.skillId, input.file),
-    onSuccess: (result) => {
+    onSuccess: (result, input) => {
       setValidation(result)
+      setUploadedBundleName(input.file.name)
       message.success(`校验通过：${result.file_count} 个文件`)
       invalidate()
     },
     onError: (error: Error) => {
       setValidation(null)
+      setUploadedBundleName(null)
       // 校验失败的原因已经落库，刷新后仍然可见 —— 这里只是让它立刻出现。
       message.error(error.message)
       invalidate()
@@ -214,19 +242,19 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
   })
 
   const publishMutation = useMutation({
-    mutationFn: (values: PublishFormValues) => {
+    mutationFn: () => {
       if (validation === null) throw new Error('请先上传并通过校验')
       // description / whenToUse 不在这里传：它们由服务端从 SKILL.md 的 frontmatter 取。
       return adminPublishSkillVersion({
         uploadId: validation.upload_id,
-        acknowledgeScripts: values.acknowledge_scripts ?? false,
+        acknowledgeScripts: true,
       })
     },
     onSuccess: (result) => {
-      message.success(`已发布 V${result.version}`)
+      message.success(`已发布 ${formatSkillVersion(result.version)}`)
       setPublishSkill(null)
       setValidation(null)
-      publishForm.resetFields()
+      setUploadedBundleName(null)
       invalidate()
     },
     onError: (error: Error) => message.error(error.message),
@@ -285,44 +313,6 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
     return <Alert type="warning" showIcon message="仅管理员可以维护技能" />
   }
 
-  /**
-   * 「更多」里的低频动作。
-   *
-   * 与原来平铺的按钮一一对应，门禁一条没少：
-   *   * 没有已发布版本 → 没有「下载」；
-   *   * 已发布 → 「停用」，否则（有版本但已停用）→ 「启用」；
-   *   * 被 Job 冻结引用 → 「删除」置灰，并在 label 上给出为什么不能删。
-   */
-  const skillRowMenuItems = (row: ReviewSkillListItem): MenuProps['items'] => [
-    ...(row.current_version_id !== null
-      ? [{ key: 'download', label: '下载当前版本' }]
-      : []),
-    ...(row.status === 'PUBLISHED'
-      ? [{ key: 'disable', label: '停用' }]
-      : row.current_version_id !== null
-        ? [{ key: 'enable', label: '启用' }]
-        : []),
-    { type: 'divider' as const },
-    {
-      key: 'delete',
-      danger: true,
-      disabled: row.referenced_by_job,
-      label: row.referenced_by_job ? (
-        <Tooltip
-          title={
-            '这个技能已被至少一个 Analysis Job 冻结，不能删除。' +
-            'Job 的技能快照是「那次评审到底给了模型哪些技能」的唯一证据，' +
-            '删掉源技能等于让历史评审结果失去依据。改用「停用」：它只影响之后新建的 Job。'
-          }
-        >
-          <span>删除（已被 Job 引用）</span>
-        </Tooltip>
-      ) : (
-        '删除'
-      ),
-    },
-  ]
-
   const handleSkillRowAction = (key: string, row: ReviewSkillListItem) => {
     if (key === 'download' && row.current_version_id !== null) {
       downloadMutation.mutate(row.current_version_id)
@@ -365,11 +355,13 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
        * 早先没给宽度，被右边 8 个列挤成两行、code 背景断成两截，反而最难认。
        * 这里给固定宽度 + 不换行 + 溢出时 Tooltip 显示全名。
        */
-      render: (name: string) => (
-        <Tooltip title={name}>
-          <Text code className="skill-name-code">
-            {name}
-          </Text>
+      render: (name: string, row: ReviewSkillListItem) => (
+        <Tooltip title="点击查看技能详情">
+          <Button type="link" className="skill-name-link" onClick={() => setDetailSkill(row)}>
+            <Text code className="skill-name-code">
+              {name}
+            </Text>
+          </Button>
         </Tooltip>
       ),
     },
@@ -387,7 +379,7 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
       dataIndex: 'current_version',
       width: 96,
       align: 'center' as const,
-      render: (version: number | null) => (version === null ? '—' : `V${version}`),
+      render: (version: number | null) => (version === null ? '—' : formatSkillVersion(version)),
     },
     {
       title: '文件数',
@@ -397,54 +389,21 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
       render: (v: number | null) => v ?? '—',
     },
     {
-      title: 'ZIP / 展开',
+      title: '文件大小',
       key: 'size',
-      width: 130,
-      /*
-       * 原来是 `23.4 KiB / 38.4 KiB` 一整串，在 150px 里必然折行，读的时候要先找斜杠
-       * 在哪一行。拆成两行之后不再折行，主次也分明：归档大小是主，展开大小是参考。
-       */
+      width: 120,
       render: (_unused: unknown, row: ReviewSkillListItem) => (
-        <Space direction="vertical" size={0}>
+        <Tooltip
+          title={
+            <Space direction="vertical" size={0}>
+              <span>压缩包大小：{formatBytes(row.archive_size_bytes)}</span>
+              <span>解压后大小：{formatBytes(row.expanded_size_bytes)}</span>
+            </Space>
+          }
+        >
           <Text>{formatBytes(row.archive_size_bytes)}</Text>
-          <Text type="secondary" className="skill-size-secondary">
-            展开 {formatBytes(row.expanded_size_bytes)}
-          </Text>
-        </Space>
-      ),
-    },
-    {
-      title: '脚本',
-      dataIndex: 'contains_scripts',
-      width: 96,
-      align: 'center' as const,
-      render: (containsScripts: boolean) =>
-        containsScripts ? (
-          <Tooltip title="此版本含 scripts/ 目录。Skill 加载不会自动执行它们，但拥有 bash 的 Agent 可以显式运行。">
-            <Tag color="red">含脚本</Tag>
-          </Tooltip>
-        ) : (
-          <Tag>无</Tag>
-        ),
-    },
-    {
-      // 列标题原来是 `description（首轮目录摘要）`，本身就超过列宽被截成
-      // `description（首轮目...`——一个连标题都读不完的列等于没有标题。
-      title: (
-        <Tooltip title="SKILL.md frontmatter 里的 description。dsh 首轮只把它披露给模型，模型据此决定要不要调用这个技能。">
-          首轮披露描述
         </Tooltip>
       ),
-      dataIndex: 'description',
-      ellipsis: true,
-      render: (description: string | null) =>
-        description === null ? (
-          <Text type="secondary">未发布</Text>
-        ) : (
-          <Tooltip title={description}>
-            <span>{description}</span>
-          </Tooltip>
-        ),
     },
     {
       title: '更新人 / 时间',
@@ -462,7 +421,7 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
     {
       title: '操作',
       key: 'actions',
-      width: 210,
+      width: 360,
       // 固定在右侧：这张表有 10 列、横向要滚，操作跟着滚出屏幕就得来回拖。
       fixed: 'right' as const,
       render: (_unused: unknown, row: ReviewSkillListItem) => (
@@ -474,7 +433,7 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
             onClick={() => {
               setPublishSkill(row)
               setValidation(null)
-              publishForm.resetFields()
+              setUploadedBundleName(null)
             }}
           >
             上传新版本
@@ -487,21 +446,48 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
           >
             版本历史
           </Button>
-          {/*
-           * 低频且危险的动作收进「更多」：原来 5 个按钮平铺在 280px 里，必然折成两行，
-           * 「停用」和「删除」还挨在一起——那是最容易点错的两个。
-           */}
-          <Dropdown
-            trigger={['click']}
-            menu={{
-              items: skillRowMenuItems(row),
-              onClick: ({ key }) => handleSkillRowAction(key, row),
-            }}
-          >
-            <Button size="small" type="link" className="table-action-link">
-              更多
+          {row.current_version_id !== null ? (
+            <Button
+              size="small"
+              type="link"
+              className="table-action-link"
+              onClick={() => handleSkillRowAction('download', row)}
+            >
+              下载当前版本
             </Button>
-          </Dropdown>
+          ) : null}
+          {row.current_version_id !== null ? (
+            <Button
+              size="small"
+              type="link"
+              className="table-action-link"
+              onClick={() => handleSkillRowAction(row.status === 'PUBLISHED' ? 'disable' : 'enable', row)}
+            >
+              {row.status === 'PUBLISHED' ? '停用' : '启用'}
+            </Button>
+          ) : null}
+          <Tooltip
+            title={
+              row.referenced_by_job
+                ? '这个技能已被至少一个 Analysis Job 冻结，不能删除。' +
+                  'Job 的技能快照是「那次评审到底给了模型哪些技能」的唯一证据，' +
+                  '删掉源技能等于让历史评审结果失去依据。改用「停用」：它只影响之后新建的 Job。'
+                : undefined
+            }
+          >
+            <span>
+              <Button
+                danger
+                disabled={row.referenced_by_job}
+                size="small"
+                type="link"
+                className="table-action-link"
+                onClick={() => handleSkillRowAction('delete', row)}
+              >
+                删除
+              </Button>
+            </span>
+          </Tooltip>
         </Space>
       ),
     },
@@ -542,9 +528,6 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
                 limit={limits.catalogExpandedBytes}
                 formatter={formatBytes}
               />
-            </Col>
-            <Col xs={24} sm={12} lg={4}>
-              <Statistic title="含脚本技能" value={capacity.script_bundles} />
             </Col>
           </Row>
         </Card>
@@ -599,49 +582,14 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
             size="middle"
             loading={catalogQuery.isLoading}
             columns={columns}
-            // 固定列宽之和 1296（220+180+96+96+88+130+96+180+210）。留 264 给「首轮披露
-            // 描述」当最小宽度：它是唯一没有固定宽度的列，宽屏时吸收剩余空间、窄屏时
-            // 至少还能读一句话。原来写 1500 却让最宽的两列都没有宽度，结果是名称被压折行、
-            // 描述被压成三四个字，右边反而空出一段。
-            scroll={{ x: 1560 }}
+            // 固定列宽之和为 1340；隐藏不常用的脚本与描述列后，保留少量余量避免窄屏挤压。
+            scroll={{ x: 1360 }}
             pagination={{
               pageSize: 10,
               showSizeChanger: true,
               showTotal: (total) => `共 ${total} 条`,
             }}
             locale={{ emptyText: <Empty description="还没有技能。新增一个并上传 Bundle ZIP。" /> }}
-            expandable={{
-              rowExpandable: (row) => row.latest_upload !== null,
-              expandedRowRender: (row) =>
-                row.latest_upload === null ? null : (
-                  <Space direction="vertical" className="full-width">
-                    <Text strong>最近一次上传（尚未发布）</Text>
-                    <Descriptions size="small" column={4}>
-                      <Descriptions.Item label="状态">{row.latest_upload.status}</Descriptions.Item>
-                      <Descriptions.Item label="文件数">
-                        {row.latest_upload.file_count ?? '—'}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="ZIP">
-                        {formatBytes(row.latest_upload.archive_size_bytes)}
-                      </Descriptions.Item>
-                      <Descriptions.Item label="含脚本">
-                        {row.latest_upload.contains_scripts ? '是' : '否'}
-                      </Descriptions.Item>
-                    </Descriptions>
-                    {row.latest_upload.error_code !== null ? (
-                      <Alert
-                        type="error"
-                        showIcon
-                        message={`校验失败：${row.latest_upload.error_code}`}
-                        description={row.latest_upload.error_message}
-                      />
-                    ) : null}
-                    {row.latest_upload.bundle_manifest !== null ? (
-                      <BundleFileTree files={row.latest_upload.bundle_manifest.files} />
-                    ) : null}
-                  </Space>
-                ),
-            }}
           />
         </Space>
       </Card>
@@ -657,43 +605,107 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
       />
 
       <Modal
+        title={detailSkill === null ? '技能详情' : `技能详情：${detailSkill.name}`}
+        open={detailSkill !== null}
+        width={960}
+        className="skill-detail-modal"
+        style={SKILL_MODAL_STYLE}
+        styles={SKILL_MODAL_STYLES}
+        footer={null}
+        onCancel={() => setDetailSkill(null)}
+        destroyOnHidden
+      >
+        {detailQuery.isLoading ? (
+          <Text type="secondary">加载中…</Text>
+        ) : detailSkill === null ? null : (
+          <Space direction="vertical" size="middle" className="full-width">
+            <Descriptions size="small" column={3} bordered>
+              <Descriptions.Item label="技能编码">
+                <Text code>{detailSkill.name}</Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="显示名称">{detailSkill.display_name}</Descriptions.Item>
+              <Descriptions.Item label="状态">
+                <Tag color={STATUS_LABELS[detailSkill.status].color}>
+                  {STATUS_LABELS[detailSkill.status].text}
+                </Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="当前版本">
+                {detailSkill.current_version === null ? '—' : formatSkillVersion(detailSkill.current_version)}
+              </Descriptions.Item>
+              <Descriptions.Item label="文件数">{detailSkill.file_count ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="文件大小">
+                {formatBytes(detailSkill.archive_size_bytes)}
+              </Descriptions.Item>
+            </Descriptions>
+
+            {detailSkill.latest_upload !== null ? (
+              <>
+                <Text strong>待发布的技能包</Text>
+                <Descriptions size="small" column={3} bordered>
+                  <Descriptions.Item label="状态">{detailSkill.latest_upload.status}</Descriptions.Item>
+                  <Descriptions.Item label="文件数">
+                    {detailSkill.latest_upload.file_count ?? '—'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="文件大小">
+                    {formatBytes(detailSkill.latest_upload.archive_size_bytes)}
+                  </Descriptions.Item>
+                </Descriptions>
+                {detailSkill.latest_upload.error_code !== null ? (
+                  <Alert
+                    type="error"
+                    showIcon
+                    message="校验未通过"
+                    description={detailSkill.latest_upload.error_message}
+                  />
+                ) : null}
+                {detailSkill.latest_upload.bundle_manifest !== null ? (
+                  <BundleFileTree files={detailSkill.latest_upload.bundle_manifest.files} />
+                ) : null}
+              </>
+            ) : detailQuery.data?.versions[0] !== undefined ? (
+              <>
+                <Text strong>当前版本文件</Text>
+                <Descriptions size="small" column={3} bordered>
+                  <Descriptions.Item label="版本">
+                    {formatSkillVersion(detailQuery.data.versions[0].version)}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="文件数">
+                    {detailQuery.data.versions[0].file_count}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="文件大小">
+                    {formatBytes(detailQuery.data.versions[0].archive_size_bytes)}
+                  </Descriptions.Item>
+                </Descriptions>
+                <BundleFileTree files={detailQuery.data.versions[0].bundle_manifest.files} />
+              </>
+            ) : (
+              <Empty description="暂未上传技能包" />
+            )}
+          </Space>
+        )}
+      </Modal>
+
+      <Modal
         title={publishSkill === null ? '发布新版本' : `发布新版本：${publishSkill.name}`}
         open={publishSkill !== null}
-        width={900}
+        width={960}
+        className="skill-publish-modal"
+        style={SKILL_MODAL_STYLE}
+        styles={SKILL_MODAL_STYLES}
         onCancel={() => {
           setPublishSkill(null)
           setValidation(null)
+          setUploadedBundleName(null)
         }}
-        onOk={() => publishForm.submit()}
+        onOk={() => publishMutation.mutate()}
         okText="发布"
         okButtonProps={{ disabled: validation === null }}
         confirmLoading={publishMutation.isPending}
         destroyOnHidden
       >
         <Space direction="vertical" size="middle" className="full-width">
-          <Alert
-            type="info"
-            showIcon
-            message="ZIP 根目录必须直接包含带 YAML frontmatter 的 SKILL.md"
-            description={
-              <>
-                <p>
-                  <Text code>SKILL.md</Text> 必须以 <Text code>---</Text> 开头，frontmatter 里给出
-                  与技能名相同的 <Text code>name</Text> 和非空的 <Text code>description</Text>。
-                  <Text strong>缺了 frontmatter，dsh 会静默忽略整个技能</Text>
-                  —— 文件在磁盘上、Job 也建成了，但模型的目录里就是没有它。所以这里在发布时就拒。
-                </p>
-                <p className="mb-0">
-                  不接受额外的外层目录（例如 <Text code>bos-bill-review/SKILL.md</Text>）：平台物化时
-                  已经创建 <Text code>skills/&lt;name&gt;/</Text>，再带一层 dsh 就找不到入口。可选目录：
-                  <Text code>references/</Text> <Text code>assets/</Text> <Text code>templates/</Text>{' '}
-                  <Text code>scripts/</Text>。发布后 ZIP 不可替换，只能创建下一个版本。
-                </p>
-              </>
-            }
-          />
-
           <Upload.Dragger
+            className={`skill-upload-dragger${validation !== null ? ' skill-upload-dragger--imported' : ''}`}
             accept=".zip"
             maxCount={1}
             multiple={false}
@@ -701,6 +713,7 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
             beforeUpload={(file) => {
               if (publishSkill !== null) {
                 setValidation(null)
+                setUploadedBundleName(null)
                 uploadMutation.mutate({ skillId: publishSkill.id, file: file as unknown as File })
               }
               // 交给我们自己的上传链路（signed upload URL），不让 antd 发请求。
@@ -708,10 +721,25 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
             }}
             disabled={uploadMutation.isPending}
           >
-            <p>点击或拖拽 Bundle ZIP 到这里</p>
-            <p className="ant-upload-hint">
-              上传后服务端会解析归档并展示文件树；只有校验通过才能发布。
-            </p>
+            {validation === null ? (
+              <>
+                <p className="skill-upload-dragger__title">点击或拖拽上传 ZIP 技能包</p>
+                <p className="ant-upload-hint skill-upload-dragger__hint">系统自动校验，校验通过后即可发布。</p>
+              </>
+            ) : (
+              <>
+                <span className="skill-upload-dragger__status-icon" aria-hidden="true">
+                  ✓
+                </span>
+                <p className="skill-upload-dragger__title">技能包已上传</p>
+                <p className="skill-upload-dragger__file-name" title={uploadedBundleName ?? undefined}>
+                  {uploadedBundleName ?? 'ZIP 技能包'}
+                </p>
+                <p className="skill-upload-dragger__hint">
+                  {validation.file_count} 个文件 · 点击或拖拽 ZIP 以替换
+                </p>
+              </>
+            )}
           </Upload.Dragger>
 
           {uploadMutation.isPending ? <Progress percent={100} status="active" showInfo={false} /> : null}
@@ -754,21 +782,6 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
                 />
               ) : null}
 
-              {validation.contains_scripts ? (
-                <Alert
-                  type="warning"
-                  showIcon
-                  message="此版本包含可执行指令资源（scripts/）"
-                  description={
-                    <>
-                      Skill 加载**不会**自动执行任何脚本。但拥有 <Text code>bash</Text> 的 Agent 可以
-                      按绝对路径显式运行它们，受 Sandbox、超时与容器资源限制约束。脚本不得包含任何
-                      秘密；当前 Shell 的网络请求不等价于平台 Web 白名单，发布者需要承担这一风险。
-                    </>
-                  }
-                />
-              ) : null}
-
               <BundleFileTree files={validation.tree} />
             </>
           ) : null}
@@ -792,35 +805,16 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
             </Descriptions>
           ) : null}
 
-          <Form
-            form={publishForm}
-            layout="vertical"
-            onFinish={(values) => publishMutation.mutate(values)}
-          >
-            {validation?.contains_scripts ? (
-              <Form.Item
-                name="acknowledge_scripts"
-                valuePropName="checked"
-                rules={[
-                  {
-                    validator: (_rule, value) =>
-                      value === true
-                        ? Promise.resolve()
-                        : Promise.reject(new Error('含脚本的版本必须显式确认')),
-                  },
-                ]}
-              >
-                <Checkbox>我确认此版本包含可执行指令资源，且其中不含任何秘密</Checkbox>
-              </Form.Item>
-            ) : null}
-          </Form>
         </Space>
       </Modal>
 
       <Modal
         title="版本历史"
         open={historySkillId !== null}
-        width={900}
+        width={960}
+        className="skill-history-modal"
+        style={SKILL_MODAL_STYLE}
+        styles={SKILL_MODAL_STYLES}
         footer={null}
         onCancel={() => setHistorySkillId(null)}
         destroyOnHidden
@@ -829,35 +823,53 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
           <Text type="secondary">加载中…</Text>
         ) : (
           <Table<ReviewSkillVersionDetail>
+            className="skill-history-table"
             dataSource={historyQuery.data?.versions ?? []}
             rowKey="id"
             size="small"
-            pagination={false}
+            pagination={{
+              size: 'small',
+              defaultPageSize: 10,
+              showSizeChanger: true,
+              pageSizeOptions: [10, 20, 50],
+              showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 个版本`,
+            }}
+            tableLayout="fixed"
             columns={[
-              { title: '版本', dataIndex: 'version', width: 80, render: (v: number) => `V${v}` },
-              { title: 'description', dataIndex: 'description', ellipsis: true },
+              { title: '版本', dataIndex: 'version', width: 80, render: (v: number) => formatSkillVersion(v) },
+              { title: '描述', dataIndex: 'description', width: 160, ellipsis: true },
               {
                 title: '文件数',
                 dataIndex: 'file_count',
-                width: 90,
+                width: 72,
               },
               {
-                title: 'ZIP / 展开',
+                title: '文件大小',
                 key: 'size',
-                width: 150,
-                render: (_unused: unknown, row: ReviewSkillVersionDetail) =>
-                  `${formatBytes(row.archive_size_bytes)} / ${formatBytes(row.expanded_size_bytes)}`,
+                width: 96,
+                render: (_unused: unknown, row: ReviewSkillVersionDetail) => (
+                  <Tooltip
+                    title={
+                      <Space direction="vertical" size={0}>
+                        <span>压缩包大小：{formatBytes(row.archive_size_bytes)}</span>
+                        <span>解压后大小：{formatBytes(row.expanded_size_bytes)}</span>
+                      </Space>
+                    }
+                  >
+                    <Text>{formatBytes(row.archive_size_bytes)}</Text>
+                  </Tooltip>
+                ),
               },
               {
                 title: '脚本',
                 dataIndex: 'contains_scripts',
-                width: 80,
+                width: 64,
                 render: (value: boolean) => (value ? <Tag color="red">含</Tag> : <Tag>无</Tag>),
               },
               {
                 title: 'bundle hash',
                 dataIndex: 'bundle_hash',
-                width: 160,
+                width: 120,
                 render: (value: string) => (
                   <Tooltip title={value}>
                     <Text code>{value.replace('sha256:', '').slice(0, 12)}…</Text>
@@ -867,13 +879,14 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
               {
                 title: '发布时间',
                 dataIndex: 'published_at',
-                width: 180,
+                width: 148,
+                ellipsis: true,
                 render: (value: string) => new Date(value).toLocaleString(),
               },
               {
                 title: '操作',
                 key: 'actions',
-                width: 100,
+                width: 72,
                 render: (_unused: unknown, row: ReviewSkillVersionDetail) => (
                   <Button
                     size="small"
