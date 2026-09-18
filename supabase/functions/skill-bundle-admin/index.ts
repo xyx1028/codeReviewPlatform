@@ -27,6 +27,7 @@
 
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4'
 import { BundleError, LIMITS, validateSkillArchive } from './bundle.ts'
+import { toSkillBundleSignedPath } from './download-url.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!
@@ -550,8 +551,9 @@ async function handleCreateDownloadUrl(
   if (signError || !signed) {
     return json({ error: 'failed to create the download URL' }, 500)
   }
+  const signedPath = toSkillBundleSignedPath(signed.signedUrl)
   logEvent('download_url_issued', { userId, version_id: payload.version_id })
-  return json({ signed_url: signed.signedUrl, expires_in_seconds: DOWNLOAD_URL_TTL_SECONDS })
+  return json({ signed_path: signedPath, expires_in_seconds: DOWNLOAD_URL_TTL_SECONDS })
 }
 
 Deno.serve(async (req: Request): Promise<Response> => {

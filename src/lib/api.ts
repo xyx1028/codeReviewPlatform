@@ -1155,13 +1155,14 @@ export function adminPublishSkillVersion(input: {
 }
 
 /**
- * 请求已发布 Bundle 的短期下载 URL。
+ * 请求已发布 Bundle 的短期下载路径。
  *
- * 只有 ADMIN 能调用。返回的 URL 是**短期访问凭据**：不落库、不进日志，也永远不作为
- * 冻结 locator —— Worker 走 service-role + 冻结 bucket/key 那条路。
+ * 只有 ADMIN 能调用。返回的相对路径包含**短期访问凭据**：不落库、不进日志，也永远不作为
+ * 冻结 locator。浏览器用公开 VITE_SUPABASE_URL 补全 origin；Worker 走 service-role +
+ * 冻结 bucket/key 那条路。
  */
 export function adminCreateSkillDownloadUrl(versionId: string) {
-  return invokeSkillBundleAdmin<{ signed_url: string; expires_in_seconds: number }>({
+  return invokeSkillBundleAdmin<{ signed_path: string; expires_in_seconds: number }>({
     action: 'create-download-url',
     version_id: versionId,
   })

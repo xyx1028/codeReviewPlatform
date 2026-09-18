@@ -31,6 +31,7 @@ import {
   adminUploadSkillBundle,
 } from '../lib/api'
 import { SkillCreateWizard } from './SkillCreateWizard'
+import { getSkillBundleDownloadUrl } from '../lib/skill-download-url'
 import { formatSkillVersion } from '../lib/skill-version'
 import type {
   ReviewSkillListItem,
@@ -288,8 +289,8 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
   const downloadMutation = useMutation({
     mutationFn: (versionId: string) => adminCreateSkillDownloadUrl(versionId),
     onSuccess: (result) => {
-      // 短期凭据：立即使用，不保存、不展示。
-      window.open(result.signed_url, '_blank', 'noopener,noreferrer')
+      // 短期凭据：用浏览器可访问的 Supabase origin 补全后立即使用，不保存、不展示。
+      window.open(getSkillBundleDownloadUrl(result.signed_path), '_blank', 'noopener,noreferrer')
     },
     onError: (error: Error) => message.error(error.message),
   })

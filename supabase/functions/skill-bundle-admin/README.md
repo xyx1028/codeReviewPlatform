@@ -22,7 +22,7 @@
 | `validate` | 管理页 | service-role 下载 staging ZIP → 安全解析 → 落库校验结果与文件树 |
 | `publish` | 管理页 | 写不可变正式对象 → 落不可变版本行 → 清理 staging |
 | `set-enabled` | 管理页 | 启用 / 停用（只影响**新** Job） |
-| `create-download-url` | 管理页 | 已发布 Bundle 的短期 signed URL（仅 ADMIN） |
+| `create-download-url` | 管理页 | 已发布 Bundle 的短期 signed path（仅 ADMIN；浏览器用公开 Supabase origin 补全） |
 
 浏览器直接上传到 staging（用 `create-upload` 返回的 token），**不**上传到正式 key。
 
@@ -34,7 +34,8 @@
   `public.skill_bundle_hash()` 对服务端生成的 manifest **再算一次** —— 于是
   "库里的 bundle_hash 等于 manifest 的规范 hash"是一条结构性事实。
 - 正式对象 `upsert: false`：已发布对象永不覆盖。
-- signed URL 只走响应体：不落库、不进日志，永远不作为冻结 locator。
+- signed path（含 token）只走响应体：不落库、不进日志，永远不作为冻结 locator；
+  Function 不返回由内部 `SUPABASE_URL` 拼出的 origin。
 - 日志只记事件与非敏感计数（文件数、字节数、是否含脚本）；键名命中
   `key|secret|token|authorization|password|url` 的字段被直接丢弃。
 
