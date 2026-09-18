@@ -1,6 +1,7 @@
 import type { Session } from '@supabase/supabase-js'
 import { requireSupabase } from './supabase'
 import type { FieldMapping } from './excel'
+import type { UserDeletionImpact } from './user-deletion'
 import type {
   ActiveAnalysisBatchList,
   AdminUserListItem,
@@ -372,6 +373,30 @@ export async function adminUpdateUserRole(userId: string, role: UserRole) {
   const client = requireSupabase()
   const { data, error } = await client.rpc('admin_update_user_role', { p_user_id: userId, p_role: role })
   return unwrap<AdminUserListItem[]>({ data, error })
+}
+
+/**
+ * 删除前的影响评估（只读）。
+ *
+ * 单独一个 RPC 而不是让前端自己查引用：判定规则必须只有一份，且必须在数据库侧 ——
+ * 前端算出来的"可以删"在并发下随时会变成错的，而删除的后果不可逆。
+ */
+export async function adminGetUserDeletionImpact(userId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_get_user_deletion_impact', { p_user_id: userId })
+  return unwrap<UserDeletionImpact>({ data, error })
+}
+
+/**
+ * 删除用户。
+ *
+ * 数据库会重新做一遍全部门禁（不能删自己、不能删最后一个管理员、有业务引用则拒绝），
+ * 所以即使前端状态过期也不会误删。
+ */
+export async function adminDeleteUser(userId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_delete_user', { p_user_id: userId })
+  return unwrap<{ deleted: boolean; user: UserDeletionImpact['user'] }>({ data, error })
 }
 
 export async function createBatch(input: CreateBatchInput) {

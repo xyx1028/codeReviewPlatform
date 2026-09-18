@@ -2256,3 +2256,10 @@ a.dashboard-distribution-item:focus-visible {
   gap: 12px;
   flex-wrap: wrap;
 }
+
+/* 删除账号弹窗里的阻止原因清单。缩进靠 padding 而不是默认的 40px，
+   否则在 Alert 的窄容器里会被挤出边界。 */
+.deletion-impact-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}

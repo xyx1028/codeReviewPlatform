@@ -7,6 +7,7 @@ import {
   Button,
   Card,
   Col,
+  Descriptions,
   Divider,
   Empty,
   Form,
@@ -36,6 +37,8 @@ import type { ColumnsType } from 'antd/es/table'
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  adminDeleteUser,
+  adminGetUserDeletionImpact,
   adminListUsers,
   adminUpdateUserRole,
   adminCreateModelConfig,
@@ -90,6 +93,7 @@ import type { FieldMapping, SourceFieldKey } from './lib/excel'
 import { parseBaselineCommit } from './lib/baseline'
 import { hashFile } from './lib/hash'
 import { aiVerdictLabels, aiVerdictOptions, analysisJobStatusLabels, batchStatusLabels, humanReviewLabels, humanReviewOptions, resolveAnalysisError, storyTaskStatusLabels } from './lib/labels'
+import { buildUserDeletionView, describeUserDeletionError } from './lib/user-deletion'
 import { aiFillPrompt } from './lib/prompt'
 import { WorkerManagementPage } from './pages/WorkerManagementPage'
 import { RuntimeMonitoringPage } from './pages/RuntimeMonitoringPage'
@@ -1010,6 +1014,8 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
 
 function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
   const queryClient = useQueryClient()
+  // 用受控 Modal 而不是 modal.confirm：弹窗内容要等一次异步影响评估回来才完整，
+  // 而 modal.confirm 的内容在打开那一刻就固定了，改不动确认按钮的可用状态。
   const { message } = AntApp.useApp()
   const usersQuery = useQuery({ queryKey: ['admin-users'], enabled: isAdmin, queryFn: adminListUsers })
   const updateRoleMutation = useMutation({
@@ -1021,6 +1027,30 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
     },
     onError: (error) => message.error(error.message),
   })
+
+  /**
+   * 正在被评估删除的账号。
+   *
+   * 弹窗内容来自数据库的影响评估，而不是本地推断：能不能删由数据库判定，前端只翻译。
+   * 评估结果没回来之前确认按钮不可点（见 buildUserDeletionView 对 null 的处理）。
+   */
+  const [deleteTarget, setDeleteTarget] = useState<AdminUserListItem | null>(null)
+  const impactQuery = useQuery({
+    queryKey: ['user-deletion-impact', deleteTarget?.id],
+    enabled: Boolean(deleteTarget?.id),
+    queryFn: () => adminGetUserDeletionImpact(deleteTarget!.id),
+  })
+  const deleteMutation = useMutation({
+    mutationFn: (userId: string) => adminDeleteUser(userId),
+    onSuccess: (result) => {
+      message.success(`已删除账号 ${result.user?.email ?? ''}`)
+      setDeleteTarget(null)
+      queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+    },
+    // 数据库抛的是稳定错误码，这里翻成与弹窗一致的说法，避免同一个原因两种措辞。
+    onError: (error) => message.error(describeUserDeletionError(error.message)),
+  })
+  const deletionView = buildUserDeletionView(impactQuery.data ?? null)
 
   if (!isAdmin) {
     return <Alert type="warning" showIcon title="无权限访问" description="只有管理员可以管理用户角色。" />
@@ -1073,6 +1103,20 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
       ),
     },
     { title: '创建时间', dataIndex: 'created_at', width: 200, render: (value) => new Date(value).toLocaleString() },
+    {
+      title: '操作',
+      width: 100,
+      render: (_value, record) => (
+        <Button
+          danger
+          size="small"
+          loading={deleteMutation.isPending && deleteMutation.variables === record.id}
+          onClick={() => setDeleteTarget(record)}
+        >
+          删除
+        </Button>
+      ),
+    },
   ]
 
   const pendingCount = usersQuery.data?.filter((user) => !user.email_confirmed_at).length ?? 0
@@ -1089,6 +1133,88 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
         />
       ) : null}
       <Table rowKey="id" loading={usersQuery.isLoading} columns={columns} dataSource={usersQuery.data ?? []} />
+      <Modal
+        open={deleteTarget !== null}
+        title="删除账号"
+        okText="确认删除"
+        okButtonProps={{ danger: true, disabled: !deletionView.canConfirm }}
+        confirmLoading={deleteMutation.isPending}
+        onCancel={() => setDeleteTarget(null)}
+        onOk={() => {
+          if (deleteTarget) deleteMutation.mutate(deleteTarget.id)
+        }}
+        destroyOnClose
+      >
+        {deleteTarget === null ? null : (
+          <Space direction="vertical" size="middle" className="full-width">
+            <Descriptions column={1} size="small" bordered>
+              <Descriptions.Item label="邮箱">{deleteTarget.email}</Descriptions.Item>
+              <Descriptions.Item label="用户名">
+                {getUserDisplayName(deleteTarget.display_name, deleteTarget.email)}
+              </Descriptions.Item>
+              <Descriptions.Item label="角色">
+                {roleOptions.find((option) => option.value === deleteTarget.role)?.label ?? deleteTarget.role}
+              </Descriptions.Item>
+            </Descriptions>
+
+            {impactQuery.isLoading ? <Spin size="small" /> : null}
+            {impactQuery.error ? (
+              <Alert type="error" showIcon title="无法评估删除影响" description={impactQuery.error.message} />
+            ) : null}
+
+            {/* 不可删时：先给一句原因，再给逐条清单。清单才是管理员真正需要的信息。 */}
+            {deletionView.refusalReason ? (
+              <Alert
+                type="warning"
+                showIcon
+                title="这个账号不能删除"
+                description={
+                  <Space direction="vertical" size={4}>
+                    <span>{deletionView.refusalReason}</span>
+                    {deletionView.blocking.length > 0 ? (
+                      <ul className="deletion-impact-list">
+                        {deletionView.blocking.map((item) => (
+                          <li key={item.label}>{item.label}：{item.count} 条</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {deletionView.blocking.length > 0 ? (
+                      <span>
+                        如果这个人已经离开，把角色改成「查看者」即可收回操作权限，历史记录仍然保留。
+                      </span>
+                    ) : null}
+                  </Space>
+                }
+              />
+            ) : null}
+
+            {deletionView.canConfirm ? (
+              <Alert
+                type="error"
+                showIcon
+                title="删除后不可恢复"
+                description={
+                  <Space direction="vertical" size={4}>
+                    <span>这个账号没有业务记录，可以安全删除。删除后本人将无法登录。</span>
+                    {deletionView.cascade.length > 0 ? (
+                      <span>
+                        会一并删除：
+                        {deletionView.cascade.map((item) => `${item.label} ${item.count} 条`).join('、')}
+                      </span>
+                    ) : null}
+                    {deletionView.nullify.length > 0 ? (
+                      <span>
+                        会保留但作者置空：
+                        {deletionView.nullify.map((item) => `${item.label} ${item.count} 条`).join('、')}
+                      </span>
+                    ) : null}
+                  </Space>
+                }
+              />
+            ) : null}
+          </Space>
+        )}
+      </Modal>
     </Space>
   )
 }

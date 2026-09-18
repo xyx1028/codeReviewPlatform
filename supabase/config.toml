@@ -16,3 +16,9 @@ enable_confirmations = true
 
 [functions.wechat-auth]
 verify_jwt = false
+
+# 本地专用：`supabase db reset` 后自动执行 seed.sql（预制本地管理员账号）。
+# 仅影响本地环境，seed 不会被 `supabase db push` 推送到云端。
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
