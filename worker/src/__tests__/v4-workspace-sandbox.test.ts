@@ -493,7 +493,46 @@ describe('cleanOrphanedOverlays', () => {
       maxAgeMs: 1000,
       logger,
     })
-    expect(report).toEqual({ scanned: 0, removed: 0, failed: 0, reclaimedBytes: 0 })
+    expect(report).toEqual({ scanned: 0, removed: 0, failed: 0, reclaimedBytes: 0, relaxed: 0 })
+  })
+
+  it('清得掉只读的技能目录与只读检出（被 SIGKILL 的 attempt 留下的形态）', () => {
+    /*
+     * 线上实测到的失败：22 个孤儿目录、821MB，清理器每 10 分钟报一轮
+     * `overlay_cleanup_failed: EACCES`，`removed:0 failed:22`，一个都删不掉。
+     *
+     * 原因是这棵树里有只读目录（技能目录 0500/0400、固定 Commit 的只读检出 0500/0400）。
+     * 正常结束的 attempt 会先放宽权限再删；而孤儿**只**来自被强杀的 attempt —— 那条路径上
+     * 从来没人放宽过。于是清理器形同虚设，磁盘只增不减。
+     */
+    const attemptsRoot = tempRoot('crp-orphan-ro-')
+    const orphan = join(attemptsRoot, 'attempt-killed')
+    const skills = join(orphan, 'dsh-home', 'skills', 'kwork-skill-engineering')
+    mkdirSync(join(skills, 'references'), { recursive: true })
+    writeFileSync(join(skills, 'SKILL.md'), '# skill')
+    writeFileSync(join(skills, 'references', 'a.md'), 'ref')
+    // 与 skill-materializer / attempt-workspace 真实使用的权限一致。
+    chmodSync(join(skills, 'references', 'a.md'), 0o400)
+    chmodSync(join(skills, 'SKILL.md'), 0o400)
+    chmodSync(join(skills, 'references'), 0o500)
+    chmodSync(skills, 0o500)
+
+    const now = Date.now()
+    const stale = new Date(now - 24 * 60 * 60 * 1000)
+    utimesSync(orphan, stale, stale)
+
+    const report = cleanOrphanedOverlays({
+      attemptsRoot,
+      maxAgeMs: 60 * 60 * 1000,
+      logger,
+      now: () => now,
+    })
+
+    expect(report.removed).toBe(1)
+    expect(report.failed).toBe(0)
+    // 计数要能区分"正常删掉"和"放宽权限才删掉"：后者是非优雅关停的痕迹。
+    expect(report.relaxed).toBe(1)
+    expect(existsSync(orphan)).toBe(false)
   })
 })
 

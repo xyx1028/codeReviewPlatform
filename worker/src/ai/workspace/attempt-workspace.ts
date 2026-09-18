@@ -347,7 +347,14 @@ function makeTreeReadOnly(root: string): void {
   })
 }
 
-function makeTreeWritable(root: string): void {
+/**
+ * 递归恢复可写，让 `rmSync` 能删掉这棵树。
+ *
+ * 导出是为了给孤儿清理器复用（`cleanOrphanedOverlays`）。两条清理路径必须用同一个原语：
+ * 正常结束走 `dispose()`，被 SIGKILL 留下的孤儿走清理器 —— 而只读位恰恰只在后一条路径上
+ * 没人处理过，结果是孤儿目录永远删不掉、磁盘慢慢满。
+ */
+export function makeTreeWritable(root: string): void {
   walk(root, (path, isDir) => {
     try {
       chmodSync(path, isDir ? 0o700 : 0o600)
