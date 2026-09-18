@@ -2241,7 +2241,7 @@ a.dashboard-distribution-item:focus-visible {
   }
 }
 
-.skill-toolbar {
+.skill-filter-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2249,12 +2249,24 @@ a.dashboard-distribution-item:focus-visible {
   flex-wrap: wrap;
 }
 
-.skill-filter-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
+/* 技能名是模型侧的调用标识（`skill(name)`），必须整段可读。
+   不加 nowrap 时它会被右边的列挤成两行，code 背景断成两截，反而最难认。 */
+.skill-name-code {
+  white-space: nowrap;
+}
+
+/* 单元格里的次要行（展开大小、更新时间）。比正文小一号并且不换行：
+   这些值只是参考，让它们占两行会把表格行高撑起来。 */
+.skill-size-secondary {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 表格操作区的链接按钮。去掉 antd 默认的左右内边距，让「上传新版本 / 版本历史 / 更多」
+   三项在 210px 内排成一行——原来 5 个默认按钮平铺必然折成两行，而「停用」和「删除」
+   挨在一起是最容易点错的组合。 */
+.table-action-link {
+  padding-inline: 0;
 }
 
 /* 删除账号弹窗里的阻止原因清单。缩进靠 padding 而不是默认的 40px，

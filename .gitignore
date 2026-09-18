@@ -31,3 +31,6 @@ coverage
 # Supabase CLI runtime state and generated local credentials.
 supabase/.temp/
 .docker/*.env
+
+# 本地数据库备份（含真实账号与业务数据，绝不入库）
+.local-db-backups/

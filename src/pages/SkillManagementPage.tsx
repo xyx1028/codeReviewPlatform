@@ -6,6 +6,7 @@ import {
   Checkbox,
   Col,
   Descriptions,
+  Dropdown,
   Empty,
   Form,
   Input,
@@ -21,6 +22,7 @@ import {
   Typography,
   Upload,
 } from 'antd'
+import type { MenuProps } from 'antd'
 import type { UploadFile } from 'antd/es/upload/interface'
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -43,7 +45,7 @@ import type {
   SkillValidationResult,
 } from '../types'
 
-const { Title, Text } = Typography
+const { Text } = Typography
 
 const STATUS_LABELS: Record<ReviewSkillStatus, { text: string; color: string }> = {
   DRAFT: { text: '草稿', color: 'default' },
@@ -283,17 +285,99 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
     return <Alert type="warning" showIcon message="仅管理员可以维护技能" />
   }
 
+  /**
+   * 「更多」里的低频动作。
+   *
+   * 与原来平铺的按钮一一对应，门禁一条没少：
+   *   * 没有已发布版本 → 没有「下载」；
+   *   * 已发布 → 「停用」，否则（有版本但已停用）→ 「启用」；
+   *   * 被 Job 冻结引用 → 「删除」置灰，并在 label 上给出为什么不能删。
+   */
+  const skillRowMenuItems = (row: ReviewSkillListItem): MenuProps['items'] => [
+    ...(row.current_version_id !== null
+      ? [{ key: 'download', label: '下载当前版本' }]
+      : []),
+    ...(row.status === 'PUBLISHED'
+      ? [{ key: 'disable', label: '停用' }]
+      : row.current_version_id !== null
+        ? [{ key: 'enable', label: '启用' }]
+        : []),
+    { type: 'divider' as const },
+    {
+      key: 'delete',
+      danger: true,
+      disabled: row.referenced_by_job,
+      label: row.referenced_by_job ? (
+        <Tooltip
+          title={
+            '这个技能已被至少一个 Analysis Job 冻结，不能删除。' +
+            'Job 的技能快照是「那次评审到底给了模型哪些技能」的唯一证据，' +
+            '删掉源技能等于让历史评审结果失去依据。改用「停用」：它只影响之后新建的 Job。'
+          }
+        >
+          <span>删除（已被 Job 引用）</span>
+        </Tooltip>
+      ) : (
+        '删除'
+      ),
+    },
+  ]
+
+  const handleSkillRowAction = (key: string, row: ReviewSkillListItem) => {
+    if (key === 'download' && row.current_version_id !== null) {
+      downloadMutation.mutate(row.current_version_id)
+      return
+    }
+    if (key === 'enable') {
+      enabledMutation.mutate({ skillId: row.id, enabled: true })
+      return
+    }
+    if (key === 'disable') {
+      modal.confirm({
+        title: `停用 ${row.name}？`,
+        content: '停用只影响之后新建的 Job；已在运行的 Job 继续使用它冻结的版本。',
+        onOk: () => enabledMutation.mutateAsync({ skillId: row.id, enabled: false }),
+      })
+      return
+    }
+    if (key === 'delete') {
+      modal.confirm({
+        title: `删除 ${row.name}？`,
+        content:
+          row.version_count > 0
+            ? `将连同 ${row.version_count} 个已发布版本与其归档一起永久删除，不可恢复。` +
+              '技能名会被释放，之后可以重新创建同名技能。'
+            : '这是一个还没有任何版本的草稿，删除后技能名会被释放。',
+        okText: '删除',
+        okButtonProps: { danger: true },
+        onOk: () => deleteMutation.mutateAsync(row.id),
+      })
+    }
+  }
+
   const columns = [
     {
       title: '技能名称',
       dataIndex: 'name',
-      render: (name: string) => <Text code>{name}</Text>,
+      width: 220,
+      /*
+       * 技能名是模型侧的唯一标识（`skill(name)` 就是按它调用），所以必须完整可读。
+       * 早先没给宽度，被右边 8 个列挤成两行、code 背景断成两截，反而最难认。
+       * 这里给固定宽度 + 不换行 + 溢出时 Tooltip 显示全名。
+       */
+      render: (name: string) => (
+        <Tooltip title={name}>
+          <Text code className="skill-name-code">
+            {name}
+          </Text>
+        </Tooltip>
+      ),
     },
-    { title: '显示名称', dataIndex: 'display_name' },
+    { title: '显示名称', dataIndex: 'display_name', width: 180, ellipsis: true },
     {
       title: '状态',
       dataIndex: 'status',
-      width: 100,
+      width: 96,
       render: (status: ReviewSkillStatus) => (
         <Tag color={STATUS_LABELS[status].color}>{STATUS_LABELS[status].text}</Tag>
       ),
@@ -301,21 +385,39 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
     {
       title: '当前版本',
       dataIndex: 'current_version',
-      width: 100,
+      width: 96,
+      align: 'center' as const,
       render: (version: number | null) => (version === null ? '—' : `V${version}`),
     },
-    { title: '文件数', dataIndex: 'file_count', width: 90, render: (v: number | null) => v ?? '—' },
+    {
+      title: '文件数',
+      dataIndex: 'file_count',
+      width: 88,
+      align: 'center' as const,
+      render: (v: number | null) => v ?? '—',
+    },
     {
       title: 'ZIP / 展开',
       key: 'size',
-      width: 150,
-      render: (_unused: unknown, row: ReviewSkillListItem) =>
-        `${formatBytes(row.archive_size_bytes)} / ${formatBytes(row.expanded_size_bytes)}`,
+      width: 130,
+      /*
+       * 原来是 `23.4 KiB / 38.4 KiB` 一整串，在 150px 里必然折行，读的时候要先找斜杠
+       * 在哪一行。拆成两行之后不再折行，主次也分明：归档大小是主，展开大小是参考。
+       */
+      render: (_unused: unknown, row: ReviewSkillListItem) => (
+        <Space direction="vertical" size={0}>
+          <Text>{formatBytes(row.archive_size_bytes)}</Text>
+          <Text type="secondary" className="skill-size-secondary">
+            展开 {formatBytes(row.expanded_size_bytes)}
+          </Text>
+        </Space>
+      ),
     },
     {
       title: '脚本',
       dataIndex: 'contains_scripts',
-      width: 90,
+      width: 96,
+      align: 'center' as const,
       render: (containsScripts: boolean) =>
         containsScripts ? (
           <Tooltip title="此版本含 scripts/ 目录。Skill 加载不会自动执行它们，但拥有 bash 的 Agent 可以显式运行。">
@@ -326,19 +428,32 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
         ),
     },
     {
-      title: 'description（首轮目录摘要）',
+      // 列标题原来是 `description（首轮目录摘要）`，本身就超过列宽被截成
+      // `description（首轮目...`——一个连标题都读不完的列等于没有标题。
+      title: (
+        <Tooltip title="SKILL.md frontmatter 里的 description。dsh 首轮只把它披露给模型，模型据此决定要不要调用这个技能。">
+          首轮披露描述
+        </Tooltip>
+      ),
       dataIndex: 'description',
       ellipsis: true,
-      render: (description: string | null) => description ?? <Text type="secondary">未发布</Text>,
+      render: (description: string | null) =>
+        description === null ? (
+          <Text type="secondary">未发布</Text>
+        ) : (
+          <Tooltip title={description}>
+            <span>{description}</span>
+          </Tooltip>
+        ),
     },
     {
       title: '更新人 / 时间',
       key: 'audit',
-      width: 190,
+      width: 180,
       render: (_unused: unknown, row: ReviewSkillListItem) => (
         <Space direction="vertical" size={0}>
           <Text>{row.published_by_name ?? '—'}</Text>
-          <Text type="secondary">
+          <Text type="secondary" className="skill-size-secondary">
             {row.published_at === null ? '—' : new Date(row.published_at).toLocaleString()}
           </Text>
         </Space>
@@ -347,11 +462,15 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
     {
       title: '操作',
       key: 'actions',
-      width: 280,
+      width: 210,
+      // 固定在右侧：这张表有 10 列、横向要滚，操作跟着滚出屏幕就得来回拖。
+      fixed: 'right' as const,
       render: (_unused: unknown, row: ReviewSkillListItem) => (
-        <Space size={4} wrap>
+        <Space size={4}>
           <Button
             size="small"
+            type="link"
+            className="table-action-link"
             onClick={() => {
               setPublishSkill(row)
               setValidation(null)
@@ -360,73 +479,29 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
           >
             上传新版本
           </Button>
-          <Button size="small" onClick={() => setHistorySkillId(row.id)}>
+          <Button
+            size="small"
+            type="link"
+            className="table-action-link"
+            onClick={() => setHistorySkillId(row.id)}
+          >
             版本历史
           </Button>
-          {row.current_version_id !== null ? (
-            <Button
-              size="small"
-              loading={downloadMutation.isPending}
-              onClick={() => downloadMutation.mutate(row.current_version_id!)}
-            >
-              下载
+          {/*
+           * 低频且危险的动作收进「更多」：原来 5 个按钮平铺在 280px 里，必然折成两行，
+           * 「停用」和「删除」还挨在一起——那是最容易点错的两个。
+           */}
+          <Dropdown
+            trigger={['click']}
+            menu={{
+              items: skillRowMenuItems(row),
+              onClick: ({ key }) => handleSkillRowAction(key, row),
+            }}
+          >
+            <Button size="small" type="link" className="table-action-link">
+              更多
             </Button>
-          ) : null}
-          {row.status === 'PUBLISHED' ? (
-            <Button
-              size="small"
-              danger
-              onClick={() =>
-                modal.confirm({
-                  title: `停用 ${row.name}？`,
-                  content: '停用只影响之后新建的 Job；已在运行的 Job 继续使用它冻结的版本。',
-                  onOk: () => enabledMutation.mutateAsync({ skillId: row.id, enabled: false }),
-                })
-              }
-            >
-              停用
-            </Button>
-          ) : row.current_version_id !== null ? (
-            <Button
-              size="small"
-              onClick={() => enabledMutation.mutate({ skillId: row.id, enabled: true })}
-            >
-              启用
-            </Button>
-          ) : null}
-          {row.referenced_by_job ? (
-            <Tooltip
-              title={
-                '这个技能已被至少一个 Analysis Job 冻结，不能删除。' +
-                'Job 的技能快照是「那次评审到底给了模型哪些技能」的唯一证据，' +
-                '删掉源技能等于让历史评审结果失去依据。改用「停用」：它只影响之后新建的 Job。'
-              }
-            >
-              <Button size="small" danger disabled>
-                删 除
-              </Button>
-            </Tooltip>
-          ) : (
-            <Button
-              size="small"
-              danger
-              onClick={() =>
-                modal.confirm({
-                  title: `删除 ${row.name}？`,
-                  content:
-                    row.version_count > 0
-                      ? `将连同 ${row.version_count} 个已发布版本与其归档一起永久删除，不可恢复。` +
-                        '技能名会被释放，之后可以重新创建同名技能。'
-                      : '这是一个还没有任何版本的草稿，删除后技能名会被释放。',
-                  okText: '删除',
-                  okButtonProps: { danger: true },
-                  onOk: () => deleteMutation.mutateAsync(row.id),
-                })
-              }
-            >
-              删 除
-            </Button>
-          )}
+          </Dropdown>
         </Space>
       ),
     },
@@ -475,17 +550,20 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
         </Card>
       ) : null}
 
-      <Card>
+      {/*
+        标题与主按钮交给 Card 的 title / extra，而不是自己在 body 里摆一行 flex：
+        Card 头部有自己的分隔线与内边距，手写的那一行会和下面的筛选栏挤在一起，
+        视觉上分不出「这是卡片标题」还是「这是筛选条件的一部分」。
+      */}
+      <Card
+        title="技能"
+        extra={
+          <Button type="primary" onClick={() => setCreateOpen(true)}>
+            新增技能
+          </Button>
+        }
+      >
         <Space direction="vertical" size="middle" className="full-width">
-          <div className="skill-toolbar">
-            <Title level={4} className="mb-0">
-              技能
-            </Title>
-            <Button type="primary" onClick={() => setCreateOpen(true)}>
-              新增技能
-            </Button>
-          </div>
-
           <div className="skill-filter-bar">
             <Space size="middle" wrap>
               <Space size="small">
@@ -511,16 +589,26 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
                 style={{ width: 260 }}
               />
             </Space>
-            <Text type="secondary">共 {filteredSkills.length} 条</Text>
+            {/* 条数只在分页处显示一次：筛选栏右侧原来还有一个「共 N 条」，同一个数字
+                在同一屏出现两遍，看的人会先怀疑两者是不是不同口径。 */}
           </div>
 
           <Table<ReviewSkillListItem>
             dataSource={filteredSkills}
             rowKey="id"
+            size="middle"
             loading={catalogQuery.isLoading}
             columns={columns}
-            scroll={{ x: 1500 }}
-            pagination={{ pageSize: 10, showSizeChanger: true, showTotal: (total) => `共 ${total} 条` }}
+            // 固定列宽之和 1296（220+180+96+96+88+130+96+180+210）。留 264 给「首轮披露
+            // 描述」当最小宽度：它是唯一没有固定宽度的列，宽屏时吸收剩余空间、窄屏时
+            // 至少还能读一句话。原来写 1500 却让最宽的两列都没有宽度，结果是名称被压折行、
+            // 描述被压成三四个字，右边反而空出一段。
+            scroll={{ x: 1560 }}
+            pagination={{
+              pageSize: 10,
+              showSizeChanger: true,
+              showTotal: (total) => `共 ${total} 条`,
+            }}
             locale={{ emptyText: <Empty description="还没有技能。新增一个并上传 Bundle ZIP。" /> }}
             expandable={{
               rowExpandable: (row) => row.latest_upload !== null,

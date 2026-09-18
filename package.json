@@ -27,7 +27,8 @@
     "proxy:model-vpn:uninstall": "bash scripts/uninstall-model-vpn-proxy.sh",
     "worker:release": "bash scripts/worker-drain-restart.sh",
     "worker:drain": "bash scripts/worker-drain-restart.sh --drain-only",
-    "worker:drain:lift": "bash scripts/worker-drain-restart.sh --lift-only"
+    "worker:drain:lift": "bash scripts/worker-drain-restart.sh --lift-only",
+    "db:backup:local": "bash scripts/backup-local-db.sh"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",

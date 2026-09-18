@@ -38,7 +38,14 @@ description: 在本工作区修改 Worker、Worker 镜像或启动配置、Worke
 - 重建或重启 `codereviewplatform` 项目下连接云端 Supabase 的 Worker；
 - 输出、截图或提交 `.env` 中的密钥。
 
-不得默认运行 `supabase db reset`。它会清空本地账号、模型配置和业务数据，只有用户明确同意后才可执行。不得对 linked/remote 数据库运行 reset。
+**绝对禁止重建/重置数据库。** 完整清单见 `.kiro/steering/database-never-reset.md`（always 生效）。
+要点：`supabase db reset`（本地或 linked）、`supabase stop --no-backup`、任何 `down -v`、
+`drop database` / `drop schema public cascade` / 无 where 的批量删除，AI 一律不执行 ——
+用户要求也不例外，只输出命令由用户自己执行。迁移文件能重建结构，重建不了账号、模型密钥、
+批次、AI 结论和人工确认记录。
+
+Worker 侧相反：它是无状态服务，镜像与容器随便重建、重启、扩缩容（有在途任务时用
+`npm run worker:release` 先排空）。
 
 执行 Docker 操作前，先阅读：
 
