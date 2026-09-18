@@ -59,7 +59,11 @@ import { AttemptTreeController, type AttemptEndReason } from '../control/attempt
 import { HierarchicalBudgetLedger } from '../control/hierarchical-budget-ledger.js'
 import { EgressPolicy, platformBlockedHosts } from '../web/egress-policy.js'
 import { AttemptWorkspace } from '../workspace/attempt-workspace.js'
-import { SessionRegistry, sessionFormatVersionFromPath } from '../session/session-registry.js'
+import {
+  describeSessionLog,
+  SessionRegistry,
+  sessionFormatVersionFromPath,
+} from '../session/session-registry.js'
 import {
   evaluateResume,
   sessionCompatibilityKey,
@@ -122,6 +126,59 @@ export const AGENT_TOOL_NAMES = PLATFORM_TOOL_NAMES
  * 由平台开一个干净的新 attempt。
  */
 export const MAX_SESSION_RESUMES = 3
+
+/**
+ * 在途 Session checkpoint 的落库间隔（毫秒）。
+ *
+ * 为什么必须有它：改造前 checkpoint 只在 `session/prompt` **返回之后**写一次，而一次
+ * turn 要跑 20~40 分钟。容器在这期间被重建或被 SIGKILL 的话那次 turn 永远不返回，
+ * checkpoint 也就永远不写。云端库的实测结果是整张 `analysis_session_checkpoint`
+ * 只有 1 行，而 Session 卷上已经躺着 414 个 attempt 目录、225MB JSONL —— 恢复所需的
+ * 字节一直都在，只是数据库里没有任何一行指向它们。
+ *
+ * 60 秒是"最多丢一分钟进展"与"每 attempt 多几十次 RPC"之间的取舍。RPC 是 upsert，
+ * 同一个 (session_id, session_revision) 反复写只更新一行。
+ */
+export const SESSION_CHECKPOINT_INTERVAL_MS = 60_000
+
+/**
+ * 把 `load_resumable_analysis_attempt` 的返回行解析成恢复候选。
+ *
+ * `source_agent_attempt` 缺失时回退成"当前 attempt"：迁移之前的 RPC 不返回这个字段，
+ * 而那时候的语义正是"同一个 attempt 内恢复"。这个默认值同时决定了拒绝时的处置方式
+ * （同 attempt 终止、跨 attempt 退回新会话），所以不能随便填。
+ */
+export function toResumeCandidate(
+  row: Record<string, unknown>,
+  currentAgentAttempt: number,
+): ResumeCandidate {
+  const rawSource = row.source_agent_attempt
+  const sourceAgentAttempt =
+    rawSource === null || rawSource === undefined ? currentAgentAttempt : Number(rawSource)
+  const rawPrefix = row.prefix_bytes
+  return {
+    agentRunId: String(row.agent_run_id ?? ''),
+    rootAgentId: (row.root_agent_id as string | null) ?? null,
+    rootSessionId: (row.root_session_id as string | null) ?? null,
+    sessionId: String(row.session_id ?? ''),
+    sessionRevision: Number(row.session_revision ?? 1),
+    storageLocator: String(row.storage_locator ?? ''),
+    contentHash: String(row.content_hash ?? ''),
+    harnessVersion: String(row.harness_version ?? ''),
+    profileHash: (row.profile_hash as string | null) ?? null,
+    policyHash: (row.policy_hash as string | null) ?? null,
+    resumeCount: Number(row.resume_count ?? 0),
+    // checkpoint 里记的 harness_version 是兼容键，形如 `0.1.5-rc.1/v3`；压缩形态从
+    // locator 后缀判断。
+    compressed: String(row.storage_locator ?? '').endsWith('.zstd'),
+    // V1.6：checkpoint 与 Job 各自的技能目录身份。两者都参与门禁，见 evaluateResume。
+    skillCatalogHash: (row.skill_catalog_hash as string | null) ?? null,
+    jobSkillCatalogHash: (row.job_skill_catalog_hash as string | null) ?? null,
+    // V1.9：前缀长度与来源 attempt。
+    prefixBytes: rawPrefix === null || rawPrefix === undefined ? null : Number(rawPrefix),
+    sourceAgentAttempt: Number.isFinite(sourceAgentAttempt) ? sourceAgentAttempt : currentAgentAttempt,
+  }
+}
 
 export interface DeepSeekHarnessAcpEngineOptions {
   taskId: string
@@ -218,6 +275,8 @@ export interface DeepSeekHarnessAcpEngineOptions {
       profileHash: string | null
       /** V1.6：本次 attempt 物化的技能目录身份，恢复门禁按它比对。 */
       skillCatalogHash?: string | null
+      /** V1.9：contentHash 覆盖的前缀字节数。在途 checkpoint 靠它做前缀判定。 */
+      prefixBytes?: number | null
     }): Promise<void>
     recordProfile(input: {
       harnessVersion: string
@@ -268,6 +327,13 @@ export interface DeepSeekHarnessAcpEngineOptions {
   /** Injected in tests to avoid spawning a real Harness process. */
   startProcess?: typeof startAcpProcess
   runTurn?: typeof runSingleAcpTurn
+  /**
+   * 在途 checkpoint 间隔（毫秒）。缺省 {@link SESSION_CHECKPOINT_INTERVAL_MS}。
+   *
+   * 只为测试可注入：默认 60 秒的循环没法在单测里等，而"turn 还在跑的时候就已经有
+   * checkpoint"恰恰是这次修复的核心断言 —— 不能验证的修复等于没修。
+   */
+  sessionCheckpointIntervalMs?: number
   /**
    * 运行监控事件上报（V1.5）。缺省等价于关闭：所有插桩点走 NullRuntimeEventReporter，
    * 现有分析流程一字不改。
@@ -327,7 +393,39 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       durationMs: Date.now() - pinsStartedMs,
     })
 
-    const identity = mintRootIdentity(this.options.taskId, this.options.agentAttempt)
+    /*
+     * ---- 恢复候选必须在派生任何路径**之前**取到（V1.9） ---------------------
+     *
+     * Session 目录、Workspace 目录和 root agent id 全部按 (taskId, agentAttempt) 确定性
+     * 派生，而 `claim_next_story_task` 每次领取都 `agent_attempt+1`。也就是说一个"继续
+     * 上一次会话"的 attempt 如果用自己的 attempt 号去派生路径，它看到的是一个空目录，
+     * 而它算出来的 profile hash 也必然与 checkpoint 里记的那份不同 —— 两条都会让恢复
+     * 失败。真实证据：库里 112 条 run 全部 `resumed=false` / `resume_count=0`。
+     *
+     * 所以先问数据库"有没有可恢复的 checkpoint、它属于哪一次 attempt"，再用那个
+     * attempt 号派生本次的路径与身份。没有候选时一切与改造前完全一致。
+     */
+    // fencing revision。恢复时由数据库推进，否则是本次 attempt claim 时的初值。
+    let sessionRevision = this.options.sessionRevision ?? 1
+    const resumeRow = await this.loadResumeRow(log)
+    const candidate = resumeRow === null ? null : toResumeCandidate(resumeRow, this.options.agentAttempt)
+    /** 派生路径与身份用的 attempt 号：恢复时跟着被恢复的那一次走。 */
+    const continuityAttempt = candidate?.sourceAgentAttempt ?? this.options.agentAttempt
+    if (candidate !== null) {
+      // 数据库在返回候选的同时已经把 run 的 session_revision 推进了一格。无论最终是否
+      // 真的恢复，本次 attempt 都必须采用这个更高的水位，否则后续 checkpoint 与收敛
+      // 事件会被自己的 fencing 判成 SESSION_FENCED / RUNTIME_EVENT_FENCE_REJECTED。
+      sessionRevision = candidate.sessionRevision
+      events.setSessionRevision?.(sessionRevision)
+      log.info('agent_attempt_resume_candidate_found', {
+        event: 'agent_attempt_resume_candidate_found',
+        source_agent_attempt: candidate.sourceAgentAttempt,
+        session_revision: sessionRevision,
+        resume_count: candidate.resumeCount,
+      })
+    }
+
+    const identity = mintRootIdentity(this.options.taskId, continuityAttempt)
     const authority = new AgentAuthorityLedger({
       taskId: this.options.taskId,
       agentAttempt: this.options.agentAttempt,
@@ -383,26 +481,60 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
     let endReason: AttemptEndReason = 'ATTEMPT_FAILED'
     /** 终态稳定错误码。attempt_rollup 日志与数据库汇总用同一个值。 */
     let terminalErrorCode: string | null = null
-    // fencing revision。恢复时由数据库推进，否则是本次 attempt claim 时的初值。
-    let sessionRevision = this.options.sessionRevision ?? 1
 
     try {
-      const sessionRegistry = new SessionRegistry({
-        root: this.options.sessionRoot,
-        taskId: this.options.taskId,
-        agentAttempt: this.options.agentAttempt,
-        workerId: this.options.workerId,
-        logger: log,
-      })
-      sessionSlot = sessionRegistry.acquire()
+      /*
+       * 恢复的三个派生量必须一起走：Session 目录、Workspace 目录、root 身份。
+       *
+       * 只改一个不够 —— dsh 的 `session/resume` 会校验 workspace 上下文，而 profile hash
+       * 覆盖 sandbox 根与 session 根，任何一个跟着新 attempt 走都会让恢复被门禁拒绝。
+       */
+      let resumeCandidate = candidate
+      let pathAttempt = continuityAttempt
+      const acquireSlot = (attempt: number, allowTakeover: boolean) =>
+        new SessionRegistry({
+          root: this.options.sessionRoot,
+          taskId: this.options.taskId,
+          agentAttempt: this.options.agentAttempt,
+          // 恢复时用被恢复 attempt 的目录：dsh 的 JSONL 就在那里，换个目录等于从零开始。
+          sessionAttempt: attempt,
+          // 只有数据库已经批准恢复（返回了候选并推进了 revision）才允许接管别人的写者锁，
+          // 而且 SessionRegistry 仍会拒绝"持有者进程还活着"的情况。
+          allowTakeover,
+          workerId: this.options.workerId,
+          logger: log,
+        }).acquire()
+
+      try {
+        sessionSlot = acquireSlot(pathAttempt, resumeCandidate !== null)
+      } catch (lockError) {
+        const code = (lockError as { code?: string }).code
+        if (resumeCandidate === null || code !== V4_ERROR_CODES.SESSION_FENCED) throw lockError
+        /*
+         * 旧 attempt 还活着并握着写者锁（典型情况：它所在的容器没死，只是心跳晚了，
+         * 任务已经被接管）。这时**绝不能**并发写同一份 JSONL —— 交错的 JSONL 无法重放。
+         * 退回"用自己的目录开一个新会话"，也就是改造前的行为：损失是这一次不能续跑，
+         * 但不会损坏任何东西。
+         */
+        log.info('agent_attempt_resume_declined', {
+          event: 'agent_attempt_resume_declined',
+          error_code: V4_ERROR_CODES.SESSION_FENCED,
+          reason: 'the previous attempt still holds the single-writer lock for this session',
+          source_agent_attempt: resumeCandidate.sourceAgentAttempt,
+        })
+        resumeCandidate = null
+        pathAttempt = this.options.agentAttempt
+        sessionSlot = acquireSlot(pathAttempt, false)
+      }
       emit({ type: 'SESSION_SLOT_ACQUIRED', payload: {} })
 
       const workspaceStartedMs = Date.now()
       workspace = AttemptWorkspace.create({
         attemptsRoot: this.options.attemptsRoot,
         // 目录名按 task+attempt 确定性派生：Harness 的 session/resume 校验 cwd 一致性。
+        // 恢复时必须沿用被恢复 attempt 的号，否则 cwd 变了、profile hash 也变了。
         taskId: this.options.taskId,
-        agentAttempt: this.options.agentAttempt,
+        agentAttempt: pathAttempt,
         policy,
         logger: log,
         pinnedRepositories: this.options.snapshots.pins(),
@@ -534,7 +666,9 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
 
       profile = materializeAttemptProfile({
         taskId: this.options.taskId,
-        agentAttempt: this.options.agentAttempt,
+        // 与 Session / Workspace 同一个 attempt 号：profile hash 覆盖这两个根目录，
+        // 跟着新 attempt 走会让恢复门禁必然拒绝。
+        agentAttempt: pathAttempt,
         attemptsRoot: this.options.attemptsRoot,
         route: this.options.route,
         policy,
@@ -649,29 +783,56 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       //
       // 必须在起 turn 之前决定，因为"新建会话"和"继续会话"是两条不同的 ACP 调用。
       //
-      // 判定失败时**不静默降级为新建会话**：那会让 Worker 重启后看起来恢复了，其实从零
-      // 开始 —— 长任务的 Todo、Goal 和已完成的取证全部白做，而且平台无从察觉。所以格式
-      // 不兼容、日志 torn、被别的写者改过这三种情况都终止本次 attempt，由平台开新 attempt。
+      // 拒绝的处理分两种，取决于候选属于哪一次 attempt：
+      //
+      //   * **同一个 attempt 的 checkpoint**（进程内重启）→ 终止本次 attempt。这是原有
+      //     语义：静默降级成新建会话会让运维以为恢复成功了，其实从零开始。
+      //   * **上一次 attempt 的 checkpoint**（V1.9 跨 attempt 恢复）→ 只是不续跑，改为
+      //     新建会话继续跑完本次 attempt。这里**不能**沿用"终止"：候选来自历史，终止
+      //     会让同一份 checkpoint 把后续每一次 attempt 都毒死，任务永远做不完。
       let resumeSessionId: string | undefined
-      const resume = await this.resolveResume(profile.configHash, policyHash, skillCatalogHash, log)
+      const resume =
+        resumeCandidate === null
+          ? { decision: { resume: false, code: null, reason: 'no resumable checkpoint' }, candidate: null }
+          : this.evaluateResumeCandidate(
+              resumeCandidate,
+              profile.configHash,
+              policyHash,
+              skillCatalogHash,
+              log,
+            )
       if (resume.decision.code !== null) {
-        // 技能类拒绝用 SkillGovernanceError：它的码不在冻结契约里（见 skill-errors.ts
-        // 的说明），用 V4GovernanceError 会把一个契约外的码塞进契约类型。
-        if (resume.decision.code === SKILL_ERROR_CODES.SESSION_SKILL_SET_MISMATCH) {
-          throw new SkillGovernanceError(
-            SKILL_ERROR_CODES.SESSION_SKILL_SET_MISMATCH,
+        const crossAttempt =
+          resumeCandidate !== null &&
+          resumeCandidate.sourceAgentAttempt !== null &&
+          resumeCandidate.sourceAgentAttempt !== undefined &&
+          resumeCandidate.sourceAgentAttempt !== this.options.agentAttempt
+        if (!crossAttempt) {
+          // 技能类拒绝用 SkillGovernanceError：它的码不在冻结契约里（见 skill-errors.ts
+          // 的说明），用 V4GovernanceError 会把一个契约外的码塞进契约类型。
+          if (resume.decision.code === SKILL_ERROR_CODES.SESSION_SKILL_SET_MISMATCH) {
+            throw new SkillGovernanceError(
+              SKILL_ERROR_CODES.SESSION_SKILL_SET_MISMATCH,
+              `session recovery refused: ${resume.decision.reason}`,
+            )
+          }
+          throw new V4GovernanceError(
+            resume.decision.code as never,
             `session recovery refused: ${resume.decision.reason}`,
           )
         }
-        throw new V4GovernanceError(
-          resume.decision.code as never,
-          `session recovery refused: ${resume.decision.reason}`,
-        )
+        log.info('agent_attempt_resume_fell_back_to_new_session', {
+          event: 'agent_attempt_resume_fell_back_to_new_session',
+          error_code: resume.decision.code,
+          reason: resume.decision.reason,
+          source_agent_attempt: resumeCandidate?.sourceAgentAttempt ?? null,
+        })
       }
       if (resume.decision.resume && resume.decision.session) {
         resumeSessionId = resume.decision.session.sessionId
         sessionRevision = resume.decision.session.sessionRevision
         broker.setSessionRevision(sessionRevision)
+        events.setSessionRevision?.(sessionRevision)
         emit({
           type: 'SESSION_RESUMED',
           payload: { session_revision: sessionRevision, resumed: true },
@@ -726,6 +887,67 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
 
       const runTurn = this.options.runTurn ?? runSingleAcpTurn
       let turn
+      /*
+       * ---- 在途 checkpoint（V1.9） -----------------------------------------
+       *
+       * turn 一旦开始就可能跑 20~40 分钟，而这段时间里发生的任何强制终止（容器重建、
+       * SIGKILL、宿主机断电）都不会让 `runTurn` 返回，于是"turn 结束后写一次 checkpoint"
+       * 这条路径永远走不到。这里改成 session 一建立就开始每分钟落一次。
+       *
+       * 三条边界：
+       *   * 只写未提交的会话：提交会烧毁 claim，之后写必然 TASK_LEASE_LOST；
+       *   * 只写租约还在手上的时候：租约丢了说明任务已被接管，写入应当被 fencing 拒绝；
+       *   * 失败只记日志：checkpoint 是恢复能力，不是业务结果，绝不因它中断 attempt。
+       */
+      let checkpointTimer: ReturnType<typeof setInterval> | null = null
+      let liveSessionId: string | null = null
+      let checkpointInFlight = false
+      let checkpointsWritten = 0
+      const writeCheckpoint = async (reason: 'PERIODIC' | 'TURN_END'): Promise<void> => {
+        if (checkpointInFlight) return
+        if (liveSessionId === null || sessionSlot === null || !this.options.db) return
+        if (broker?.committed() != null) return
+        if (!this.options.isLeaseValid()) return
+        checkpointInFlight = true
+        try {
+          const location = sessionSlot.locate(liveSessionId)
+          const described = location === null ? null : describeSessionLog(location)
+          if (described === null || described.prefixBytes === 0) {
+            // 会话还没落盘、或还没有一条完整记录。turn 刚开始时这是正常状态。
+            return
+          }
+          await this.options.db.saveSessionCheckpoint({
+            sessionId: liveSessionId,
+            sessionRevision,
+            storageLocator: described.storageLocator,
+            contentHash: described.contentHash,
+            eventCount: described.eventCount,
+            harnessVersion: sessionCompatibilityKey({
+              harnessVersion: loadCapabilityContract().harnessVersion,
+              sessionFormatVersion: described.formatVersion,
+            }),
+            profileHash: profile?.configHash ?? null,
+            skillCatalogHash,
+            prefixBytes: described.prefixBytes,
+          })
+          checkpointsWritten += 1
+          log.info('session_checkpoint_saved', {
+            event: 'session_checkpoint_saved',
+            reason,
+            session_revision: sessionRevision,
+            event_count: described.eventCount,
+            prefix_bytes: described.prefixBytes,
+          })
+        } catch (err) {
+          log.error('session_checkpoint_failed', {
+            event: 'session_checkpoint_failed',
+            reason,
+            error_message: redactError(err),
+          })
+        } finally {
+          checkpointInFlight = false
+        }
+      }
       try {
         emit({ type: 'ACP_TURN_STARTED', payload: {} })
         turn = await runTurn(
@@ -746,6 +968,17 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
                 })
               }
             },
+            onSessionCreated: (sessionId) => {
+              liveSessionId = sessionId
+              if (checkpointTimer !== null) return
+              checkpointTimer = setInterval(() => {
+                void writeCheckpoint('PERIODIC')
+              }, this.options.sessionCheckpointIntervalMs ?? SESSION_CHECKPOINT_INTERVAL_MS)
+              // 不让定时器拖住进程退出：收敛路径由 finally 负责清理。
+              if (typeof (checkpointTimer as { unref?: () => void }).unref === 'function') {
+                ;(checkpointTimer as { unref: () => void }).unref()
+              }
+            },
             resumeSessionId,
           },
           this.prompt(rootTools.length),
@@ -755,6 +988,10 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         )
       } finally {
         input.signal.removeEventListener('abort', revokeOnAbort)
+        if (checkpointTimer !== null) {
+          clearInterval(checkpointTimer)
+          checkpointTimer = null
+        }
       }
 
       const committed = broker.committed()
@@ -763,46 +1000,21 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       // 仍在 turn 结束后扫描，保留失败 attempt 产生的补丁和构建日志。
       if (committed === null) await persistCollectedArtifacts()
 
-      // Session checkpoint 只服务于“未提交 attempt 的重启恢复”。成功提交已经烧毁 claim，
-      // 再写必然 TASK_LEASE_LOST，而且已提交会话永远不应恢复。
+      // turn 结束后再写一次：这一次覆盖 turn 最后几秒产生的记录。
+      // 提交成功的会话不写 —— claim 已被烧毁，写必然 TASK_LEASE_LOST，而已提交会话
+      // 永远不应恢复。
       if (committed === null && sessionSlot && this.options.db) {
-        // 路径由 registry 在持久卷上实际找到，不是拼出来的。
-        const location = sessionSlot.locate(turn.sessionId)
-        const described = location === null ? null : sessionRegistry.describe(location)
-        if (described === null) {
+        liveSessionId = turn.sessionId
+        const before = checkpointsWritten
+        await writeCheckpoint('TURN_END')
+        if (checkpointsWritten === before) {
           // 会话没落盘就没有可恢复的东西。这不是故障（例如 turn 在第一次持久化之前就结束），
-          // 但必须记下来：它同时意味着“这次 attempt 重启后只能从零开始”。
+          // 但必须记下来：它同时意味着"这次 attempt 重启后只能从零开始"。
           log.info('session_checkpoint_skipped', {
             event: 'session_checkpoint_skipped',
             session_id: turn.sessionId,
-            reason: 'no session log found on the persistent volume',
+            reason: 'no complete session log record found on the persistent volume',
           })
-        }
-        if (described) {
-          await this.options.db
-            .saveSessionCheckpoint({
-              sessionId: turn.sessionId,
-              sessionRevision,
-              storageLocator: described.storageLocator,
-              contentHash: described.contentHash,
-              eventCount: described.eventCount,
-              // 兼容键 = Harness 包版本 + 会话格式版本，由 sessionCompatibilityKey 统一
-              // 构造。恢复判定用的是同一个函数，两侧不可能再拼出不同形状。
-              harnessVersion: sessionCompatibilityKey({
-                harnessVersion: loadCapabilityContract().harnessVersion,
-                sessionFormatVersion: described.formatVersion,
-              }),
-              profileHash: profile.configHash,
-              // 恢复门禁要比对它。不落库的话，重启后平台无从判断"这段历史是在哪套技能
-              // 目录下产生的"，只能盲目重放。
-              skillCatalogHash,
-            })
-            .catch((err) =>
-              log.error('session_checkpoint_failed', {
-                event: 'session_checkpoint_failed',
-                error_message: redactError(err),
-              }),
-            )
         }
       }
 
@@ -1104,25 +1316,15 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
   }
 
   /**
-   * 判定这次 attempt 是否应当继续一个既有 Session。
+   * 取一个可恢复的 checkpoint 行（不做本地判定）。
    *
-   * 数据库先回答"有没有一个可恢复的 checkpoint"（它同时负责 fencing：已提交、已封存、
-   * 已请求取消的 attempt 一律返回 null），然后本地纯函数回答"这个 checkpoint 现在还能安全
-   * 重放吗"。两步分开是因为它们的依据不同：前者是租约与提交状态，后者是磁盘上的字节。
+   * 与 `evaluateResumeCandidate` 分开是因为两者的时机不同：这一步必须发生在派生
+   * Session / Workspace / 身份路径**之前**（它决定用哪个 attempt 号派生），而本地判定
+   * 需要 profile hash，只能发生在 profile 物化**之后**。
    */
-  private async resolveResume(
-    profileHash: string,
-    policyHash: string,
-    skillCatalogHash: string,
-    log: Logger,
-  ): Promise<{ decision: ResumeDecision; candidate: ResumeCandidate | null }> {
-    if (!this.options.db || !this.options.policy.capabilities.sessionResume) {
-      return {
-        decision: { resume: false, code: null, reason: 'session resume is not enabled' },
-        candidate: null,
-      }
-    }
-    const row = await this.options.db.loadResumableAttempt().catch((err) => {
+  private async loadResumeRow(log: Logger): Promise<Record<string, unknown> | null> {
+    if (!this.options.db || !this.options.policy.capabilities.sessionResume) return null
+    return this.options.db.loadResumableAttempt().catch((err) => {
       // 查询失败不等于"不可恢复"，但也不能因此拒绝启动：按新会话继续，并把原因记下来。
       log.error('load_resumable_attempt_failed', {
         event: 'load_resumable_attempt_failed',
@@ -1130,32 +1332,21 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       })
       return null
     })
-    if (row === null) {
-      return {
-        decision: { resume: false, code: null, reason: 'no resumable checkpoint for this attempt' },
-        candidate: null,
-      }
-    }
+  }
 
-    const candidate: ResumeCandidate = {
-      agentRunId: String(row.agent_run_id ?? ''),
-      rootAgentId: (row.root_agent_id as string | null) ?? null,
-      rootSessionId: (row.root_session_id as string | null) ?? null,
-      sessionId: String(row.session_id ?? ''),
-      sessionRevision: Number(row.session_revision ?? 1),
-      storageLocator: String(row.storage_locator ?? ''),
-      contentHash: String(row.content_hash ?? ''),
-      harnessVersion: String(row.harness_version ?? ''),
-      profileHash: (row.profile_hash as string | null) ?? null,
-      policyHash: (row.policy_hash as string | null) ?? null,
-      resumeCount: Number(row.resume_count ?? 0),
-      // checkpoint 里记的 harness_version 是兼容键，形如 `0.1.5-rc.1/v3`；压缩形态从
-      // locator 后缀判断。
-      compressed: String(row.storage_locator ?? '').endsWith('.zstd'),
-      // V1.6：checkpoint 与 Job 各自的技能目录身份。两者都参与门禁，见 evaluateResume。
-      skillCatalogHash: (row.skill_catalog_hash as string | null) ?? null,
-      jobSkillCatalogHash: (row.job_skill_catalog_hash as string | null) ?? null,
-    }
+  /**
+   * 判定一个候选现在还能不能安全重放。
+   *
+   * 数据库已经回答了"有没有可恢复的 checkpoint"（它同时负责 fencing：已提交、已封存、
+   * 已请求取消的 attempt 一律返回 null）；这里回答"磁盘上的字节和当前配置还允许重放吗"。
+   */
+  private evaluateResumeCandidate(
+    candidate: ResumeCandidate,
+    profileHash: string,
+    policyHash: string,
+    skillCatalogHash: string,
+    log: Logger,
+  ): { decision: ResumeDecision; candidate: ResumeCandidate | null } {
     // 当前 Worker 的兼容键：包版本来自契约，格式版本来自这份日志的文件名。认不出文件名
     // 时给出一个不可能匹配的值，让 evaluateResume 走 SESSION_FORMAT_UNSUPPORTED。
     const candidateFormat = sessionFormatVersionFromPath(candidate.storageLocator)
@@ -1185,6 +1376,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         candidate_skill_catalog_hash: candidate.skillCatalogHash,
         job_skill_catalog_hash: candidate.jobSkillCatalogHash,
         current_skill_catalog_hash: skillCatalogHash,
+        source_agent_attempt: candidate.sourceAgentAttempt ?? null,
       })
     }
     return { decision, candidate }

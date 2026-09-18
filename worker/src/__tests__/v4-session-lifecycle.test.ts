@@ -185,7 +185,9 @@ describe('SessionRegistry single-writer lock', () => {
     const described = reg.describe(slot.locate('session-x')!)
     expect(described).not.toBeNull()
     expect(described!.eventCount).toBe(2)
+    // 文件以换行结尾时"已验证前缀"就是整个文件，所以 hash 与整文件哈希一致。
     expect(described!.contentHash).toBe(hash)
+    expect(described!.prefixBytes).toBe(described!.sizeBytes)
     expect(described!.storageLocator).toBe(path)
     expect(described!.formatVersion).toBe('v3')
     // 会话原文绝不进数据库列：描述里没有 body 字段。
@@ -193,9 +195,39 @@ describe('SessionRegistry single-writer lock', () => {
       'contentHash',
       'eventCount',
       'formatVersion',
+      'prefixBytes',
       'sizeBytes',
       'storageLocator',
     ])
+    slot.release()
+  })
+
+  it('只把"到最后一个换行为止"的前缀纳入 hash：残尾不能进 checkpoint', () => {
+    /*
+     * V1.9 起 checkpoint 每分钟写一次，而 dsh 同时还在追加日志。如果 checkpoint 记的是
+     * 整文件哈希，恢复时磁盘上的文件必然更长、哈希必然不等，于是每一次可以安全恢复的
+     * 重启都会被判成 SESSION_FENCED —— 恢复机器全在，却没有一次能通过。
+     *
+     * 所以描述必须给出"已验证前缀"：到最后一个换行为止。写了一半的最后一行被排除在外，
+     * 它本来也会被 dsh 在恢复时丢弃。
+     */
+    const root = tempRoot('crp-sessions-')
+    const reg = registry({ root })
+    const slot = reg.acquire()
+    const nested = join(slot.sessionRoot, 'slug', 'session-torn')
+    mkdirSync(nested, { recursive: true })
+    const path = join(nested, 'session.v3.jsonl')
+    // 两条完整记录 + 一条被截断的尾巴。
+    writeJsonl(path, [{ seq: 0, kind: 'a' }, { seq: 1, kind: 'b' }], '{"seq":2,"kind":"tor')
+
+    const described = reg.describe(slot.locate('session-torn')!)
+    expect(described).not.toBeNull()
+    expect(described!.eventCount).toBe(2)
+    expect(described!.prefixBytes).toBeLessThan(described!.sizeBytes)
+    const prefix = readFileSync(path).subarray(0, described!.prefixBytes)
+    expect(described!.contentHash).toBe(
+      `sha256:${createHash('sha256').update(prefix).digest('hex')}`,
+    )
     slot.release()
   })
 

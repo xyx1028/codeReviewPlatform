@@ -575,6 +575,13 @@ export class JobsDb {
       profileHash: string | null
       /** V1.6：本次 attempt 实际物化的技能目录身份。恢复门禁按它比对。 */
       skillCatalogHash?: string | null
+      /**
+       * V1.9：`contentHash` 覆盖的前缀字节数。
+       *
+       * 在途 checkpoint 每分钟写一次，而日志同时还在被追加。不带这个值时恢复侧只能拿
+       * 整文件哈希比对，而它必然不等 —— 那就是"恢复机器全在、但没有一次恢复能通过"。
+       */
+      prefixBytes?: number | null
     },
   ): Promise<void> {
     await this.db.rpc<unknown>('save_analysis_session_checkpoint', {
@@ -591,6 +598,7 @@ export class JobsDb {
       p_profile_hash: input.profileHash,
       p_status: 'OPEN',
       p_skill_catalog_hash: input.skillCatalogHash ?? null,
+      p_prefix_bytes: input.prefixBytes ?? null,
     })
   }
 
@@ -623,6 +631,15 @@ export class JobsDb {
       p_task_id: input.taskId,
       p_worker_id: input.workerId,
       p_claim_token: input.claimToken,
+      /*
+       * V1.9：显式开启跨 attempt 恢复。
+       *
+       * 默认 false 是给**还没升级的 Worker** 留的安全网：它们不认识
+       * `source_agent_attempt`，会按自己的 attempt 号派生路径，于是 profile hash 必然
+       * 不匹配，而它们的拒绝路径是 fail closed —— 一份历史 checkpoint 会把这个 task 的
+       * 每一次新 attempt 都毒死。这个 Worker 认识它，所以显式传 true。
+       */
+      p_allow_cross_attempt: true,
     })
     return unwrapMaybeObject<Record<string, unknown>>(data)
   }

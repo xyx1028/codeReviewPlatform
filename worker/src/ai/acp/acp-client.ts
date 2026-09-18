@@ -39,6 +39,15 @@ export interface AcpSessionOptions {
     outcome: string
   }) => void
   /**
+   * Session 一建立（或一恢复）就回调，**在 turn 结束之前**。
+   *
+   * 这个回调存在的理由很具体：checkpoint 原来只在 `session/prompt` 返回之后才写，而一次
+   * turn 要跑 20~40 分钟。容器在这期间被重建时那次 turn 永远不返回，于是 checkpoint 永远
+   * 不写 —— 云端库里整张 analysis_session_checkpoint 只有 1 行就是这么来的，而 Session 卷
+   * 上已经有 400 多个 attempt 目录。拿到 session id 才能定位磁盘上的 JSONL 并周期落盘。
+   */
+  onSessionCreated?: (sessionId: string, resumed: boolean) => void
+  /**
    * 复用一个已存在的 Session 而不是新建。
    *
    * V3 每次只 `session/new`，所以 Worker 重启后必然从零开始。给定 sessionId 时改走
@@ -245,6 +254,14 @@ export async function runSingleAcpTurn(
       const toolNames: string[] = []
       let updates = 0
 
+      // Session id 在 turn 开始前就已知：checkpoint 循环靠它定位磁盘上的 JSONL。
+      // 放在这里而不是 turn 结束后，正是"被 kill 时也有 checkpoint"的前提。
+      try {
+        options.onSessionCreated?.(session.sessionId, false)
+      } catch {
+        // 观测回调绝不影响 turn。
+      }
+
       const onCancel = () => {
         void ctx
           .notify(methods.agent.session.cancel, { sessionId: session.sessionId })
@@ -376,6 +393,13 @@ async function runResumedTurn(
   }
   if (signal.aborted) onCancel()
   signal.addEventListener('abort', onCancel, { once: true })
+
+  // 恢复成功：同样在 turn 之前把 session id 交给调用方，让 checkpoint 循环接着写。
+  try {
+    options.onSessionCreated?.(sessionId, true)
+  } catch {
+    // 观测回调绝不影响 turn。
+  }
 
   let promptError: string | null = null
   try {

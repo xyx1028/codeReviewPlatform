@@ -791,15 +791,112 @@ Session 日志由 `dsh-session-persistence-jsonl` 写在持久卷上，布局是
 
 在第 13 节原则基础上补充 V4 特有步骤。
 
-滚动重启：
+### 15.9.1 发布 / 重启：只有 drain 一条正确路径（V1.9）
 
-1. 停止创建新 Job，关闭 admission（观察 `attempt_admission_closed`）。
-2. 对活跃 Agent Tree 执行 cancel/drain（观察 `attempt_cancel_requested` → `attempt_drained`）。
-3. 逐副本重启，`stop_grace_period: 30s` 内完成 ACP 取消与 lease 释放。
-4. 确认旧 attempt 的进程树、socket、profile、`.writer.lock` 已回收（无 `process_tree_cleanup_failed`）。
-5. 因 Session 卷持久，重启后 Worker 会尝试恢复未提交 Session（`session_writer_lock_reclaimed`
-   属正常接管）；先用 1 个副本跑小 Job 验证恢复链路。
-6. 再恢复目标副本数。
+**禁止对有在途任务的池子直接 `docker compose up -d --force-recreate`。**
+
+这不是风格建议，是一次真实事故的结论：2026-09-17 19:59 一次 `--force-recreate --scale worker=8`
+把 8 个在途 attempt 的容器全部销毁，22 秒后新副本的第一次 `reclaimStaleStoryTaskLeases` 把它们
+判成 `WORKER_LOST`（`analysis_agent_run.finished_at` 全部是同一秒），累计浪费 **47.9 分钟模型时间**
+和对应 token，8 个需求任务全部 `agent_attempt+1` 从零重跑。一次 attempt 20~40 分钟，其中
+99% 是 `model_ms` —— 摧毁它等于把这段钱直接烧掉。
+
+正确顺序（脚本已封装）：
+
+```bash
+# 云端配置池，副本数不变
+npm run worker:release
+# 同时调整副本数
+npm run worker:release -- --scale 8
+# 本地验证池
+bash scripts/worker-drain-restart.sh --project codereviewplatform-local \
+  --env-file .docker/worker.local.env --scale 1 --build
+```
+
+脚本做四件事，每一步都可以人工复现：
+
+1. `touch $WORKSPACE_ROOT/DRAIN`（`worker-jobs` 是多副本共享卷，写一次全池生效）。
+   各副本在 5 秒内停止领取 **Story 任务、Job 准备、Job 收尾、模型连接测试**，
+   日志打 `worker_drain_started`；**在途 attempt 不受影响，继续跑到提交**。
+2. 等每个副本在途归零并写出 `$WORKSPACE_ROOT/DRAINED.<worker-id>`（日志 `worker_drain_complete`）。
+   这个文件是"可以重建了"的唯一判据 —— 不要靠猜、也不要只看 `docker ps`。
+3. 此时才 `up -d --force-recreate`（零在途、零 claim，摧毁不了任何东西）。
+4. 删除 `DRAIN`（日志 `worker_drain_lifted`），新副本开始领取。
+
+超时（默认 3600 秒）时脚本**不会**重建，而是退出并提示继续等待或显式放弃。
+手动观察与干预：
+
+```bash
+C=$(docker ps -q -f label=com.docker.compose.project=codereviewplatform | head -1)
+docker exec $C ls /workspace/jobs            # 看 DRAIN / DRAINED.* / instance lock
+docker exec $C touch /workspace/jobs/DRAIN   # 全池停止领取
+docker exec $C touch /workspace/jobs/DRAIN.worker-<id>   # 只停一个副本
+docker exec $C rm -f /workspace/jobs/DRAIN   # 恢复领取
+```
+
+信号通道（辅助）：`SIGUSR1` 进入 drain、`SIGUSR2` 解除。主通道是 sentinel 文件，因为它
+多副本一次生效、状态可以直接 `ls`，而信号依赖容器里每一层都转发。
+
+### 15.9.2 容器必须让 SIGTERM 到达 node
+
+`docker-compose.worker.yml` 的 entrypoint 是 `exec node dist-worker/index.js`，**不是**
+`exec npm run worker:start`。npm 会再 fork 一层 `sh -c node …`，进程树变成
+`docker-init → npm → sh → node`；SIGTERM 送到 PID 1 后 npm/sh 直接消失，node 变成孤儿并在
+宽限期结束时被 SIGKILL，`process.on('SIGTERM')` 里的 `releaseStoryTaskClaim` 永远不执行。
+
+同一镜像实测对照：
+
+| entrypoint | `docker stop -t 30` | exit code | 日志 |
+|---|---|---|---|
+| `exec npm run worker:start` | 0.115s 返回 | 143 | 没有 `worker_shutdown_requested` |
+| `exec node dist-worker/index.js` | 1.6s 返回 | 0 | `worker_shutdown_requested` → `worker_stopped` |
+
+改回 npm 等于放弃优雅关停（在途任务会退化成 15 分钟租约到期或 90 秒后被接管）。
+
+### 15.9.3 滚动重启（保留原则，配合 drain）
+
+1. 用 15.9.1 的 drain 流程排空，不再"对活跃 Agent Tree 执行 cancel"—— 那会丢弃已完成的工作。
+   只有事故处置需要立刻停机时才用 cancel/drain（`attempt_cancel_requested` → `attempt_drained`）。
+2. 确认旧 attempt 的进程树、socket、profile、`.writer.lock` 已回收（无 `process_tree_cleanup_failed`）。
+3. 因 Session 卷持久，重启后 Worker 会尝试续跑未提交 Session（`session_writer_lock_reclaimed`
+   带 `takeover: true` 属正常跨 attempt 接管）；先用 1 个副本跑小 Job 验证恢复链路。
+4. 再恢复目标副本数。
+
+### 15.9.4 接管判据（V1.9 收紧）
+
+`reclaim_stale_story_task_leases()` 现在要求**两条心跳同时陈旧**才接管：
+
+- `analysis_worker_heartbeat.last_seen_at` 超过 **60 秒**（可用性心跳 5 秒一次）；
+- 且 `analysis_story_task.heartbeat_at` 超过 **90 秒**（租约心跳 30 秒一次）或为空。
+
+旧判据只看第一条、窗口 20 秒（只容 4 次心跳），任何一次 Supabase 抖动或事件循环被同步
+文件遍历卡住都会让一个**正在正常跑模型请求**的副本被判掉线，它手上的 attempt 被接管后
+从零重跑。代价是真实掉线的恢复延迟从 ~20 秒变成 ~90 秒 —— 在 attempt 动辄 20~40 分钟的
+系统里这点延迟没有意义。`WORKER_LOST` 的 `error_message` 现在带上两个观测到的陈旧时长，
+复盘时据此区分"进程真的没了"与"某条心跳链路卡住"。
+
+### 15.9.5 Session 续跑（V1.9）
+
+- checkpoint 现在**每 60 秒**在 turn 进行中落库一次（日志 `session_checkpoint_saved`，
+  `reason=PERIODIC|TURN_END`）。改造前只在 turn 正常返回时写一次，所以被 kill 的 attempt
+  永远没有 checkpoint —— 云端库实测整张 `analysis_session_checkpoint` 只有 1 行，而 Session
+  卷上已有 414 个 attempt 目录、225MB JSONL。
+- checkpoint 记录的是"到最后一个完整记录为止"的**前缀**哈希与 `prefix_bytes`。恢复判定是
+  "磁盘上的文件是否仍以这段前缀开头"：更长是正常的（被杀之前又写了几条），前缀被改动才是
+  `SESSION_FENCED`。
+- 恢复候选可以来自**上一次 attempt**（`source_agent_attempt`）。本次 attempt 的 Session 目录、
+  Workspace cwd、root 身份都改用那个 attempt 号派生，否则 profile hash 必然不匹配。
+- 观测：`agent_attempt_resume_candidate_found` → `agent_attempt_resuming_session` →
+  `attempt_rollup.resumed=true` / `resume_count>0`。
+  拒绝路径：`agent_attempt_resume_declined`；跨 attempt 拒绝额外打
+  `agent_attempt_resume_fell_back_to_new_session`（**不**终止 attempt，避免一份历史 checkpoint
+  把后续每一次 attempt 都毒死）。
+- 安全边界不变：任一 attempt 已 COMMITTED → 永不恢复；旧 attempt 进程还活着握着
+  `.writer.lock` → 不接管，改开新会话；`session_revision` 只前进。
+- **发布顺序是硬约束**：先 `supabase db push`，再重建 Worker。跨 attempt 判定在数据库侧是
+  显式 opt-in（`p_allow_cross_attempt`，默认 false），所以"库已升级、Worker 还没升级"的窗口
+  里旧 Worker 拿不到跨 attempt 候选，不会 fail closed。反过来（Worker 先升级）则续跑暂时
+  不生效，checkpoint 写入会报错并被记为 `session_checkpoint_failed`，不影响业务结果。
 
 扩缩容：
 

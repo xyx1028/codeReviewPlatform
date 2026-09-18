@@ -37,6 +37,24 @@ export interface ResumeCandidate {
   /** 日志是否压缩存储。压缩形态下平台无法逐行验证已提交前缀。 */
   compressed?: boolean
   /**
+   * `contentHash` 覆盖的前缀字节数（V1.9）。
+   *
+   * 有值时判定是"磁盘上的文件是否仍以这段已验证前缀开头"，而不是"整文件哈希是否相等"。
+   * 这是周期性 checkpoint 成立的前提：checkpoint 落库之后日志还会被继续追加，拿整文件
+   * 哈希比对必然不等，于是每一次真实恢复都会被误判成 `SESSION_FENCED`。
+   *
+   * 为空（迁移之前写的 checkpoint、或压缩日志）时回退到整文件比对的旧语义。
+   */
+  prefixBytes?: number | null
+  /**
+   * 这份 checkpoint 属于哪一次 attempt（V1.9）。
+   *
+   * Worker 用它派生 Session 目录、Workspace 目录与 root agent id —— 三者都按
+   * (task, attempt) 确定性派生，不跟着被恢复的 attempt 走的话，profile hash 必然不同，
+   * 恢复门禁必然拒绝。
+   */
+  sourceAgentAttempt?: number | null
+  /**
    * checkpoint 记录的技能目录身份（V1.6）。
    *
    * 可选：迁移之前写的 checkpoint 没有这个字段。缺失时不比对 —— 一个在途 attempt 不该
@@ -191,6 +209,7 @@ export function evaluateResume(input: EvaluateResumeInput): ResumeDecision {
 
   const inspection = inspectSessionLog(candidate.storageLocator, candidate.contentHash, {
     compressed: candidate.compressed,
+    prefixBytes: candidate.prefixBytes ?? null,
   })
   if (!inspection.ok) {
     return { resume: false, code: inspection.code, reason: inspection.reason }
@@ -232,7 +251,7 @@ export type LogInspection =
 export function inspectSessionLog(
   path: string,
   expectedHash: string,
-  options: { compressed?: boolean } = {},
+  options: { compressed?: boolean; prefixBytes?: number | null } = {},
 ): LogInspection {
   if (!existsSync(path)) {
     return {
@@ -250,6 +269,61 @@ export function inspectSessionLog(
       code: V4_ERROR_CODES.SESSION_RECOVERY_FAILED,
       reason: 'the session log could not be read',
     }
+  }
+
+  /*
+   * V1.9：前缀判定。
+   *
+   * checkpoint 现在每分钟写一次，而日志同时还在被 dsh 追加，所以"整文件哈希相等"这条
+   * 判据在真实链路里几乎永远不成立 —— 它会把每一次可以安全恢复的重启都判成
+   * SESSION_FENCED，也就是"恢复机器全都在，但没有一次恢复能通过"。
+   *
+   * 判据改成：文件必须以 checkpoint 记录的那段已验证前缀**开头**。
+   *   * 更长 → 正常（进程被杀之前又写了几条，dsh 自己会处理未写完的尾部）；
+   *   * 前缀被改动或变短 → 我们已经不是唯一写者，仍然 SESSION_FENCED。
+   */
+  const prefixBytes = options.prefixBytes ?? null
+  if (prefixBytes !== null && prefixBytes > 0 && options.compressed !== true) {
+    if (raw.byteLength < prefixBytes) {
+      return {
+        ok: false,
+        code: V4_ERROR_CODES.SESSION_FENCED,
+        reason: `the session log shrank below the checkpointed prefix (${raw.byteLength} < ${prefixBytes})`,
+      }
+    }
+    const prefix = raw.subarray(0, prefixBytes)
+    const prefixHash = `sha256:${createHash('sha256').update(prefix).digest('hex')}`
+    if (prefixHash !== expectedHash) {
+      return {
+        ok: false,
+        code: V4_ERROR_CODES.SESSION_FENCED,
+        reason: 'the checkpointed prefix of the session log changed; another writer touched it',
+      }
+    }
+    // 已提交前缀必须逐行可解析。前缀以换行结尾，所以这里没有"最后一行可能是残尾"的例外。
+    const lines = prefix
+      .toString('utf8')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+    if (lines.length === 0) {
+      return {
+        ok: false,
+        code: V4_ERROR_CODES.SESSION_RECOVERY_FAILED,
+        reason: 'the checkpointed prefix holds no complete record; there is nothing to resume from',
+      }
+    }
+    for (let index = 0; index < lines.length; index++) {
+      try {
+        JSON.parse(lines[index]!)
+      } catch {
+        return {
+          ok: false,
+          code: V4_ERROR_CODES.SESSION_RECOVERY_FAILED,
+          reason: `the session log is corrupt at committed record ${index + 1}; it cannot be replayed safely`,
+        }
+      }
+    }
+    return { ok: true, eventCount: lines.length, verified: true }
   }
 
   const actualHash = `sha256:${createHash('sha256').update(raw).digest('hex')}`

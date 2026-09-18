@@ -80,6 +80,14 @@ export interface RuntimeEventReporterLike {
   snapshot(): RuntimeEventReporterStats
   /** 生成一个 correlation id。绝不使用命令、URL 或路径。 */
   newCorrelationId(): string
+  /**
+   * 更新 fencing 用的 session revision（V1.9）。
+   *
+   * 恢复会让数据库把 run 的 `session_revision` 推进一格，而收敛路径（提交/失败之后
+   * claim 已被烧掉）的事件只能靠 revision 通过 fencing。不同步的话最后一次 flush 会
+   * 以 `RUNTIME_EVENT_FENCE_REJECTED` 整批丢失 —— 恰恰是终态那几条最需要的事件。
+   */
+  setSessionRevision?(revision: number): void
 }
 
 export interface RuntimeEventReporterOptions {
@@ -149,7 +157,7 @@ function defaultSleep(ms: number): Promise<void> {
 export class RuntimeEventReporter implements RuntimeEventReporterLike {
   readonly enabled: boolean
 
-  private readonly target: RuntimeEventTarget
+  private target: RuntimeEventTarget
   private readonly sink: RuntimeEventSink
   private readonly logger: Logger
   private readonly flushMs: number
@@ -191,9 +199,20 @@ export class RuntimeEventReporter implements RuntimeEventReporterLike {
     this.sleep = options.sleep ?? defaultSleep
   }
 
+  /**
+   * 跟上恢复后被数据库推进的 session revision。
+   *
+   * 只前进：一个更小的值只可能来自旧上下文，接受它等于自己制造 fencing 失败。
+   */
+  setSessionRevision(revision: number): void {
+    if (!Number.isInteger(revision)) return
+    const current = this.target.sessionRevision ?? 0
+    if (revision <= current) return
+    this.target = { ...this.target, sessionRevision: revision }
+  }
+
   /** 派生一个共享同一 sink/配置但换 fencing 上下文的 Reporter。 */
-  withTarget(target: RuntimeEventTarget): RuntimeEventReporter {
-    return new RuntimeEventReporter({
+  withTarget(target: RuntimeEventTarget): RuntimeEventReporter {    return new RuntimeEventReporter({
       target,
       sink: this.sink,
       logger: this.logger,
@@ -516,8 +535,9 @@ export class RuntimeEventReporter implements RuntimeEventReporterLike {
 export class NullRuntimeEventReporter implements RuntimeEventReporterLike {
   readonly enabled = false
 
-
   report(): void {}
+
+  setSessionRevision(): void {}
 
   async flush(): Promise<void> {}
 

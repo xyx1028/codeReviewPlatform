@@ -79,9 +79,40 @@ WORKER_ENV_FILE=.docker/worker.env docker compose -p codereviewplatform -f docke
 
 ## 修改后怎么更新
 
+> **先读这一条。** `--force-recreate` 会**销毁正在跑任务的容器**。一次 attempt 是 20~40
+> 分钟模型时间，被销毁之后平台只能 `agent_attempt+1` 从零重跑。2026-09-17 19:59 就是这么
+> 丢掉 8 个在途 attempt、47.9 分钟模型时间和对应 token 的（数据库里 8 行 `WORKER_LOST`）。
+>
+> 所以：**有在途任务时不要手敲 `--force-recreate`，用 drain 脚本。**
+>
+> ```bash
+> # 云端配置 Worker：排空 → 重建 → 恢复领取，一条命令
+> npm run worker:release -- --scale 4
+>
+> # 本地 Worker（顺带重建镜像）
+> bash scripts/worker-drain-restart.sh --project codereviewplatform-local \
+>   --env-file .docker/worker.local.env --scale 1 --build
+>
+> # 只想让池子停止领新任务（不重建），例如准备下班或排查问题
+> npm run worker:drain
+> # 恢复领取
+> npm run worker:drain:lift
+> ```
+>
+> 脚本会先写共享卷上的 `/workspace/jobs/DRAIN`（各副本 5 秒内停止领取，**在途任务继续
+> 跑完**），等到每个副本写出 `/workspace/jobs/DRAINED.<worker-id>` 之后才重建，最后删掉
+> sentinel。想自己看进度：
+>
+> ```bash
+> docker exec $(docker ps -q -f label=com.docker.compose.project=codereviewplatform | head -1) \
+>   ls /workspace/jobs
+> ```
+>
+> 想确认某个副本真的空了，看日志里的 `worker_drain_complete`。
+
 ### 修改了 Worker 代码
 
-第一步：重新构建镜像并更新本地 Worker。
+第一步：重新构建镜像并更新本地 Worker（本地池通常没有在途任务，可以直接重建）。
 
 ```bash
 WORKER_ENV_FILE=.docker/worker.local.env docker compose -p codereviewplatform-local -f docker-compose.worker.yml up -d --build --force-recreate --scale worker=1
@@ -89,13 +120,22 @@ WORKER_ENV_FILE=.docker/worker.local.env docker compose -p codereviewplatform-lo
 
 第二步：使用本地前端和本地 Supabase 验证。
 
-第三步：验证通过后，更新云端配置 Worker。
+第三步：验证通过后，更新云端配置 Worker。**有在途任务就用 drain 脚本**：
+
+```bash
+npm run worker:release -- --scale 4
+```
+
+确认池子空闲时才可以直接重建：
 
 ```bash
 WORKER_ENV_FILE=.docker/worker.env docker compose -p codereviewplatform -f docker-compose.worker.yml up -d --no-build --force-recreate --scale worker=4
 ```
 
 云端配置 Worker 不需要再次 `--build`，因为两套 Worker 都在同一个 Docker Desktop 中，共用刚刚在本地验证过的 `codereviewplatform-worker:latest` 镜像。
+
+如果同时有数据库迁移：**必须先 `supabase db push`，再重建 Worker**。反过来会让新 Worker
+在旧库上写不了 checkpoint（日志 `session_checkpoint_failed`），续跑暂时失效。
 
 ### 只修改了配置文件
 
@@ -111,6 +151,7 @@ WORKER_ENV_FILE=.docker/worker.local.env docker compose -p codereviewplatform-lo
 WORKER_ENV_FILE=.docker/worker.env docker compose -p codereviewplatform -f docker-compose.worker.yml up -d --no-build --force-recreate --scale worker=4
 ```
 
-`--force-recreate` 会重新创建容器。命名卷不会删除，但正在执行的任务会被中断，所以要先等待任务结束。
+`--force-recreate` 会重新创建容器。命名卷不会删除，但**正在执行的任务会被中断并从零重跑**，
+所以要么先用 `npm run worker:drain` 等池子排空，要么直接用 `npm run worker:release`。
 
 配置文件中包含密钥，不要截图、发送或提交 Git。

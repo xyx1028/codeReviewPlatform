@@ -28,6 +28,11 @@ services:
     # 实测（node:24-bookworm-slim）：不加 init 时组内留下 2 个 state=Z 的进程；加了之后组为空。
     init: true
     # Permit ACP cancellation and lease release before Docker sends SIGKILL.
+    #
+    # 这个宽限期只有在 SIGTERM 真的到达 node 时才有意义。见下方 entrypoint 的说明：
+    # 早先的 `exec npm run worker:start` 让信号止步于 npm/sh，实测 `docker stop -t 30`
+    # 在 0.1 秒内以 exit=143 结束，日志里没有 `worker_shutdown_requested` —— 也就是说
+    # 优雅关停从未发生过，在途 attempt 一律靠 20 秒后的 reclaim 被判 WORKER_LOST。
     stop_grace_period: 30s
     # No ports are published: the worker is outbound-only.
     # Defaults to the local ignored file. WORKER_ENV_FILE exists only for
@@ -35,10 +40,26 @@ services:
     env_file:
       - ${WORKER_ENV_FILE:-.docker/worker.env}
     # Derive a stable, unique WORKER_ID from the container id at runtime.
+    #
+    # **必须 `exec node`，不能 `exec npm run worker:start`。**
+    #
+    # npm 会再 fork 一层 `sh -c node ...`，于是容器里的进程树是
+    # `docker-init → npm → sh → node`。SIGTERM 送给 PID 1 之后 tini 只转发给 npm，
+    # npm/sh 这两层在收到信号后直接消失，node 变成孤儿并在宽限期结束时被 SIGKILL ——
+    # `process.on('SIGTERM')` 里的 `releaseStoryTaskClaim` 永远没有机会执行。
+    #
+    # 实测对比（同一镜像、同一 env）：
+    #   * `exec npm run worker:start`：`docker stop -t 30` 0.115s 返回，exit=143，
+    #     日志里没有 `worker_shutdown_requested`；
+    #   * `exec node dist-worker/index.js`：`docker stop -t 30` 打印
+    #     `worker_shutdown_requested` → `worker_stopped`，exit=0。
+    #
+    # 这就是"每次发布都把在途 attempt 变成 WORKER_LOST 并从零重跑"的直接原因之一，
+    # 所以这里绕开 npm 直接起 node。dist-worker/index.js 由 Dockerfile 构建产出。
     entrypoint:
       - /bin/sh
       - -c
-      - 'export WORKER_ID="worker-$(hostname)"; exec npm run worker:start'
+      - 'export WORKER_ID="worker-$(hostname)"; exec node dist-worker/index.js'
     environment:
       # ---- V4 运行目录 ---------------------------------------------------
       # 与 Dockerfile.worker 的默认值保持一致，显式写出便于运维核对。

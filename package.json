@@ -24,7 +24,10 @@
     "monitor:findings": "node scripts/runtime-report.mjs findings",
     "proxy:model-vpn": "node scripts/model-vpn-proxy.mjs",
     "proxy:model-vpn:install": "bash scripts/install-model-vpn-proxy.sh",
-    "proxy:model-vpn:uninstall": "bash scripts/uninstall-model-vpn-proxy.sh"
+    "proxy:model-vpn:uninstall": "bash scripts/uninstall-model-vpn-proxy.sh",
+    "worker:release": "bash scripts/worker-drain-restart.sh",
+    "worker:drain": "bash scripts/worker-drain-restart.sh --drain-only",
+    "worker:drain:lift": "bash scripts/worker-drain-restart.sh --lift-only"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",

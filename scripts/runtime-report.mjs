@@ -452,6 +452,10 @@ function renderTrend(result) {
     '> 汇总表不随事件清理，所以这里能跨月比较。`unattributed_pct` 越高说明插桩盲区越大，',
     '> 这份对比的可信度也越低。',
     '',
+    '> 判读顺序：先看**每次模型请求 p50** —— 它只反映模型端速度，平台改不动它。',
+    '> 它正常而 wall 很大时，再看"模型请求次数"（编排来回太多）和"每次请求输入 token"',
+    '> （上下文膨胀）。三者相乘约等于 `model_ms_union`，所以任何一次变慢都能落到具体一项上。',
+    '',
   ]
   for (const group of result.groups ?? []) {
     lines.push(`## ${JSON.stringify(group.group ?? {})}`)
@@ -466,6 +470,17 @@ function renderTrend(result) {
           ['wall_ms p50', ms(group.wall_ms_p50)],
           ['wall_ms p95', ms(group.wall_ms_p95)],
           ['wall_ms max', ms(group.wall_ms_max)],
+          // 下面三行是"为什么这么慢"的分解：单请求耗时 × 请求次数 ≈ model_ms_union。
+          // 模型端慢、上下文膨胀、来回太多，三种病因看的是不同的那一行。
+          ['**每次模型请求 p50**', ms(group.model_ms_per_request_p50)],
+          ['每次模型请求 p95', ms(group.model_ms_per_request_p95)],
+          ['模型请求次数 p50', String(group.model_requests_p50 ?? '—')],
+          ['每次请求输入 token p50', String(
+            group.input_tokens_per_request_p50 === null ||
+            group.input_tokens_per_request_p50 === undefined
+              ? '—'
+              : Math.round(Number(group.input_tokens_per_request_p50)),
+          )],
           ['setup_ms p50', ms(group.setup_ms_p50)],
           ['model_ms_union p50', ms(group.model_ms_union_p50)],
           ['tool_ms_union p50', ms(group.tool_ms_union_p50)],

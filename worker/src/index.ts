@@ -7,6 +7,9 @@
  * no long-lived per-job state.
  */
 
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { ACP_PROFILE_NAME } from './ai/acp/profile-materializer.js'
 import type { CommitReviewInput } from './ai/control/attempt-control-broker.js'
 import type { AttemptEndReason } from './ai/control/attempt-tree-controller.js'
@@ -60,8 +63,42 @@ function sleep(ms: number): Promise<void> {
 export interface WorkerRuntime {
   /** Stop claiming work, cancel active attempts, and release their leases. */
   stop(): Promise<void>
+  /**
+   * 进入 drain：停止领取任何新工作，但**不中断**在途 attempt，也不退出进程。
+   *
+   * 这是发布/重启前唯一安全的动作。`stop()` 会 abort 在途 attempt —— 一个跑了 30 分钟、
+   * 烧了 20 次模型请求的 attempt 被 abort 之后只能从零重跑（`agent_attempt+1`，新 run，
+   * 恢复候选为空），所以"先 drain 到零在途，再重建容器"必须是发布流程的第一步。
+   */
+  drain(reason: DrainSource): void
+  /** 退出 drain，恢复领取。发布完成后由脚本删除 sentinel 文件触发。 */
+  undrain(): void
+  /** 观测：是否在 drain、在途数量、是否已经排空。 */
+  drainStatus(): { draining: boolean; active: number; drained: boolean }
   ranOnce: Promise<void>
 }
+
+/** drain 的触发来源。审计里必须分得开：文件是发布流程，信号是人手动介入。 */
+export type DrainSource = 'SENTINEL_FILE' | 'SIGNAL' | 'API'
+
+/**
+ * 全副本 drain 的 sentinel 文件名（位于 `WORKSPACE_ROOT`，即共享的 worker-jobs 卷）。
+ *
+ * 用文件而不是信号做主通道：容器里 PID 1 是 tini，node 是它的子进程，`docker kill -s USR1`
+ * 依赖每一层都转发信号 —— 而这条链路已经被证明会吞掉 SIGTERM。文件放在多副本共享的
+ * named volume 上，所以 `docker exec <任意副本> touch /workspace/jobs/DRAIN` 一次就能让
+ * 整个池子停止领取，且状态可以用 `ls` 直接看，不需要相信任何日志。
+ */
+export const DRAIN_SENTINEL = 'DRAIN'
+/** 单副本 drain：`DRAIN.<WORKER_ID>`。 */
+export function workerDrainSentinel(workerId: string): string {
+  return `${DRAIN_SENTINEL}.${workerId}`
+}
+/** 已排空标记：`DRAINED.<WORKER_ID>`。发布脚本据此判断"可以重建了"。 */
+export function workerDrainedMarker(workerId: string): string {
+  return `DRAINED.${workerId}`
+}
+
 
 /** Prepare all repositories at the exact SHAs frozen on the claimed job. */
 export async function prepareTaskRepositories(
@@ -514,10 +551,19 @@ export async function runModelConnectivityTest(
   }
 }
 
-/** Start the polling worker. */
-export function startWorker(config: WorkerConfig): WorkerRuntime {
+/**
+ * Start the polling worker.
+ *
+ * `overrides` 只服务测试：drain 的正确性必须能在没有真实 Supabase 的情况下断言，
+ * 而 drain 的判据（"这个副本手上还有几个 claim"）只在轮询循环内部可见。生产调用方
+ * 一个参数都不传，行为与改造前完全一致。
+ */
+export function startWorker(
+  config: WorkerConfig,
+  overrides: { jobsDb?: JobsDb } = {},
+): WorkerRuntime {
   const logger = rootLogger.child({ worker_id: config.workerId })
-  const jobsDb = new JobsDb(new SupabaseDbClient(config))
+  const jobsDb = overrides.jobsDb ?? new JobsDb(new SupabaseDbClient(config))
   /*
    * 共享只读 Skill Cache 与 service-role 下载通道（V1.6）。
    *
@@ -530,6 +576,112 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
   let stopped = false
   const shutdownController = new AbortController()
   let stopPromise: Promise<void> | null = null
+
+  /*
+   * ---- drain 状态机 -------------------------------------------------------
+   *
+   * 两个来源各记一份，因为它们的解除方式不同：sentinel 文件由发布脚本删除，信号由人
+   * 再发一次 SIGUSR2 解除。任一为真即处于 drain。
+   */
+  let drainBySentinel = false
+  let drainBySignal = false
+  let drainedMarkerWritten = false
+  let drainCompleteLogged = false
+  const draining = (): boolean => drainBySentinel || drainBySignal
+  const activeAttempts = (): number => pool.activeCount + inFlight.size
+
+  const sentinelPaths = (): string[] => [
+    join(config.workspaceRoot, DRAIN_SENTINEL),
+    join(config.workspaceRoot, workerDrainSentinel(config.workerId)),
+  ]
+  const drainedMarkerPath = (): string =>
+    join(config.workspaceRoot, workerDrainedMarker(config.workerId))
+
+  /** 写/删"已排空"标记。发布脚本只信这个文件，不解析日志。 */
+  const syncDrainedMarker = (drained: boolean): void => {
+    try {
+      if (drained && !drainedMarkerWritten) {
+        mkdirSync(config.workspaceRoot, { recursive: true })
+        writeFileSync(
+          drainedMarkerPath(),
+          `${JSON.stringify({
+            worker_id: config.workerId,
+            drained_at: new Date().toISOString(),
+            pid: process.pid,
+          })}\n`,
+          { mode: 0o600 },
+        )
+        drainedMarkerWritten = true
+      } else if (!drained && drainedMarkerWritten) {
+        rmSync(drainedMarkerPath(), { force: true })
+        drainedMarkerWritten = false
+      }
+    } catch (error) {
+      logger.error('worker_drain_marker_failed', {
+        event: 'worker_drain_marker_failed',
+        error_message: redactError(error),
+      })
+    }
+  }
+
+  const setDrain = (source: DrainSource, requested: boolean): void => {
+    const before = draining()
+    if (source === 'SENTINEL_FILE') drainBySentinel = requested
+    else drainBySignal = requested
+    const after = draining()
+    if (after === before) return
+    if (after) {
+      drainCompleteLogged = false
+      logger.info('worker_drain_started', {
+        event: 'worker_drain_started',
+        drain_source: source,
+        // 在途数量是运维唯一关心的数字：它归零之前不能重建容器。
+        active_attempts: activeAttempts(),
+      })
+    } else {
+      logger.info('worker_drain_lifted', {
+        event: 'worker_drain_lifted',
+        drain_source: source,
+      })
+      syncDrainedMarker(false)
+    }
+  }
+
+  /**
+   * 清掉上一条命的"已排空"标记。
+   *
+   * 同一个 WORKER_ID 会在容器重启后复用（它派生自容器 hostname），而一个刚起来的副本
+   * 显然不是"已排空"。不清的后果很具体：发布脚本会把这个残留标记当成"这个副本已经空了，
+   * 可以重建"，于是又一次在途 attempt 被摧毁。
+   */
+  try {
+    rmSync(join(config.workspaceRoot, workerDrainedMarker(config.workerId)), { force: true })
+  } catch {
+    // 清不掉不致命：下一次 syncDrainedMarker 会覆盖它。
+  }
+
+  /** 观察 sentinel 文件并推进 drained 标记。每 5 秒随可用性心跳一起跑。 */  const refreshDrainState = (): void => {
+    let present = false
+    try {
+      present = sentinelPaths().some((path) => existsSync(path))
+    } catch {
+      // 文件系统瞬时错误不改变当前状态：宁可维持现状也不要在发布中途自己退出 drain。
+      return
+    }
+    if (present !== drainBySentinel) setDrain('SENTINEL_FILE', present)
+
+    const drained = draining() && activeAttempts() === 0
+    syncDrainedMarker(drained)
+    if (drained && !drainCompleteLogged) {
+      drainCompleteLogged = true
+      logger.info('worker_drain_complete', {
+        event: 'worker_drain_complete',
+        // 这一行就是"这个副本现在可以安全重建"的判据。
+        active_attempts: 0,
+      })
+    }
+    if (!drained) drainCompleteLogged = false
+  }
 
   const pool = new SlotPool(config.workerStoryConcurrency)
   const inFlight = new Set<Promise<void>>()
@@ -616,6 +768,9 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
           policy_version: V4_POLICY_VERSION,
           harness_version: loadCapabilityContract().harnessVersion,
           capability_contract_hash: contractHash(),
+          // drain 状态进心跳：调度中心页面据此区分"忙"和"正在排空、马上要重建"。
+          draining: draining(),
+          active_attempts: activeAttempts(),
         },
         signal: controller.signal,
       })
@@ -627,8 +782,11 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
     }
   }
 
+  void refreshDrainState()
   void reportAvailability()
   const availabilityHeartbeat = setInterval(() => {
+    // drain 判定必须与心跳同频：发布脚本 touch 完 sentinel 之后最多 5 秒就停止领取。
+    refreshDrainState()
     void reportAvailability()
   }, 5000)
 
@@ -704,22 +862,32 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
     let first = true
     while (!stopped) {
       try {
-        await tryPrepareOneJob()
+        // drain 中一律不领取任何新工作：Job 准备、Story 任务、Job 收尾都不领。
+        // 语义收得这么紧是刻意的 —— "drained" 必须等价于"这个副本手上没有任何 claim"，
+        // 否则发布脚本无法用一个布尔值判断能不能重建容器。
+        refreshDrainState()
+        const isDraining = draining()
 
-        await jobsDb.reclaimStaleStoryTaskLeases()
+        if (!isDraining) {
+          await tryPrepareOneJob()
+
+          await jobsDb.reclaimStaleStoryTaskLeases()
+        }
 
         // 孤儿回收与保留期。放在轮询里而不是靠外部 cron：被 SIGKILL 的 attempt 留下的
         // Workspace 里有源码，而 Session 卷写满会让所有在跑的 attempt 一起失败。
+        // drain 期间照常做：它不持有任何 claim，而且正是重建前清理磁盘的好时机。
         runPeriodicCleanup()
 
         let claimedAny = false
-        while (!stopped && pool.availableSlots > 0) {
+        while (!stopped && !draining() && pool.availableSlots > 0) {
           const task = await jobsDb.claimNextStoryTask(
             config.workerId,
             config.storyTaskLeaseSeconds,
           )
           if (!task) break
-          if (stopped) {
+          if (stopped || draining()) {
+            // 领到之后才发现要 drain：立刻还回去，而不是"既然领了就跑完"。
             await jobsDb.releaseStoryTaskClaim({
               taskId: task.id,
               workerId: config.workerId,
@@ -742,12 +910,14 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
             .finally(() => {
               release()
               inFlight.delete(run)
+              // 在途归零的瞬间就把 drained 标记写出来，不必等下一次心跳。
+              refreshDrainState()
             })
           inFlight.add(run)
         }
 
         if (!claimedAny) {
-          const finalized = await tryFinalize()
+          const finalized = isDraining ? false : await tryFinalize()
           if (!finalized) {
             if (inFlight.size > 0) {
               await Promise.race([...inFlight, sleep(config.pollIntervalMs)])
@@ -779,6 +949,10 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
   const modelTestLoop = async (): Promise<void> => {
     while (!stopped) {
       try {
+        if (draining()) {
+          await sleep(config.pollIntervalMs)
+          continue
+        }
         const claim = await jobsDb.claimNextModelConnectivityTest(
           config.workerId,
           config.modelConnectivityTestLeaseSeconds,
@@ -827,6 +1001,19 @@ export function startWorker(config: WorkerConfig): WorkerRuntime {
       ]).then(() => undefined)
       return stopPromise
     },
+    drain(reason: DrainSource): void {
+      setDrain(reason === 'SENTINEL_FILE' ? 'SENTINEL_FILE' : reason, true)
+      refreshDrainState()
+    },
+    undrain(): void {
+      setDrain('SIGNAL', false)
+      setDrain('API', false)
+      refreshDrainState()
+    },
+    drainStatus() {
+      const active = activeAttempts()
+      return { draining: draining(), active, drained: draining() && active === 0 }
+    },
     ranOnce,
   }
 }
@@ -869,6 +1056,26 @@ if (isMain) {
     }
     process.on('SIGTERM', shutdown)
     process.on('SIGINT', shutdown)
+    /*
+     * SIGUSR1 / SIGUSR2：手动进入 / 退出 drain。
+     *
+     * 主通道是 `WORKSPACE_ROOT/DRAIN` sentinel 文件（发布脚本用它，多副本一次生效，
+     * 而且状态能用 `ls` 看到）。信号只是给"我现在就想让这一个副本停止领取"留的口子，
+     * 而且必须直接送给 node 进程（容器里 `docker kill -s USR1` 依赖 tini 转发，
+     * 见 docker-compose.worker.yml 里 entrypoint 的说明）。
+     */
+    process.on('SIGUSR1', () => {
+      rootLogger.info('worker_drain_signal_received', {
+        event: 'worker_drain_signal_received',
+      })
+      runtime.drain('SIGNAL')
+    })
+    process.on('SIGUSR2', () => {
+      rootLogger.info('worker_drain_lift_signal_received', {
+        event: 'worker_drain_lift_signal_received',
+      })
+      runtime.undrain()
+    })
   } catch (error) {
     if (error instanceof WorkerAlreadyRunningError) {
       rootLogger.error('worker_already_running', {
