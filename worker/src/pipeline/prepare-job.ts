@@ -8,7 +8,13 @@
  */
 
 import { REPOSITORIES, type BranchName } from '../git/repositories.js'
-import { prepareRepository } from '../git/prepare.js'
+import { prepareRepository, type PreparedRepository } from '../git/prepare.js'
+import { collectRepositoryHistory } from '../git/story-history.js'
+import {
+  GitLabReadonlyClient,
+  type RepositoryMergeRequestEnrichment,
+} from '../git/gitlab-readonly-client.js'
+import { buildStoryScopes } from './story-scope.js'
 import type { JobsDb, PreparationClaim } from '../db/jobs.js'
 import type { WorkerConfig } from '../config.js'
 import { rootLogger, type Logger } from '../logger.js'
@@ -34,6 +40,8 @@ export async function prepareJob(
    * `analysis_job.worker_id` + `status = 'PREPARING_CODE'`（方案 §6.4）。
    */
   runtimeEvents: RuntimeEventReporterLike = new NullRuntimeEventReporter(),
+  historyCollector: typeof collectRepositoryHistory = collectRepositoryHistory,
+  gitlabClient?: Pick<GitLabReadonlyClient, 'collectRepositoryMergeRequests'>,
 ): Promise<void> {
   const jobId = claim.job.id
   const branch = claim.job.requested_branch as BranchName
@@ -46,6 +54,13 @@ export async function prepareJob(
     commit_sha: string
     commit_subject: string | null
   }> = []
+  const preparedRepositories: PreparedRepository[] = []
+  const headResolvedAt = new Map<string, string>()
+  const persistedMergeRequests: RepositoryMergeRequestEnrichment[] = []
+  const mrClient = gitlabClient ?? new GitLabReadonlyClient({
+    baseUrl: config.gitlabBaseUrl,
+    apiToken: config.gitlabApiToken,
+  })
 
   try {
     for (const repo of REPOSITORIES) {
@@ -79,6 +94,8 @@ export async function prepareJob(
         durationMs: Date.now() - start,
         payload: { repository_name: repo.name, duration_ms: Date.now() - start },
       })
+      preparedRepositories.push(prepared)
+      headResolvedAt.set(repo.name, new Date().toISOString())
       snapshots.push({
         repository_name: prepared.repository,
         requested_branch: branch,
@@ -94,15 +111,131 @@ export async function prepareJob(
       })
     }
 
-    // saveRepositorySnapshots 会把 Job 从 PREPARING_CODE 推进到 PROCESSING；JOB scope
-    // fencing 只在 PREPARING_CODE 期间接受仓库事件，所以必须先 flush。否则最后一个仓库
-    // 的 COMPLETED 会在状态切换后被 RUNTIME_EVENT_FENCE_REJECTED 丢掉。
+    // v1 完全保持旧路径：一次 RPC 保存四仓快照并推进 PROCESSING。
+    if ((claim.job.analysis_context_version ?? 1) === 1) {
+      await runtimeEvents.flush().catch(() => undefined)
+      await jobsDb.saveRepositorySnapshots(jobId, config.workerId, snapshots)
+      log.info('repositories_snapshots_saved', {
+        event: 'repositories_snapshots_saved',
+        count: snapshots.length,
+      })
+      return
+    }
+
+    // V2 的顺序不可交换：四仓 HEAD 全部固定 → 保存 snapshots（数据库进入
+    // PREPARING_SCOPE 并冻结第一代输入）→ 读取同一冻结输入 → 本地 Git 历史/身份匹配
+    // → 全部 manifest → 全部 Story scope → 原子 finalize。中途任何失败都不能把 Job
+    // 推进 PROCESSING，也不能退化成 v1。
     await runtimeEvents.flush().catch(() => undefined)
     await jobsDb.saveRepositorySnapshots(jobId, config.workerId, snapshots)
+    const frozen = await jobsDb.freezeAnalysisJobScopeInputs(jobId, config.workerId)
+    if (!Array.isArray(frozen.stories) || frozen.stories.length !== claim.job.total_stories) {
+      throw Object.assign(
+        new Error('frozen scope input payload does not contain every story task'),
+        { code: 'ANALYSIS_SCOPE_INPUTS_MISSING' },
+      )
+    }
+    const histories = []
+    for (const prepared of preparedRepositories) {
+      const history = await historyCollector({
+        prepared,
+        cacheRoot: config.codeCacheRoot,
+        branch,
+        headResolvedAt: headResolvedAt.get(prepared.repository)!,
+        windowDays: claim.job.commit_window_days ?? 21,
+        identityMatcher: (authors) => jobsDb.matchAnalysisGitIdentities(authors),
+        prepareOptions: {
+          cacheRoot: config.codeCacheRoot,
+          authMode: config.gitAuthMode,
+          gitlabBaseUrl: config.gitlabBaseUrl,
+          deployUser: config.gitlabDeployUser,
+          deployToken: config.gitlabDeployToken,
+          timeoutMs,
+        },
+        previousBaseSha: frozen.previous_repository_heads?.[prepared.repository] ?? null,
+      })
+      histories.push(history)
+      await jobsDb.saveAnalysisRepositoryCommitManifest({
+        jobId,
+        workerId: config.workerId,
+        repositoryName: prepared.repository,
+        manifest: history.manifest as unknown as Record<string, unknown>,
+        manifestHash: history.manifestHash,
+      })
+      log.info('repository_history_manifest_saved', {
+        event: 'repository_history_manifest_saved',
+        repository: prepared.repository,
+        enumeration_status: history.manifest.enumeration_status,
+        range_source: history.manifest.range_source,
+        range_fallback_reason: history.manifest.range_fallback_reason,
+        commit_count: history.manifest.commit_count,
+        deepen_count: history.deepenCount,
+      })
 
-    log.info('repositories_snapshots_saved', {
-      event: 'repositories_snapshots_saved',
-      count: snapshots.length,
+      // MR metadata is an optional enhancement. API and persistence failures never invalidate
+      // the already-frozen Git manifest, and no credential is copied into logs or Workspace.
+      let enrichment: RepositoryMergeRequestEnrichment
+      try {
+        enrichment = await mrClient.collectRepositoryMergeRequests({
+          repository: prepared.repository,
+          targetBranch: branch,
+          rangeStartAt: history.manifest.range_start_at,
+          rangeEndAt: history.manifest.range_end_at,
+          storyCodes: frozen.stories.map((story) => story.story_code),
+        })
+      } catch {
+        enrichment = {
+          repository: prepared.repository,
+          status: 'FAILED',
+          errorCode: 'MR_METADATA_REQUEST_FAILED',
+          mergeRequests: [],
+        }
+      }
+      try {
+        await jobsDb.saveAnalysisRepositoryMergeRequests({
+          jobId,
+          workerId: config.workerId,
+          repositoryName: prepared.repository,
+          status: enrichment.status,
+          errorCode: enrichment.errorCode,
+          mergeRequests: enrichment.mergeRequests,
+        })
+        persistedMergeRequests.push(enrichment)
+        log.info('repository_mr_enrichment_saved', {
+          event: 'repository_mr_enrichment_saved',
+          repository: prepared.repository,
+          status: enrichment.status,
+          error_code: enrichment.errorCode,
+          merge_request_count: enrichment.mergeRequests.length,
+        })
+      } catch (mrPersistenceError) {
+        log.warn('repository_mr_enrichment_persistence_failed', {
+          event: 'repository_mr_enrichment_persistence_failed',
+          repository: prepared.repository,
+          error_code: (mrPersistenceError as { code?: string })?.code ?? 'MR_METADATA_PERSISTENCE_FAILED',
+        })
+      }
+    }
+    const built = buildStoryScopes({
+      stories: frozen.stories,
+      identities: frozen.identities ?? [],
+      histories,
+      mergeRequests: persistedMergeRequests,
+      rulesetHash: frozen.ruleset_hash,
+      generation: 1,
+    })
+    await jobsDb.saveAnalysisStoryScopes({
+      jobId,
+      workerId: config.workerId,
+      algorithmVersion: built.algorithmVersion,
+      scopes: built.scopes as unknown as Array<Record<string, unknown>>,
+      scopeCatalogHash: built.scopeCatalogHash,
+    })
+    await jobsDb.finalizeAnalysisStoryScope(jobId, config.workerId, 1)
+    log.info('analysis_story_scopes_finalized', {
+      event: 'analysis_story_scopes_finalized',
+      scope_count: built.scopes.length,
+      degraded_count: built.scopes.filter((scope) => scope.status === 'DEGRADED').length,
     })
   } catch (err) {
     const code = (err as { code?: string })?.code ?? 'JOB_INTERNAL_ERROR'

@@ -6,7 +6,9 @@
  * resolves every read against a commit object rather than a checkout.
  */
 
+import { createHash } from 'node:crypto'
 import { assertRepositoryName, type RepositoryName } from '../../git/repositories.js'
+import { runCommand } from '../../git/run.js'
 import {
   assertSafePathGlob,
   containsTraversal,
@@ -78,6 +80,37 @@ export interface SnapshotFindResult {
   total: number
 }
 
+export const STORY_DIFF_LIMITS = {
+  maxArchiveBytes: 10 * 1024 * 1024,
+  maxPageBytes: 36 * 1024,
+  maxPageLines: 200,
+  maxFilesReturned: 20,
+  maxPathsPerDiff: 500,
+} as const
+
+export interface StoryCommitDiffFile {
+  path: string
+  additions: number | null
+  deletions: number | null
+  binary: boolean
+}
+
+export interface StoryCommitDiffResult {
+  repository: RepositoryName
+  commitSha: string
+  status: 'AVAILABLE' | 'BINARY' | 'DIFF_TOO_LARGE'
+  files: StoryCommitDiffFile[]
+  filesTotal: number
+  filesTruncated: boolean
+  blockedFileCount: number
+  content: string
+  diffLines: number
+  bytesReturned: number
+  truncated: boolean
+  nextOffset: number | null
+  archiveSha256: string | null
+}
+
 export class SnapshotStore {
   private readonly repos = new Map<RepositoryName, SnapshotRepoRef>()
 
@@ -115,6 +148,8 @@ export class SnapshotStore {
     query: string
     pathGlob?: string
     maxResults?: number
+    /** Trusted Broker-only restriction; never copy this field from a request body. */
+    allowedPaths?: readonly string[]
   }): Promise<SnapshotSearchResult> {
     const ref = this.ref(input.repository)
     const query = this.assertQuery(input.query)
@@ -122,10 +157,21 @@ export class SnapshotStore {
       input.maxResults ?? SNAPSHOT_LIMITS.maxSearchHits,
       SNAPSHOT_LIMITS.maxSearchHits,
     )
-    const pathSpecs = this.buildPathSpecs(input.pathGlob)
+    const requestedMatcher = input.pathGlob === undefined
+      ? null
+      : globToRegExp(assertSafePathGlob(input.pathGlob))
+    const scopedPaths = input.allowedPaths?.map((path) => this.assertPath(path))
+    // Literal pathspecs prevent glob metacharacters in a frozen filename from
+    // widening PRIMARY access. An empty trusted set intentionally matches none.
+    if (scopedPaths?.length === 0) return { hits: [], truncated: false, total: 0 }
+    const pathSpecs = scopedPaths === undefined
+      ? this.buildPathSpecs(input.pathGlob)
+      : scopedPaths.map((path) => `:(literal)${path}`)
 
     const raw = await grepTree(this.ctx(ref), query, pathSpecs, max)
-    const allowed = raw.filter((hit) => !isBlockedPath(hit.filePath))
+    const allowed = raw.filter((hit) =>
+      !isBlockedPath(hit.filePath) && (requestedMatcher === null || requestedMatcher.test(hit.filePath)),
+    )
     const { items, truncated, totalBeforeTruncation } = truncateList(allowed, max)
     return {
       hits: items.map((hit) => ({
@@ -143,6 +189,8 @@ export class SnapshotStore {
     repository: string
     pattern: string
     maxResults?: number
+    /** Trusted Broker-only restriction; never copy this field from a request body. */
+    allowedPaths?: readonly string[]
   }): Promise<SnapshotFindResult> {
     const ref = this.ref(input.repository)
     const pattern = assertSafePathGlob(input.pattern)
@@ -152,8 +200,11 @@ export class SnapshotStore {
     )
 
     const matcher = globToRegExp(pattern)
+    const scopedPaths = input.allowedPaths === undefined
+      ? null
+      : new Set(input.allowedPaths.map((path) => this.assertPath(path)))
     const paths = (await listTreePaths(this.ctx(ref))).filter(
-      (path) => !isBlockedPath(path) && matcher.test(path),
+      (path) => !isBlockedPath(path) && matcher.test(path) && (scopedPaths === null || scopedPaths.has(path)),
     )
     const { items, truncated, totalBeforeTruncation } = truncateList(paths, max)
     return {
@@ -231,6 +282,146 @@ export class SnapshotStore {
       maxResults: max,
       pathSpecs: this.buildPathSpecs(input.pathGlob),
     })
+  }
+
+  /**
+   * Read a real Git diff for a frozen story candidate.
+   *
+   * `candidateCommit` is supplied only by the Broker from the frozen scope. The
+   * model never controls a revision argument. The resolved object must also be
+   * reachable from the repository HEAD pinned for this job.
+   */
+  async readStoryCommitDiff(input: {
+    repository: string
+    candidateCommit: string
+    filePath?: string
+    offset?: number
+  }): Promise<StoryCommitDiffResult> {
+    const ref = this.ref(input.repository)
+    if (!/^[0-9a-f]{7,40}$/.test(input.candidateCommit)) {
+      throw new SnapshotError('the frozen candidate has an invalid commit id', 'STORY_CANDIDATE_INVALID')
+    }
+    const offset = input.offset ?? 0
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new SnapshotError('diff cursor is invalid', 'STORY_DIFF_CURSOR_INVALID')
+    }
+
+    let commitSha: string
+    try {
+      const resolved = await runCommand('git', ['rev-parse', '--verify', `${input.candidateCommit}^{commit}`], {
+        cwd: ref.gitDir,
+        timeoutMs: this.timeoutMs,
+      })
+      commitSha = assertCommitSha(resolved.stdout.trim())
+      if (!commitSha.startsWith(input.candidateCommit)) throw new Error('candidate prefix mismatch')
+      await runCommand('git', ['merge-base', '--is-ancestor', commitSha, ref.commitSha], {
+        cwd: ref.gitDir,
+        timeoutMs: this.timeoutMs,
+      })
+    } catch {
+      throw new SnapshotError(
+        'the frozen candidate commit is missing or not reachable from the pinned repository head',
+        'STORY_CANDIDATE_NOT_REACHABLE',
+      )
+    }
+
+    const stats = await runCommand(
+      'git',
+      ['diff-tree', '--root', '--no-commit-id', '--numstat', '-r', '--no-renames', '-z', commitSha],
+      { cwd: ref.gitDir, timeoutMs: this.timeoutMs, maxBuffer: 2 * 1024 * 1024 },
+    )
+    if (stats.stdoutTruncated) {
+      return storyDiffTooLarge(ref.name, commitSha)
+    }
+    const allFiles = parseStoryDiffNumstat(stats.stdout)
+    const blockedFileCount = allFiles.filter((file) => isBlockedPath(file.path)).length
+    const allowedFiles = allFiles.filter((file) => !isBlockedPath(file.path))
+
+    let selectedFiles = allowedFiles
+    if (input.filePath !== undefined) {
+      const path = assertStoryDiffPath(input.filePath)
+      if (isBlockedPath(path)) {
+        throw new SnapshotError(`blocked path: ${path}`, 'SNAPSHOT_PATH_BLOCKED')
+      }
+      selectedFiles = allowedFiles.filter((file) => file.path === path)
+      if (selectedFiles.length === 0) {
+        throw new SnapshotError(
+          `path is not changed by this frozen candidate: ${path}`,
+          'STORY_DIFF_PATH_NOT_CHANGED',
+        )
+      }
+    }
+
+    if (selectedFiles.length > STORY_DIFF_LIMITS.maxPathsPerDiff) {
+      return {
+        ...storyDiffTooLarge(ref.name, commitSha),
+        files: selectedFiles.slice(0, STORY_DIFF_LIMITS.maxFilesReturned),
+        filesTotal: selectedFiles.length,
+        filesTruncated: true,
+        blockedFileCount,
+      }
+    }
+    if (selectedFiles.length === 0) {
+      return {
+        repository: ref.name,
+        commitSha,
+        status: 'AVAILABLE',
+        files: [],
+        filesTotal: 0,
+        filesTruncated: false,
+        blockedFileCount,
+        content: '',
+        diffLines: 0,
+        bytesReturned: 0,
+        truncated: false,
+        nextOffset: null,
+        archiveSha256: `sha256:${createHash('sha256').update('').digest('hex')}`,
+      }
+    }
+
+    const diff = await runCommand(
+      'git',
+      [
+        'show', '--format=', '--no-ext-diff', '--no-textconv', '--unified=3', '--no-renames',
+        commitSha, '--', ...selectedFiles.map((file) => file.path),
+      ],
+      {
+        cwd: ref.gitDir,
+        timeoutMs: this.timeoutMs,
+        maxBuffer: STORY_DIFF_LIMITS.maxArchiveBytes,
+      },
+    )
+    if (diff.stdoutTruncated || diff.stdoutBytes > STORY_DIFF_LIMITS.maxArchiveBytes) {
+      return {
+        ...storyDiffTooLarge(ref.name, commitSha),
+        files: selectedFiles.slice(0, STORY_DIFF_LIMITS.maxFilesReturned),
+        filesTotal: selectedFiles.length,
+        filesTruncated: selectedFiles.length > STORY_DIFF_LIMITS.maxFilesReturned,
+        blockedFileCount,
+      }
+    }
+
+    const archive = Buffer.from(diff.stdout, 'utf8')
+    if (offset > archive.byteLength) {
+      throw new SnapshotError('diff cursor is past the end of the archive', 'STORY_DIFF_CURSOR_INVALID')
+    }
+    const page = sliceStoryDiffPage(archive, offset)
+    const allBinary = selectedFiles.length > 0 && selectedFiles.every((file) => file.binary)
+    return {
+      repository: ref.name,
+      commitSha,
+      status: allBinary ? 'BINARY' : 'AVAILABLE',
+      files: selectedFiles.slice(0, STORY_DIFF_LIMITS.maxFilesReturned),
+      filesTotal: selectedFiles.length,
+      filesTruncated: selectedFiles.length > STORY_DIFF_LIMITS.maxFilesReturned,
+      blockedFileCount,
+      content: page.content,
+      diffLines: page.lines,
+      bytesReturned: page.bytes,
+      truncated: page.nextOffset !== null,
+      nextOffset: page.nextOffset,
+      archiveSha256: `sha256:${createHash('sha256').update(archive).digest('hex')}`,
+    }
   }
 
   /** Re-read a range for verification. Returns null when it cannot be proven. */
@@ -328,4 +519,81 @@ export function globToRegExp(glob: string): RegExp {
     out += char.replace(/[.+^${}()|[\]\\]/g, '\\$&')
   }
   return new RegExp(`^${out}$`)
+}
+
+function parseStoryDiffNumstat(raw: string): StoryCommitDiffFile[] {
+  const files: StoryCommitDiffFile[] = []
+  for (const record of raw.split('\0')) {
+    if (record === '') continue
+    const firstTab = record.indexOf('\t')
+    const secondTab = firstTab < 0 ? -1 : record.indexOf('\t', firstTab + 1)
+    if (firstTab < 0 || secondTab < 0) continue
+    const additionsRaw = record.slice(0, firstTab)
+    const deletionsRaw = record.slice(firstTab + 1, secondTab)
+    const path = record.slice(secondTab + 1)
+    if (path === '' || path.length > 1024 || containsTraversal(path) || path.startsWith('/') || path.includes('\\')) continue
+    const binary = additionsRaw === '-' || deletionsRaw === '-'
+    files.push({
+      path,
+      additions: binary ? null : Number(additionsRaw),
+      deletions: binary ? null : Number(deletionsRaw),
+      binary,
+    })
+  }
+  return files
+}
+
+function assertStoryDiffPath(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 1024) {
+    throw new SnapshotError('diff path must be a non-empty repository-relative path', 'SNAPSHOT_PATH_INVALID')
+  }
+  const path = value.replace(/^\.\//, '')
+  if (path.startsWith('/') || path.includes('\\') || containsTraversal(path)) {
+    throw new SnapshotError('unsafe diff path rejected', 'SNAPSHOT_PATH_INVALID')
+  }
+  return path
+}
+
+function storyDiffTooLarge(repository: RepositoryName, commitSha: string): StoryCommitDiffResult {
+  return {
+    repository,
+    commitSha,
+    status: 'DIFF_TOO_LARGE',
+    files: [],
+    filesTotal: 0,
+    filesTruncated: false,
+    blockedFileCount: 0,
+    content: '',
+    diffLines: 0,
+    bytesReturned: 0,
+    truncated: false,
+    nextOffset: null,
+    archiveSha256: null,
+  }
+}
+
+function sliceStoryDiffPage(
+  archive: Buffer,
+  offset: number,
+): { content: string; lines: number; bytes: number; nextOffset: number | null } {
+  if (offset === archive.byteLength) return { content: '', lines: 0, bytes: 0, nextOffset: null }
+  const hardEnd = Math.min(offset + STORY_DIFF_LIMITS.maxPageBytes, archive.byteLength)
+  let end = hardEnd
+  let newlines = 0
+  for (let index = offset; index < hardEnd; index++) {
+    if (archive[index] === 0x0a) {
+      newlines++
+      if (newlines >= STORY_DIFF_LIMITS.maxPageLines) {
+        end = index + 1
+        break
+      }
+    }
+  }
+  // Never split a UTF-8 continuation sequence between pages.
+  while (end > offset && end < archive.byteLength && (archive[end]! & 0xc0) === 0x80) end--
+  if (end === offset) end = hardEnd
+  const bytes = end - offset
+  const content = archive.subarray(offset, end).toString('utf8')
+  const lines = content === '' ? 0 : Math.min(content.split('\n').length, STORY_DIFF_LIMITS.maxPageLines)
+  return { content, lines, bytes, nextOffset: end < archive.byteLength ? end : null }
 }

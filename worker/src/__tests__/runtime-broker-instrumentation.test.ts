@@ -421,6 +421,25 @@ describe('完整模型工具 usage 计数', () => {
 })
 
 describe('观测通道 fail open', () => {
+  it('scopeCheck is authorization-only and never emits audit, event, or usage', async () => {
+    const h = await boot()
+    const beforeAudit = h.broker.pendingAudit()
+    const response = await h.post(
+      '/attempt/tool-audit',
+      rootEnvelope(h, {
+        toolName: 'read',
+        scopeCheck: {
+          toolName: 'read',
+          arguments: { file_path: 'repos/sensitive/path.ts' },
+        },
+      }),
+    )
+    expect(response.body).toEqual({ allowed: true })
+    expect(h.events).toHaveLength(0)
+    expect(h.broker.pendingAudit()).toEqual(beforeAudit)
+    expect(h.broker.usage().toolCalls).toBe(0)
+  })
+
   it('reportRuntimeEvent 抛错不改变授权与工具结果', async () => {
     const h = await boot({ throwOnReport: true })
     const response = await h.post(

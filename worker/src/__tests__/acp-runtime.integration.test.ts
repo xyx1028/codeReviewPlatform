@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { createServer, type Server } from 'node:http'
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -31,117 +31,9 @@ import { SnapshotStore } from '../ai/snapshot/snapshot-store.js'
 import type { CommitReviewInput } from '../ai/control/attempt-control-broker.js'
 import { runCommand } from '../git/run.js'
 import { Logger } from '../logger.js'
+import { startMockModelServer } from './helpers/acp-mock-model.js'
 
 const ENABLED = process.env.RUN_ACP_INTEGRATION === '1'
-
-interface ScriptedToolCall {
-  name: string
-  args: unknown
-}
-
-/** A scripted turn may depend on what the conversation has revealed so far. */
-type ScriptedTurn = ScriptedToolCall | ((requestBody: string) => ScriptedToolCall)
-
-/** Minimal OpenAI-compatible streaming endpoint with scripted turns. */
-function startMockModelServer(
-  script: ScriptedTurn[],
-  /**
-   * Reply `502` to the first N `/chat/completions` requests before serving the
-   * script. This reproduces the host VPN proxy's own failure body: when the
-   * intranet endpoint drops a socket, `scripts/model-vpn-proxy.mjs` answers
-   * `502 model endpoint unreachable from this Mac`, which pi-ai classifies as
-   * `SERVER`. Failed requests do not consume the script.
-   */
-  transientServerFailures = 0,
-): Promise<{
-  baseUrl: string
-  requestCount: () => number
-  failedCount: () => number
-  close: () => Promise<void>
-}> {
-  let requestCount = 0
-  let failedCount = 0
-  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    const chunks: Buffer[] = []
-    req.on('data', (c: Buffer) => chunks.push(c))
-    req.on('end', () => {
-      if (!req.url?.includes('/chat/completions')) {
-        res.writeHead(404).end('{}')
-        return
-      }
-      if (failedCount < transientServerFailures) {
-        failedCount++
-        res.writeHead(502, { 'content-type': 'text/plain' })
-        res.end('model endpoint unreachable from this Mac')
-        return
-      }
-      const index = requestCount++
-      const entry = script[Math.min(index, script.length - 1)]
-      const scripted =
-        typeof entry === 'function' ? entry(Buffer.concat(chunks).toString('utf8')) : entry
-      res.writeHead(200, {
-        'content-type': 'text/event-stream',
-        'cache-control': 'no-cache',
-        connection: 'keep-alive',
-      })
-      const base = {
-        id: `chatcmpl-${index}`,
-        object: 'chat.completion.chunk',
-        created: Math.floor(Date.now() / 1000),
-        model: 'poc-model',
-      }
-      const send = (payload: unknown) => res.write(`data: ${JSON.stringify(payload)}\n\n`)
-
-      send({
-        ...base,
-        choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
-      })
-      send({
-        ...base,
-        choices: [
-          {
-            index: 0,
-            delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  id: `call_${index}`,
-                  type: 'function',
-                  function: {
-                    name: scripted.name,
-                    arguments: JSON.stringify(scripted.args),
-                  },
-                },
-              ],
-            },
-            finish_reason: null,
-          },
-        ],
-      })
-      send({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })
-      send({
-        ...base,
-        choices: [],
-        usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 },
-      })
-      res.write('data: [DONE]\n\n')
-      res.end()
-    })
-  })
-
-  return new Promise((resolveServer) => {
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address()
-      const port = typeof address === 'object' && address ? address.port : 0
-      resolveServer({
-        baseUrl: `http://127.0.0.1:${port}/v1`,
-        requestCount: () => requestCount,
-        failedCount: () => failedCount,
-        close: () => closeServer(server),
-      })
-    })
-  })
-}
 
 interface BrokerCall {
   taskId: string

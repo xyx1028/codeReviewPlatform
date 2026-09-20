@@ -153,6 +153,7 @@ export interface AiModelSnapshot {
 export type AnalysisJobStatus =
   | 'QUEUED'
   | 'PREPARING_CODE'
+  | 'PREPARING_SCOPE'
   | 'PROCESSING'
   | 'FINALIZING'
   | 'SUCCEEDED'
@@ -172,6 +173,9 @@ export interface AnalysisJob {
   finalizer_worker_id?: string | null
   attempt: number
   total_stories: number
+  analysis_context_version?: 1 | 2
+  commit_window_days?: 14 | 21 | 28
+  scope_status?: 'LEGACY' | 'PREPARING' | 'READY' | 'DEGRADED' | 'FAILED'
   error_code: string | null
   error_message: string | null
   locked_at: string | null
@@ -1202,4 +1206,39 @@ export interface SkillValidationResult {
   contains_scripts: boolean
   tree: SkillBundleFile[]
   frontmatter: SkillEntryFrontmatter
+}
+
+
+export type DeveloperIdentityStatus = 'VERIFIED' | 'UNVERIFIED' | 'CONFLICT' | 'DISABLED'
+
+export interface DeveloperGitIdentityRecord {
+  developer_id: string
+  display_name: string
+  employee_code: string | null
+  status: DeveloperIdentityStatus
+  revision: number
+  git_identity_id: string
+  provider: 'gitlab' | 'git'
+  masked_email: string | null
+  email_domain: string | null
+  author_name_aliases: string[]
+  gitlab_username: string | null
+  gitlab_user_id: string | null
+  verification_status: DeveloperIdentityStatus
+  git_revision: number
+  updated_at: string
+}
+
+export interface SaveDeveloperGitIdentityInput {
+  developerId?: string | null
+  gitIdentityId?: string | null
+  displayName: string
+  employeeCode?: string | null
+  email: string
+  authorNameAliases: string[]
+  gitlabUsername?: string | null
+  gitlabUserId?: string | null
+  developerStatus: DeveloperIdentityStatus
+  verificationStatus: DeveloperIdentityStatus
+  expectedRevision?: number | null
 }

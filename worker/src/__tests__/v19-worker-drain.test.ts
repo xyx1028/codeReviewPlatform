@@ -139,6 +139,7 @@ function buildConfig(root: string): WorkerConfig {
     gitlabBaseUrl: 'https://gitlab.invalid',
     gitlabDeployUser: null,
     gitlabDeployToken: null,
+    gitlabApiToken: null,
     workerId: 'worker-drain-test',
     workspaceRoot: root,
     codeCacheRoot: join(root, 'cache'),

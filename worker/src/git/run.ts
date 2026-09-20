@@ -13,6 +13,11 @@ export interface RunResult {
   stdout: string
   stderr: string
   code: number
+  /** 实际观察到的字节数；即使正文因 maxBuffer 截断也保持真实计数。 */
+  stdoutBytes: number
+  stderrBytes: number
+  stdoutTruncated: boolean
+  stderrTruncated: boolean
 }
 
 export class SpawnError extends Error {
@@ -99,7 +104,15 @@ export function runCommand(
         )
         return
       }
-      resolve({ stdout, stderr, code: code ?? 0 })
+      resolve({
+        stdout,
+        stderr,
+        code: code ?? 0,
+        stdoutBytes: outLen,
+        stderrBytes: errLen,
+        stdoutTruncated: outLen > Buffer.byteLength(stdout),
+        stderrTruncated: errLen > Buffer.byteLength(stderr),
+      })
     })
   })
 }

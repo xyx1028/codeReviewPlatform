@@ -24,6 +24,15 @@ import { join } from 'node:path'
 import type { Logger } from '../../logger.js'
 import { redactError } from '../../security/redaction.js'
 import type { RepositoryName } from '../../git/repositories.js'
+import type { StoryAnalysisScope } from '../../db/jobs.js'
+import {
+  ANALYSIS_EXPANSION_REASON_CODES,
+  validateCommitRelevanceVerdict,
+  type AnalysisExpansionReasonCode,
+  type CommitDiffAccessFact,
+  type CommitRelevanceEnvelope,
+  type CommitRelevanceOutput,
+} from '../../analysis/commit-relevance-contract.js'
 import { SnapshotError } from '../snapshot/git-object-reader.js'
 import type { SnapshotStore } from '../snapshot/snapshot-store.js'
 import { EvidenceLedger } from '../snapshot/evidence-ledger.js'
@@ -45,6 +54,11 @@ import type { AgentAuthorityLedger, AgentIdentity } from './agent-authority-ledg
 import type { HierarchicalBudgetLedger, ModelRequestKind } from './hierarchical-budget-ledger.js'
 import type { EgressPolicy, EgressFetchResult } from '../web/egress-policy.js'
 import type { AttemptWorkspace } from '../workspace/attempt-workspace.js'
+import {
+  evaluateNativeResourceScope,
+  SNAPSHOT_SCOPE_DENIED,
+  type NativeResourceScopeDecision,
+} from './native-resource-scope.js'
 import type {
   RuntimeAgentProvider,
   RuntimeAgentRole,
@@ -74,6 +88,16 @@ export interface CommitReviewInput {
   configHash: string | null
   /** V4 身份：root Agent、root Session、tree digest、session revision、policy hash。 */
   identity: AttemptCommitIdentity
+  /** V1.11 DB-frozen scope identity; null for legacy V1 jobs. */
+  scopeIdentity: AttemptScopeCommitIdentity | null
+}
+
+export interface AttemptScopeCommitIdentity {
+  generation: number
+  triageRevision: number
+  candidateManifestHash: string
+  rulesetHash: string
+  analysisScopeHash: string
 }
 
 export interface AttemptCommitIdentity {
@@ -213,6 +237,47 @@ export interface AttemptControlBrokerOptions {
   egress?: EgressPolicy
   /** 隔离 Workspace。缺省表示 Artifact 能力未装配。 */
   workspace?: AttemptWorkspace
+  /** V1.11 冻结 scope；缺省表示 legacy v1。 */
+  analysisScope?: StoryAnalysisScope
+  /** Canonical profile/session scope identity assembled from all frozen inputs. */
+  analysisScopeHash?: string
+  analysisStory?: { code: string; name: string; allowedContext: string }
+  agentRunId?: string | null
+  getStoryCommitDiffMetadata?(candidateId: string): Promise<{
+    candidate_id: string
+    repository_name: RepositoryName
+    commit_sha: string
+    status: string
+    archive_sha256: string | null
+  }>
+  recordStoryCommitAccess?(input: {
+    agentNodeId: string
+    candidateId: string
+    toolCallId: string
+    accessKind: 'DIFF'
+    filePath: string | null
+    cursorValue: string | null
+    bytesReturned: number
+    diffLines: number
+    truncated: boolean
+    archiveSha256: string | null
+  }): Promise<string>
+  submitCommitRelevanceVerdict?(input: CommitRelevanceOutput & {
+    scopeGeneration: number
+    triageRevision: number
+    candidateManifestHash: string
+    rulesetHash: string
+  }): Promise<{
+    completed_count: number
+    required_count: number
+    triage_complete: boolean
+  }>
+  expandAnalysisScope?(input: {
+    agentNodeId: string
+    fromLevel: 'PRIMARY' | 'RELATED' | 'GLOBAL'
+    toLevel: 'RELATED' | 'GLOBAL'
+    reasonCode: string
+  }): Promise<void>
   /**
    * Persist a verified review atomically. Returning a receipt is what allows
    * the terminal tool to conclude the agent's turn; throwing keeps the attempt
@@ -295,6 +360,14 @@ const AUDIT_QUEUE_CAP = 2048
 export function startAttemptControlBroker(
   options: AttemptControlBrokerOptions,
 ): Promise<AttemptControlHandle> {
+  if (options.analysisScope !== undefined) {
+    if (options.analysisScope.triage_revision !== options.agentAttempt) {
+      throw new Error('TRIAGE_CONTEXT_MISMATCH: frozen scope revision does not match this Attempt')
+    }
+    if (!options.analysisScopeHash) {
+      throw new Error('ANALYSIS_SCOPE_IDENTITY_MISSING: V2 Broker requires the canonical scope hash')
+    }
+  }
   const token = randomUUID()
   const contract = loadCapabilityContract()
   const evidenceLedger = new EvidenceLedger(options.taskId, options.agentAttempt)
@@ -310,6 +383,8 @@ export function startAttemptControlBroker(
   let toolCalls = 0
   let configHash: string | null = null
   let sessionRevision = options.sessionRevision
+  let scopeLevel = options.analysisScope?.current_scope_level ?? 'GLOBAL'
+  let triageComplete = options.analysisScope?.triage_complete ?? true
   const toolCallsByName: Record<string, number> = {}
   /** lifecycle 上报可能因 IPC 重试重复；同一 correlation 只计一次模型工具调用。 */
   const countedToolCorrelations = new Set<string>()
@@ -319,6 +394,10 @@ export function startAttemptControlBroker(
     '/attempt/find-files': 'find_snapshot_files',
     '/attempt/read-code': 'read_snapshot_code',
     '/attempt/list-commits': 'list_snapshot_commits',
+    '/attempt/list-story-commits': 'list_story_commits',
+    '/attempt/read-story-commit-diff': 'read_story_commit_diff',
+    '/attempt/submit-commit-relevance': 'submit_commit_relevance_verdict',
+    '/attempt/expand-analysis-scope': 'expand_analysis_scope',
     '/attempt/submit-review': 'submit_review_result',
   }
   /**
@@ -340,6 +419,12 @@ export function startAttemptControlBroker(
   const toolCallsByAgent = new Map<string, number>()
   /** evidenceId → 生产它的 Agent，提交时用于 producer 归属校验。 */
   const evidenceProducer = new Map<string, { agentId: string; sessionId: string; toolCallId: string | null }>()
+  /** 只有 access RPC 成功返回后才进入账本；模型自报 UUID 永远不会被采信。 */
+  const commitDiffAccesses = new Map<string, CommitDiffAccessFact>()
+  const scopeExpansions: Array<{
+    targetLevel: 'RELATED' | 'GLOBAL'
+    reasonCode: AnalysisExpansionReasonCode
+  }> = []
 
   const usage = (): BrokerUsageSnapshot => {
     const counters = options.budget.snapshot()
@@ -562,8 +647,18 @@ export function startAttemptControlBroker(
     }
 
     const identity = authorized.identity
+
+    // scopeCheck is a synchronous authorization query piggybacking on the existing route. Its
+    // model-controlled arguments must never enter audit rows, logs, lifecycle events, or usage.
+    // A later denial report contains only tool name + stable reason code.
+    if (route === '/attempt/tool-audit' && body.scopeCheck !== undefined) {
+      const serialized = JSON.stringify(checkNativeResourceScope(body.scopeCheck))
+      respondRaw(res, 200, serialized)
+      return
+    }
+
     // toolCalls 的口径是“模型实际调用了多少工具”，不是“Broker 收了多少请求”。
-    // 五个 platform 工具在各自执行路由计数；Harness-origin 工具不经过执行路由，稍后由
+    // 九个 platform 工具在各自执行路由计数；Harness-origin 工具不经过执行路由，稍后由
     // tool-audit lifecycle STARTED 计数。register/finish、预算、观测、Artifact 与 web egress
     // 都是内部路由，不能污染 usage（web_fetch 自身也由 lifecycle 计数，避免双计）。
     const platformToolName = platformToolByRoute[route]
@@ -578,13 +673,25 @@ export function startAttemptControlBroker(
           responsePayload = await searchCode(body)
           break
         case '/attempt/find-files':
-          responsePayload = await options.snapshots.findFiles(body as never)
+          responsePayload = await findFiles(body)
           break
         case '/attempt/read-code':
           responsePayload = await readCode(body, identity)
           break
         case '/attempt/list-commits':
           responsePayload = { commits: await options.snapshots.commits(body as never) }
+          break
+        case '/attempt/list-story-commits':
+          responsePayload = await listStoryCommits(body)
+          break
+        case '/attempt/read-story-commit-diff':
+          responsePayload = await readStoryCommitDiff(body, identity)
+          break
+        case '/attempt/submit-commit-relevance':
+          responsePayload = await submitCommitRelevance(body, identity)
+          break
+        case '/attempt/expand-analysis-scope':
+          responsePayload = await expandStoryAnalysisScope(body, identity)
           break
         case '/attempt/snapshot-pins':
           responsePayload = { pins: options.snapshots.pins() }
@@ -630,7 +737,7 @@ export function startAttemptControlBroker(
         responsePayload = { accepted: false, code: err.code, reason: err.message }
       } else {
         errorCode = err instanceof SnapshotError ? err.code : 'TOOL_FAILED'
-        status = 422
+        status = errorCode === 'SNAPSHOT_SCOPE_DENIED' ? 403 : 422
         responsePayload = {
           accepted: false,
           code: errorCode,
@@ -656,10 +763,99 @@ export function startAttemptControlBroker(
     respondRaw(res, status, serialized)
   }
 
+  function checkNativeResourceScope(raw: unknown): NativeResourceScopeDecision {
+    // Legacy V1 has no analysisScope and must retain its exact native-tool behavior.
+    if (options.analysisScope === undefined) return { allowed: true }
+    if (scopeLevel === 'GLOBAL') return { allowed: true }
+    if (raw === null || typeof raw !== 'object' || options.workspace === undefined) {
+      return {
+        allowed: false,
+        code: SNAPSHOT_SCOPE_DENIED,
+        reason: 'resource path could not be determined',
+      }
+    }
+    const check = raw as Record<string, unknown>
+    return evaluateNativeResourceScope({
+      toolName: typeof check.toolName === 'string' ? check.toolName : '',
+      args: check.arguments,
+      scopeLevel,
+      triageComplete,
+      workspaceDir: options.workspace.cwd,
+      reposDir: options.workspace.reposDir,
+      repositories: options.snapshots.pins().map((pin) => pin.repository),
+      candidates: options.analysisScope.candidates,
+    })
+  }
+
+  function scopedCandidates(): StoryAnalysisScope['candidates'] {
+    return options.analysisScope?.candidates.filter(
+      (candidate) => candidate.tier !== 'EXCLUDED' && candidate.tier !== 'CONFLICT',
+    ) ?? []
+  }
+
+  function scopedRepositories(): ReadonlySet<RepositoryName> {
+    return new Set(scopedCandidates().map((candidate) => candidate.repository))
+  }
+
+  function primaryPaths(repository: string): string[] {
+    const paths = new Set<string>()
+    for (const candidate of scopedCandidates()) {
+      if (candidate.repository !== repository) continue
+      // The DB projection is the authority. AI candidates only join PRIMARY
+      // after the current run has reached N/N; absent selected fields fail closed.
+      const isStrongSelected = candidate.tier === 'STRONG'
+        && candidate.selected === true && candidate.selection_level === 'PRIMARY'
+      const isTriagedSelected = triageComplete
+        && (candidate.tier === 'AI_CANDIDATE' || candidate.tier === 'WEAK')
+        && candidate.selected === true && candidate.selection_level === 'PRIMARY'
+      if (!isStrongSelected && !isTriagedSelected) continue
+      // `files` is a trusted get_story_task_analysis_scope projection. Missing
+      // data is deliberately an empty set: an old DB proxy must fail closed,
+      // not silently turn PRIMARY into repository-wide access.
+      for (const file of candidate.files ?? []) {
+        if (typeof file.path === 'string' && file.path !== '') paths.add(file.path)
+        if (typeof file.old_path === 'string' && file.old_path !== '') paths.add(file.old_path)
+      }
+    }
+    return [...paths]
+  }
+
+  function assertSnapshotScope(repository: string, path?: string): readonly string[] | undefined {
+    // analysisScope is only installed for V2. Legacy V1 retains its exact
+    // repository-wide snapshot behavior.
+    if (options.analysisScope === undefined || scopeLevel === 'GLOBAL') return undefined
+    if (!scopedRepositories().has(repository as RepositoryName)) {
+      throw new SnapshotError(
+        'repository is outside the current frozen analysis scope',
+        'SNAPSHOT_SCOPE_DENIED',
+      )
+    }
+    if (scopeLevel === 'RELATED') return undefined
+    const allowed = primaryPaths(repository)
+    if (path !== undefined) {
+      const normalized = path.replace(/^\.\//, '')
+      if (!allowed.includes(normalized)) {
+        throw new SnapshotError(
+          'path is outside the PRIMARY frozen candidate file set',
+          'SNAPSHOT_SCOPE_DENIED',
+        )
+      }
+    }
+    return allowed
+  }
+
   async function searchCode(body: Record<string, unknown>): Promise<unknown> {
-    const result = await options.snapshots.search(body as never)
+    const repository = String(body.repository ?? '')
+    const allowedPaths = assertSnapshotScope(repository)
+    const result = await options.snapshots.search({
+      repository,
+      query: String(body.query ?? ''),
+      pathGlob: typeof body.pathGlob === 'string' ? body.pathGlob : undefined,
+      maxResults: typeof body.maxResults === 'number' ? body.maxResults : undefined,
+      allowedPaths,
+    })
     coverageLedger.record({
-      repository: body.repository as RepositoryName,
+      repository: repository as RepositoryName,
       query: String(body.query ?? ''),
       pathGlob: typeof body.pathGlob === 'string' ? body.pathGlob : undefined,
       hits: result.hits.length,
@@ -668,11 +864,30 @@ export function startAttemptControlBroker(
     return result
   }
 
+  async function findFiles(body: Record<string, unknown>): Promise<unknown> {
+    const repository = String(body.repository ?? '')
+    const allowedPaths = assertSnapshotScope(repository)
+    return options.snapshots.findFiles({
+      repository,
+      pattern: String(body.pattern ?? ''),
+      maxResults: typeof body.maxResults === 'number' ? body.maxResults : undefined,
+      allowedPaths,
+    })
+  }
+
   async function readCode(
     body: Record<string, unknown>,
     identity: AgentIdentity,
   ): Promise<unknown> {
-    const read = await options.snapshots.readRange(body as never)
+    const repository = String(body.repository ?? '')
+    const path = String(body.path ?? '')
+    assertSnapshotScope(repository, path)
+    const read = await options.snapshots.readRange({
+      repository,
+      path,
+      startLine: Number(body.startLine),
+      endLine: Number(body.endLine),
+    })
     const receipt = evidenceLedger.record({
       repository: read.repository,
       commitSha: read.commitSha,
@@ -701,6 +916,261 @@ export function startAttemptControlBroker(
       truncated: read.truncated,
       content: read.content,
     }
+  }
+
+  async function listStoryCommits(body: Record<string, unknown>): Promise<unknown> {
+    assertV111ToolKeys(body, ['tier', 'repository', 'cursor', 'limit'])
+    const scope = requireAnalysisScope(options.analysisScope)
+    const tier = body.tier === undefined ? 'ALL' : String(body.tier)
+    if (!['STRONG', 'AI_CANDIDATE', 'ALL'].includes(tier)) {
+      throw new SnapshotError('tier must be STRONG, AI_CANDIDATE, or ALL', 'STORY_COMMIT_TIER_INVALID')
+    }
+    const repository = body.repository === undefined ? null : String(body.repository)
+    if (repository !== null && !options.snapshots.pins().some((pin) => pin.repository === repository)) {
+      throw new SnapshotError('repository is not pinned for this job', 'SNAPSHOT_REPO_NOT_PINNED')
+    }
+    const limit = body.limit === undefined ? 50 : Number(body.limit)
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new SnapshotError('limit must be an integer from 1 to 100', 'STORY_COMMIT_PAGE_INVALID')
+    }
+    const offset = decodeStoryCursor(body.cursor, scope.candidate_manifest_hash, 'list')
+    const candidates = scope.candidates.filter((candidate) => {
+      if (candidate.tier === 'EXCLUDED' || candidate.tier === 'CONFLICT') return false
+      if (repository !== null && candidate.repository !== repository) return false
+      if (tier === 'STRONG') return candidate.tier === 'STRONG'
+      if (tier === 'AI_CANDIDATE') return candidate.tier === 'AI_CANDIDATE' || candidate.tier === 'WEAK'
+      return true
+    })
+    const items = candidates.slice(offset, offset + limit).map((candidate) => ({
+      candidateId: candidate.candidate_id,
+      tier: candidate.tier,
+      repository: candidate.repository,
+      shortSha: candidate.short_sha,
+      subject: candidate.subject,
+      authorName: candidate.author_name,
+      committedAt: candidate.committed_at,
+      filesChanged: candidate.files_changed,
+      additions: candidate.additions,
+      deletions: candidate.deletions,
+      reasonCodes: candidate.reason_codes,
+      effectiveStatus: candidate.effective_status,
+      diffStatus: candidate.diff_status,
+      triageVerdict: candidate.triage_verdict,
+      selected: candidate.selected,
+      selectionLevel: candidate.selection_level,
+    }))
+    const nextOffset = offset + items.length
+    return {
+      generation: scope.generation,
+      manifestHash: scope.candidate_manifest_hash,
+      total: candidates.length,
+      items,
+      hasMore: nextOffset < candidates.length,
+      nextCursor: nextOffset < candidates.length
+        ? encodeStoryCursor(nextOffset, scope.candidate_manifest_hash, 'list')
+        : null,
+      truncated: false,
+    }
+  }
+
+  async function readStoryCommitDiff(
+    body: Record<string, unknown>,
+    identity: AgentIdentity,
+  ): Promise<unknown> {
+    assertV111ToolKeys(body, ['candidateId', 'filePath', 'cursor'])
+    const scope = requireAnalysisScope(options.analysisScope)
+    const candidateId = String(body.candidateId ?? '')
+    const candidate = scope.candidates.find((item) => item.candidate_id === candidateId)
+    if (!candidate || candidate.tier === 'EXCLUDED' || candidate.tier === 'CONFLICT') {
+      throw new SnapshotError('candidateId is not an allowed candidate in this frozen task scope', 'STORY_CANDIDATE_INVALID')
+    }
+    const filePath = body.filePath === undefined ? undefined : String(body.filePath)
+    const cursorBinding = `diff:${candidateId}:${filePath ?? ''}`
+    const offset = decodeStoryCursor(body.cursor, scope.candidate_manifest_hash, cursorBinding)
+    if (!options.getStoryCommitDiffMetadata) {
+      throw new Error('DIFF_METADATA_UNAVAILABLE: v2 diff reads require a claim-fenced metadata hook')
+    }
+    const metadata = await options.getStoryCommitDiffMetadata(candidateId)
+    if (metadata.candidate_id !== candidateId || metadata.repository_name !== candidate.repository) {
+      throw new SnapshotError('candidate metadata does not match the frozen scope', 'STORY_CANDIDATE_INVALID')
+    }
+    const result = await options.snapshots.readStoryCommitDiff({
+      repository: candidate.repository,
+      candidateCommit: metadata.commit_sha,
+      filePath,
+      offset,
+    })
+    if (!options.recordStoryCommitAccess || !options.agentRunId) {
+      throw new Error('DIFF_ACCESS_PERSISTENCE_UNAVAILABLE: v2 diff reads require a claim-fenced access hook')
+    }
+    const toolCallId = typeof body.toolCallId === 'string' && body.toolCallId !== ''
+      ? body.toolCallId
+      : randomUUID()
+    const accessId = await options.recordStoryCommitAccess({
+      agentNodeId: identity.agentId,
+      candidateId,
+      toolCallId,
+      accessKind: 'DIFF',
+      filePath: filePath ?? null,
+      cursorValue: typeof body.cursor === 'string' ? body.cursor : null,
+      bytesReturned: result.bytesReturned,
+      diffLines: result.diffLines,
+      truncated: result.truncated,
+      archiveSha256: result.archiveSha256,
+    })
+    commitDiffAccesses.set(accessId, {
+      accessId,
+      taskId: options.taskId,
+      candidateId,
+      attemptId: options.agentRunId,
+      succeeded: true,
+    })
+    candidate.diff_status = result.status
+    return {
+      accessId,
+      candidateId,
+      repository: candidate.repository,
+      shortSha: candidate.short_sha,
+      subject: candidate.subject,
+      status: result.status,
+      files: result.files,
+      filesTotal: result.filesTotal,
+      filesTruncated: result.filesTruncated,
+      blockedFileCount: result.blockedFileCount,
+      diff: result.content,
+      diffLines: result.diffLines,
+      bytesReturned: result.bytesReturned,
+      archiveHash: result.archiveSha256,
+      truncated: result.truncated,
+      nextCursor: result.nextOffset === null
+        ? null
+        : encodeStoryCursor(result.nextOffset, scope.candidate_manifest_hash, cursorBinding),
+    }
+  }
+
+  async function submitCommitRelevance(
+    body: Record<string, unknown>,
+    identity: AgentIdentity,
+  ): Promise<unknown> {
+    assertV111ToolKeys(body, [
+      'candidateId', 'verdict', 'reasonCodes', 'confidence', 'diffAccessIds', 'summary',
+      'requestedExpansion',
+    ])
+    if (identity.provider !== 'root') {
+      throw new V4GovernanceError(V4_ERROR_CODES.SUBMIT_ROOT_ONLY, 'only the root reviewer may submit commit relevance')
+    }
+    const scope = requireAnalysisScope(options.analysisScope)
+    const candidateId = String(body.candidateId ?? '')
+    const candidate = scope.candidates.find((item) => item.candidate_id === candidateId)
+    if (!candidate || (candidate.tier !== 'AI_CANDIDATE' && candidate.tier !== 'WEAK')) {
+      throw new SnapshotError('candidateId is not an AI triage candidate in this frozen scope', 'STORY_CANDIDATE_INVALID')
+    }
+    if (!options.submitCommitRelevanceVerdict || !options.agentRunId || !options.analysisStory) {
+      throw new Error('TRIAGE_PERSISTENCE_UNAVAILABLE: v2 triage requires claim-fenced database hooks')
+    }
+    const requestedExpansion = body.requestedExpansion === undefined ? null : body.requestedExpansion
+    const output = {
+      schemaVersion: 1,
+      candidateId,
+      verdict: body.verdict,
+      reasonCodes: body.reasonCodes,
+      confidence: body.confidence,
+      diffAccessIds: body.diffAccessIds,
+      summary: body.summary,
+      requestedExpansion,
+    }
+    const diffStatus = candidate.diff_status === 'AVAILABLE'
+      ? 'AVAILABLE'
+      : candidate.diff_status === 'BINARY'
+        ? 'BINARY'
+        : candidate.diff_status === 'TOO_LARGE' || candidate.diff_status === 'DIFF_TOO_LARGE'
+          ? 'DIFF_TOO_LARGE'
+          : 'UNAVAILABLE'
+    const envelope: CommitRelevanceEnvelope = {
+      schemaVersion: 1,
+      phase: 'COMMIT_RELEVANCE_TRIAGE',
+      taskId: options.taskId,
+      story: options.analysisStory,
+      scope: {
+        generation: scope.generation,
+        candidateManifestHash: scope.candidate_manifest_hash,
+        rulesetHash: scope.ruleset_hash,
+        requiredCandidateIds: scope.candidates
+          .filter((item) => item.tier === 'AI_CANDIDATE' || item.tier === 'WEAK')
+          .map((item) => item.candidate_id),
+      },
+      candidate: {
+        candidateId,
+        repository: candidate.repository,
+        shortSha: candidate.short_sha,
+        subject: candidate.subject,
+        reasonCodes: candidate.reason_codes,
+        diffStatus,
+      },
+    }
+    const validated = validateCommitRelevanceVerdict({
+      envelope,
+      output,
+      attemptId: options.agentRunId,
+      accessFacts: [...commitDiffAccesses.values()],
+    })
+    if (validated.output.requestedExpansion !== null) {
+      const requested = validated.output.requestedExpansion
+      if (!scopeExpansions.some((fact) =>
+        fact.targetLevel === requested.targetLevel && fact.reasonCode === requested.reasonCode)) {
+        throw new Error('SCOPE_EXPANSION_NOT_RECORDED: call expand_analysis_scope before citing requestedExpansion')
+      }
+    }
+    const persisted = await options.submitCommitRelevanceVerdict({
+      ...validated.output,
+      scopeGeneration: scope.generation,
+      triageRevision: scope.triage_revision,
+      candidateManifestHash: scope.candidate_manifest_hash,
+      rulesetHash: scope.ruleset_hash,
+    })
+    triageComplete = persisted.triage_complete
+    candidate.triage_verdict = validated.output.verdict
+    candidate.selected = validated.output.verdict === 'RELATED' || validated.output.verdict === 'UNCERTAIN'
+    candidate.selection_level = candidate.selected ? 'PRIMARY' : null
+    return {
+      accepted: true,
+      candidateId,
+      completedCount: persisted.completed_count,
+      requiredCount: persisted.required_count,
+      triageComplete: persisted.triage_complete,
+    }
+  }
+
+  async function expandStoryAnalysisScope(
+    body: Record<string, unknown>,
+    identity: AgentIdentity,
+  ): Promise<unknown> {
+    assertV111ToolKeys(body, ['targetLevel', 'reasonCode'])
+    if (identity.provider !== 'root') {
+      throw new V4GovernanceError(V4_ERROR_CODES.SUBMIT_ROOT_ONLY, 'only the root reviewer may expand analysis scope')
+    }
+    requireAnalysisScope(options.analysisScope)
+    const targetLevel = String(body.targetLevel ?? '') as 'RELATED' | 'GLOBAL'
+    const reasonCode = String(body.reasonCode ?? '') as AnalysisExpansionReasonCode
+    if (!['RELATED', 'GLOBAL'].includes(targetLevel) || !ANALYSIS_EXPANSION_REASON_CODES.includes(reasonCode)) {
+      throw new SnapshotError('scope expansion target or reason is invalid', 'SCOPE_EXPANSION_INVALID')
+    }
+    if (scopeLevel === 'GLOBAL' || (scopeLevel === 'RELATED' && targetLevel !== 'GLOBAL')) {
+      throw new SnapshotError(`cannot expand ${scopeLevel} to ${targetLevel}`, 'SCOPE_EXPANSION_INVALID')
+    }
+    if (!options.expandAnalysisScope) {
+      throw new Error('SCOPE_EXPANSION_UNAVAILABLE: v2 expansion hook is not configured')
+    }
+    const fromLevel = scopeLevel
+    await options.expandAnalysisScope({
+      agentNodeId: identity.agentId,
+      fromLevel,
+      toLevel: targetLevel,
+      reasonCode,
+    })
+    scopeLevel = targetLevel
+    scopeExpansions.push({ targetLevel, reasonCode })
+    return { expanded: true, fromLevel, currentLevel: scopeLevel, reasonCode }
   }
 
   async function registerAgent(
@@ -889,7 +1359,7 @@ export function startAttemptControlBroker(
         agentId: identity.agentId,
         agentRole: identity.role,
         toolName: deniedTool,
-        policyLayer: 'child-filter',
+        policyLayer: reasonCode === SNAPSHOT_SCOPE_DENIED ? 'broker' : 'child-filter',
         decision: 'DENY',
         reasonCode,
       })
@@ -1164,6 +1634,23 @@ export function startAttemptControlBroker(
     }
   }
 
+  async function completeCommitTriage(): Promise<void> {
+    const scope = options.analysisScope
+    if (!scope) return
+    const requiredCount = scope.candidates.filter(
+      (candidate) => candidate.tier === 'AI_CANDIDATE' || candidate.tier === 'WEAK',
+    ).length
+    if (requiredCount === 0) {
+      triageComplete = true
+      return
+    }
+    if (!triageComplete) {
+      throw new Error(
+        `TRIAGE_INCOMPLETE: submit every frozen AI candidate through submit_commit_relevance_verdict (${requiredCount} required)`,
+      )
+    }
+  }
+
   async function submitReview(
     body: Record<string, unknown>,
     identity: AgentIdentity,
@@ -1183,6 +1670,25 @@ export function startAttemptControlBroker(
     const submission = body.submission as ReviewSubmission | undefined
     if (!submission || typeof submission !== 'object') {
       return { accepted: false, code: 'SUBMISSION_INVALID', reason: 'submission is required' }
+    }
+
+    try {
+      await completeCommitTriage()
+    } catch (error) {
+      recordRejectedSubmission('TRIAGE_INCOMPLETE')
+      return {
+        accepted: false,
+        code: 'TRIAGE_INCOMPLETE',
+        reason: (error as Error).message,
+      }
+    }
+    if (!triageComplete) {
+      recordRejectedSubmission('TRIAGE_INCOMPLETE')
+      return {
+        accepted: false,
+        code: 'TRIAGE_INCOMPLETE',
+        reason: 'database triage completion is required before final review submission',
+      }
     }
 
     const verification = await verifyReviewSubmission({
@@ -1234,6 +1740,15 @@ export function startAttemptControlBroker(
         sessionRevision,
         policyHash: options.policyHash,
       },
+      scopeIdentity: options.analysisScope
+        ? {
+            generation: options.analysisScope.generation,
+            triageRevision: options.analysisScope.triage_revision,
+            candidateManifestHash: options.analysisScope.candidate_manifest_hash,
+            rulesetHash: options.analysisScope.ruleset_hash,
+            analysisScopeHash: options.analysisScopeHash!,
+          }
+        : null,
     })
     committed = receipt
     options.logger.info('review_submission_committed', {
@@ -1280,6 +1795,49 @@ export function startAttemptControlBroker(
       })
     })
   })
+}
+
+const V111_ENVELOPE_KEYS = new Set([
+  'taskId', 'agentAttempt', 'agentCapability', 'agentId', 'sessionId', 'toolCallId', 'toolName',
+])
+
+function assertV111ToolKeys(body: Record<string, unknown>, allowed: readonly string[]): void {
+  const allowedKeys = new Set([...V111_ENVELOPE_KEYS, ...allowed])
+  const unknown = Object.keys(body).filter((key) => !allowedKeys.has(key))
+  if (unknown.length > 0) {
+    throw new SnapshotError(
+      `unknown fields are not allowed: ${unknown.join(', ')}`,
+      'STORY_TOOL_ARGUMENT_INVALID',
+    )
+  }
+}
+
+function requireAnalysisScope(scope: StoryAnalysisScope | undefined): StoryAnalysisScope {
+  if (!scope) {
+    throw new SnapshotError('story commit tools are unavailable for a legacy v1 task', 'ANALYSIS_SCOPE_UNAVAILABLE')
+  }
+  return scope
+}
+
+function encodeStoryCursor(offset: number, manifestHash: string, binding: string): string {
+  return Buffer.from(JSON.stringify({ v: 1, o: offset, m: manifestHash, b: binding }), 'utf8').toString('base64url')
+}
+
+function decodeStoryCursor(value: unknown, manifestHash: string, binding: string): number {
+  if (value === undefined || value === null || value === '') return 0
+  if (typeof value !== 'string' || value.length > 512) {
+    throw new SnapshotError('story tool cursor is invalid', 'STORY_DIFF_CURSOR_INVALID')
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Record<string, unknown>
+    if (
+      parsed.v !== 1 || parsed.m !== manifestHash || parsed.b !== binding ||
+      !Number.isSafeInteger(parsed.o) || Number(parsed.o) < 0
+    ) throw new Error('cursor binding mismatch')
+    return Number(parsed.o)
+  } catch {
+    throw new SnapshotError('story tool cursor is invalid or belongs to another frozen scope', 'STORY_DIFF_CURSOR_INVALID')
+  }
 }
 
 /** 上报体是否描述了一次被拒绝的调用。 */

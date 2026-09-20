@@ -48,6 +48,7 @@ import {
   enqueueModelConnectivityTest,
   getModelConnectivityTest,
   adminUpdateModelConfig,
+  attributionRulesApi,
   AuthActionError,
   claimInitialAdmin,
   completeBatch,
@@ -100,6 +101,8 @@ import { RuntimeMonitoringPage } from './pages/RuntimeMonitoringPage'
 import { AgentRunDetailPage } from './pages/AgentRunDetailPage'
 import { HarnessPolicyPage } from './pages/HarnessPolicyPage'
 import { SkillManagementPage } from './pages/SkillManagementPage'
+import { AttributionRuleManagementPage } from './pages/AttributionRuleManagementPage'
+import { GitIdentityManagementPage } from './pages/GitIdentityManagementPage'
 import { ProfilePage } from './pages/ProfilePage'
 import { supabaseConfigured } from './lib/supabase'
 import type {
@@ -574,8 +577,12 @@ function Shell({ session }: { session: Session }) {
           ? '/workers'
           : location.pathname.startsWith('/harness-policy')
             ? '/harness-policy'
-            : location.pathname.startsWith('/skills')
-              ? '/skills'
+            : location.pathname.startsWith('/attribution-rules')
+              ? '/attribution-rules'
+              : location.pathname.startsWith('/git-identities')
+                ? '/git-identities'
+                : location.pathname.startsWith('/skills')
+                  ? '/skills'
               : location.pathname.startsWith('/models')
               ? '/models'
               : location.pathname.startsWith('/model-operation-log')
@@ -598,6 +605,8 @@ function Shell({ session }: { session: Session }) {
     ...(isAdmin ? [{ key: '/monitoring', label: <Link to="/monitoring">Agent 运行监控</Link> }] : []),
     ...(isAdmin ? [{ key: '/workers', label: <Link to="/workers">调度中心</Link> }] : []),
     ...(isAdmin ? [{ key: '/harness-policy', label: <Link to="/harness-policy">默认能力策略</Link> }] : []),
+    ...(isAdmin ? [{ key: '/attribution-rules', label: <Link to="/attribution-rules">归属规则</Link> }] : []),
+    ...(isAdmin ? [{ key: '/git-identities', label: <Link to="/git-identities">Git 身份</Link> }] : []),
     ...(isAdmin ? [{ key: '/skills', label: <Link to="/skills">技能</Link> }] : []),
     ...(isAdmin ? [{ key: '/models', label: <Link to="/models">模型管理</Link> }] : []),
     ...(isAdmin ? [{ key: '/users', label: <Link to="/users">用户管理</Link> }] : []),
@@ -653,6 +662,8 @@ function Shell({ session }: { session: Session }) {
             <Route path="/monitoring" element={<RuntimeMonitoringPage isAdmin={isAdmin} />} />
             <Route path="/workers" element={<WorkerManagementPage isAdmin={isAdmin} />} />
             <Route path="/harness-policy" element={<HarnessPolicyPage isAdmin={isAdmin} />} />
+            <Route path="/attribution-rules" element={<AttributionRuleManagementPage isAdmin={isAdmin} api={attributionRulesApi} />} />
+            <Route path="/git-identities" element={<GitIdentityManagementPage isAdmin={isAdmin} />} />
             <Route path="/skills" element={<SkillManagementPage isAdmin={isAdmin} />} />
             <Route path="/models" element={<ModelConfigPage isAdmin={isAdmin} />} />
             <Route path="/users" element={<AdminUsersPage isAdmin={isAdmin} />} />
@@ -1593,7 +1604,7 @@ function SourcePreview({ parsed }: { parsed: { stories: SourceStoryInput[]; issu
 }
 
 
-const ACTIVE_JOB_STATUSES: AnalysisJob['status'][] = ['QUEUED', 'PREPARING_CODE', 'PROCESSING', 'FINALIZING']
+const ACTIVE_JOB_STATUSES: AnalysisJob['status'][] = ['QUEUED', 'PREPARING_CODE', 'PREPARING_SCOPE', 'PROCESSING', 'FINALIZING']
 
 function isActiveJob(job: AnalysisJob | null | undefined) {
   return Boolean(job && ACTIVE_JOB_STATUSES.includes(job.status))
@@ -1635,6 +1646,8 @@ function AutoAnalysisSection({
   const { message } = AntApp.useApp()
   const queryClient = useQueryClient()
   const [supplementalModelId, setSupplementalModelId] = useState<string>()
+  const [analysisContextVersion, setAnalysisContextVersion] = useState<1 | 2>(2)
+  const [commitWindowDays, setCommitWindowDays] = useState<14 | 21 | 28>(21)
 
   const jobQuery = useQuery({
     queryKey: ['analysis-job', batch.id],
@@ -1685,9 +1698,12 @@ function AutoAnalysisSection({
   })
 
   const enqueueMutation = useMutation({
-    mutationFn: () => enqueueAnalysisJob(batch.id),
+    mutationFn: () => enqueueAnalysisJob(batch.id, {
+      analysisContextVersion,
+      commitWindowDays,
+    }),
     onSuccess: () => {
-      message.success('已发起 AI 分析')
+      message.success(analysisContextVersion === 2 ? `已发起精准提交分析（${String(commitWindowDays)} 天辅助窗口）` : '已发起兼容全仓分析')
       invalidateAll()
     },
     onError: (error) => message.error(error.message),
@@ -1841,6 +1857,38 @@ function AutoAnalysisSection({
         </>
       ) : null}
 
+      {canManage && !hasExistingAiResult && !jobActive ? (
+        <Card size="small" className="mt-md" title="分析方式">
+          <Space direction="vertical" size={10} className="full-width">
+            <Radio.Group
+              value={analysisContextVersion}
+              onChange={(event) => setAnalysisContextVersion(event.target.value as 1 | 2)}
+            >
+              <Radio value={2}>V1.11 精准提交分析（推荐）</Radio>
+              <Radio value={1}>兼容全仓分析（V1）</Radio>
+            </Radio.Group>
+            {analysisContextVersion === 2 ? (
+              <Space wrap>
+                <Text>历史漏标辅助窗口：</Text>
+                <Select<14 | 21 | 28>
+                  value={commitWindowDays}
+                  style={{ width: 130 }}
+                  options={[
+                    { value: 14, label: '14 天' },
+                    { value: 21, label: '21 天（默认）' },
+                    { value: 28, label: '28 天' },
+                  ]}
+                  onChange={setCommitWindowDays}
+                />
+                <Text type="secondary">强需求号关联不受该窗口截断；任务创建后配置会冻结。</Text>
+              </Space>
+            ) : (
+              <Text type="secondary">仅用于旧流程兼容：每个需求仍从四仓冻结版本全仓分析。</Text>
+            )}
+          </Space>
+        </Card>
+      ) : null}
+
       <div className="mt-md">
         <Space wrap>
           <Button
@@ -1849,9 +1897,16 @@ function AutoAnalysisSection({
             loading={enqueueMutation.isPending}
             onClick={() => enqueueMutation.mutate()}
           >
-            开始 AI 分析
+            {analysisContextVersion === 2 ? '开始 V1.11 精准分析' : '开始兼容全仓分析'}
           </Button>
           {jobActive ? <Tag color="processing">分析进行中，页面每 4 秒自动刷新</Tag> : null}
+          {job ? (
+            <Tag color={job.analysis_context_version === 2 ? 'blue' : 'default'}>
+              {job.analysis_context_version === 2
+                ? `V1.11 精准提交 · ${String(job.commit_window_days ?? 21)} 天`
+                : '兼容全仓 V1'}
+            </Tag>
+          ) : null}
         </Space>
       </div>
 

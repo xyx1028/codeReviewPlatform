@@ -21,6 +21,7 @@ describe('loadConfig', () => {
       gitAuthMode: 'local',
       gitlabDeployUser: null,
       gitlabDeployToken: null,
+      gitlabApiToken: null,
       workerId: 'worker-1',
       workspaceRoot: '/workspace/jobs',
       codeCacheRoot: '/workspace/cache',
@@ -167,5 +168,20 @@ describe('loadConfig', () => {
     expect(() => loadConfig(baseEnv({ MODEL_IMAGE_INPUT_ENABLED: 'ture' }))).toThrow(
       /MODEL_IMAGE_INPUT_ENABLED/,
     )
+  })
+})
+
+
+describe('GitLab API token separation', () => {
+  it('loads an optional API token independently from deploy credentials', () => {
+    const config = loadConfig(baseEnv({ GITLAB_API_TOKEN: '  api-only-token  ' }))
+    expect(config.gitlabApiToken).toBe('api-only-token')
+    expect(config.gitlabDeployUser).toBeNull()
+    expect(config.gitlabDeployToken).toBeNull()
+
+    expect(() => loadConfig(baseEnv({
+      GIT_AUTH_MODE: 'token',
+      GITLAB_API_TOKEN: 'api-only-token',
+    }))).toThrow(/GITLAB_DEPLOY_USER and GITLAB_DEPLOY_TOKEN/)
   })
 })

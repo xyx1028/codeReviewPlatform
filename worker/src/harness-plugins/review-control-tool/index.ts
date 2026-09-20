@@ -56,8 +56,143 @@ interface SubmitRejected {
 type SubmitResponse = SubmitAccepted | SubmitRejected
 
 const VERDICTS = ['IMPLEMENTED', 'PARTIAL', 'NOT_IMPLEMENTED', 'UNCERTAIN'] as const
+const COMMIT_RELEVANCE_VERDICTS = ['RELATED', 'UNRELATED', 'UNCERTAIN'] as const
+const COMMIT_RELEVANCE_REASONS = [
+  'CODE_SEMANTIC_MATCH', 'MODULE_MATCH', 'CALL_CHAIN_MATCH', 'TEST_CHANGE_MATCH',
+  'CONFIG_SCHEMA_MATCH', 'DIFFERENT_FEATURE', 'INSUFFICIENT_CONTEXT', 'DIFF_UNAVAILABLE',
+  'REVERT_OR_REPLACEMENT_UNCLEAR',
+] as const
+const EXPANSION_REASONS = [
+  'DEPENDENCY_LOOKUP', 'CALLER_CALLEE_TRACE', 'CONFIG_OR_SCHEMA_TRACE',
+  'TEST_COVERAGE_TRACE', 'CANDIDATES_INSUFFICIENT', 'CROSS_REPOSITORY_CONTRACT',
+  'VERIFY_REVERT_OR_REPLACEMENT',
+] as const
 
 export function apply(ctx: Context, config: ReviewControlConfig): void {
+  async function callControl<T>(
+    route: string,
+    payload: Record<string, unknown>,
+    execution: { harnessAgentId: string | undefined; toolCallId: string; toolName: string },
+  ): Promise<T> {
+    const identity = await resolveCallerIdentity(execution.harnessAgentId, `this ${execution.toolName} call`)
+    if (!identity) throw new Error(`${execution.toolName} has no verifiable agent identity`)
+    let response
+    try {
+      response = await brokerPost<(T & { accepted?: boolean; reason?: string; code?: string })>(
+        {
+          socketPath: config.socketPath,
+          token: readCredentialFromEnv(BROKER_TOKEN_ENV),
+          timeoutMs: config.requestTimeoutMs ?? 30000,
+        },
+        route,
+        withIdentity(
+          { taskId: config.taskId, agentAttempt: config.agentAttempt },
+          {
+            agentCapability: identity.agentCapability,
+            agentId: identity.agentId,
+            sessionId: identity.sessionId,
+            toolCallId: execution.toolCallId,
+            toolName: execution.toolName,
+          },
+          payload,
+        ),
+      )
+    } catch (err) {
+      const code = err instanceof BrokerChannelError ? err.code : 'BROKER_UNAVAILABLE'
+      throw new Error(`${execution.toolName} could not reach the review broker (${code})`)
+    }
+    if (response.status !== 200 || response.body?.accepted === false) {
+      throw new Error(response.body?.reason ?? `broker refused ${execution.toolName} (status ${response.status})`)
+    }
+    return response.body as T
+  }
+
+  ctx.tools.register(
+    defineTool({
+      name: 'submit_commit_relevance_verdict',
+      description:
+        'Submit one machine-readable relevance verdict for a frozen AI candidate. candidateId and diffAccessIds must come from list_story_commits/read_story_commit_diff; task ids, generations, hashes, and commit SHAs are intentionally not accepted.',
+      parameters: {
+        candidateId: { type: 'string', required: true },
+        verdict: { type: 'string', required: true, enum: [...COMMIT_RELEVANCE_VERDICTS] },
+        reasonCodes: { type: 'array', required: true, items: { type: 'string', enum: [...COMMIT_RELEVANCE_REASONS] } },
+        confidence: { type: 'number', required: true, description: 'Number from 0 to 1.' },
+        diffAccessIds: { type: 'array', required: true, items: { type: 'string' } },
+        summary: { type: 'string', required: true, description: 'At most 500 characters.' },
+        requestedExpansion: {
+          type: 'object',
+          description: 'Optional expansion already recorded through expand_analysis_scope.',
+          additionalProperties: false,
+          properties: {
+            targetLevel: { type: 'string', required: true, enum: ['RELATED', 'GLOBAL'] },
+            reasonCode: { type: 'string', required: true, enum: [...EXPANSION_REASONS] },
+          },
+        },
+      },
+      output: {
+        schema: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            accepted: { type: 'boolean', required: true },
+            candidateId: { type: 'string', required: true },
+            completedCount: { type: 'integer', required: true },
+            requiredCount: { type: 'integer', required: true },
+            triageComplete: { type: 'boolean', required: true },
+          },
+        },
+        render: (_args, value) => {
+          const result = value as { candidateId: string; completedCount: number; requiredCount: number; triageComplete: boolean }
+          return [{ type: 'text', text: `Recorded ${result.candidateId}: ${result.completedCount}/${result.requiredCount}; triageComplete=${result.triageComplete}` }]
+        },
+      },
+      async execute(args, exec) {
+        exec.signal.throwIfAborted()
+        return callControl('/attempt/submit-commit-relevance', args as Record<string, unknown>, {
+          harnessAgentId: exec.agent?.id,
+          toolCallId: String(exec.callId),
+          toolName: 'submit_commit_relevance_verdict',
+        })
+      },
+      presentCall: (args) => ({ card: 'generic', title: 'Submit commit relevance', kind: 'other', rawInput: args }),
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'expand_analysis_scope',
+      description:
+        'Monotonically expand this story analysis from PRIMARY to RELATED/GLOBAL, or RELATED to GLOBAL, with an auditable reason. It cannot narrow scope.',
+      parameters: {
+        targetLevel: { type: 'string', required: true, enum: ['RELATED', 'GLOBAL'] },
+        reasonCode: { type: 'string', required: true, enum: [...EXPANSION_REASONS] },
+      },
+      output: {
+        schema: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            expanded: { type: 'boolean', required: true },
+            fromLevel: { type: 'string', required: true },
+            currentLevel: { type: 'string', required: true },
+            reasonCode: { type: 'string', required: true },
+          },
+        },
+        render: (_args, value) => {
+          const result = value as { fromLevel: string; currentLevel: string; reasonCode: string }
+          return [{ type: 'text', text: `Scope expanded ${result.fromLevel} -> ${result.currentLevel} (${result.reasonCode}).` }]
+        },
+      },
+      async execute(args, exec) {
+        exec.signal.throwIfAborted()
+        return callControl('/attempt/expand-analysis-scope', args as Record<string, unknown>, {
+          harnessAgentId: exec.agent?.id,
+          toolCallId: String(exec.callId),
+          toolName: 'expand_analysis_scope',
+        })
+      },
+      presentCall: (args) => ({ card: 'generic', title: 'Expand analysis scope', kind: 'other', rawInput: args }),
+    }),
+  )
+
   ctx.tools.register(
     defineTool({
       name: 'submit_review_result',
@@ -153,7 +288,9 @@ export function apply(ctx: Context, config: ReviewControlConfig): void {
                 toolCallId: String(exec.callId),
                 toolName: 'submit_review_result',
               },
-              { submission: args },
+              {
+                submission: args as Record<string, unknown>,
+              },
             ),
           )
         } catch (err) {

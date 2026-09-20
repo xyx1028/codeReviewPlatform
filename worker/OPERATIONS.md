@@ -1646,3 +1646,69 @@ from analysis_job order by created_at desc limit 5;
 
 代理再重发一次会凭空产生一个没有向 Broker 预留的模型请求，直接破坏"用量账本即真值"
 这一前提。恢复只允许发生在记账的那一层。
+
+
+# 19. V1.11 需求提交归属与精准变更分析
+
+## 19.1 必需与可选配置
+
+| 配置 | 是否必需 | 作用 | 缺失行为 |
+|---|---|---|---|
+| Supabase Vault `analysis_identity_pepper` | 生产建议必配 | 对规范化 Git email 做 HMAC，匹配已验证开发身份 | 身份标 `UNAVAILABLE/UNRESOLVED`；结构化 `Story-Id` 和 Git 范围仍可运行 |
+| `GITLAB_API_TOKEN` | 可选 | 只读采集 MR 标题、Description、作者、分支、commit 集及 merge/squash SHA | 零 MR API 请求；每仓显示 `MR_METADATA_UNAVAILABLE`；核心 Commit/diff 分析继续 |
+
+`GITLAB_API_TOKEN` 必须是独立最小只读 Token，不能复用 `GITLAB_DEPLOY_TOKEN`。真实值只写 `.docker/worker.env`，不得进入仓库、日志、截图、Workspace 或模型输入。
+
+身份 pepper 由用户在目标 Supabase Vault 手动创建，名称必须精确为 `analysis_identity_pepper`。值应使用独立高熵随机字符串；不要把真实值写进 SQL migration。开发身份表中的 email fingerprint 必须由同一 pepper 计算，否则只会得到 `UNMATCHED`。
+
+## 19.2 上线顺序
+
+1. 确认所有 V1.11 migration 按文件名顺序待发布；`20260919075449_v4_harness_manifest_r3.sql` 必须位于 worker contract 之后，`20260919095911_attempt_scope_security_and_manifest_replay.sql` 必须先于 `20260919100930_scope_identity_rpc_contract.sql`；
+2. 用户执行 linked migration list 与 dry-run，确认目标项目；
+3. 用户手动执行 `supabase db push`；
+4. 在 Vault 配置 `analysis_identity_pepper`，按需在 `.docker/worker.env` 配置 `GITLAB_API_TOKEN`；
+5. 先排空在途 Worker，再部署 revision 3 / 34 tools 的新 Worker；
+6. 确认心跳 `capabilities.storyCommitScopeVersion=2`；
+7. 发布前端，管理员检查 `/attribution-rules` 和 `/monitoring`；
+8. 发布前在本地复跑完整模拟链：
+
+   ```bash
+   npm run worker:build
+   RUN_V111_FULL_E2E=1 npx vitest run worker/src/__tests__/v111-local-supabase.integration.test.ts
+   ```
+
+   该测试使用本地 Supabase 事务、四个 bare Git、真实 dsh/Engine/Broker 和本机 mock 模型，结束后回滚。
+9. 创建小型 V2 灰度批次，核对 `list_story_commits → read_story_commit_diff → submit_commit_relevance_verdict → read_snapshot_code → submit_review_result`。
+
+旧 V1 Job 不升级；新 Worker 同时支持 V1/V2。数据库先于 Worker 发布，禁止在旧 schema 上启动新 Worker。
+
+## 19.3 运行检查
+
+重点检查：
+
+- 每仓 `base_sha/head_sha/enumeration_status/commit_manifest_hash`；只有 `COMPLETE` 才称完整；
+- `scope_mode`、强关联/AI 候选数量、`candidate_manifest_hash` 和规则版本；
+- AI 候选是否 N/N 完成 verdict，是否存在真实 diff access；
+- scope expansion 是否只按 `PRIMARY → RELATED → GLOBAL` 单调发生并有 reason code；
+- `MR_METADATA_UNAVAILABLE` 只表示未配置/无法读取 MR 元数据，不表示没有 MR；
+- 日志、runtime event、浏览器响应中不得出现完整邮箱、Token 或 diff 正文。
+
+## 19.4 常见错误码
+
+| 错误码 | 含义 | 处理 |
+|---|---|---|
+| `IDENTITY_PEPPER_MISSING` | Vault 未配置身份 pepper | 配置命名 secret；已有结构化 Story-Id 任务仍可运行 |
+| `MR_METADATA_UNAVAILABLE` | 未配置 MR Token | 若需要 MR 增强则配置独立只读 Token，否则可忽略 |
+| `RANGE_INCOMPLETE` / `SHALLOW_INCOMPLETE` | Git 历史不足 | 检查仓库读取权限、网络和补深上限；任务应降级而非伪装完整 |
+| `ATTRIBUTION_RULESET_MISMATCH` | 冻结规则 hash 不一致 | 停止 V2 领取，核对迁移/规则版本，不允许改读实时规则 |
+| `TRIAGE_INCOMPLETE` | AI 候选未完成 N/N 判定 | 查看候选 diff access 和专用 verdict 调用，不要绕过 final 门禁 |
+| `DIFF_ACCESS_REQUIRED` | 判定缺真实 diff 读取事实 | 检查 archive metadata、Broker 和 access RPC |
+| `SNAPSHOT_SCOPE_DENIED` | 平台或 Harness 原生工具试图读取当前 PRIMARY/RELATED 范围外代码 | 使用受控 snapshot 工具，确需依赖时先调用 `expand_analysis_scope`；不要通过 bash/编码路径绕过 |
+| `PREPARATION_RECLAIM_HEAD_MISMATCH` | 接管时仓库 HEAD 与已冻结值不同 | 保留旧 Job 失败事实，创建新 Job，不修改旧 manifest |
+
+## 19.5 回滚
+
+- 先停止创建 V2 Job；V1 继续运行；
+- 排空 V2 在途任务后回滚 Worker/前端；
+- 删除 Worker 环境中的 `GITLAB_API_TOKEN` 可立即停止后续 MR 采集；
+- 数据库不执行 down migration、不删除表、不 reset；已冻结 V2 数据保留只读，修复通过新前滚 migration 完成。

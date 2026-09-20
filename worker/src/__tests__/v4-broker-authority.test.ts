@@ -11,7 +11,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -37,7 +37,7 @@ import { hashContent } from '../ai/snapshot/git-object-reader.js'
 import type { SnapshotStore } from '../ai/snapshot/snapshot-store.js'
 
 const logger = rootLogger.child({ test: 'v4-broker-authority' })
-const TASK_ID = 'task-broker-1'
+const TASK_ID = '11111111-2222-4333-8444-555555555555'
 const ATTEMPT = 1
 
 /**
@@ -108,6 +108,9 @@ async function boot(
     sessionRevision?: number
     /** 注入落库失败，用来验证审计不会被静默丢弃。 */
     failFlush?: () => boolean
+    analysisScope?: import('../db/jobs.js').StoryAnalysisScope
+    workspace?: import('../ai/workspace/attempt-workspace.js').AttemptWorkspace
+    onTriage?: (candidateId: string) => void
   } = {},
 ): Promise<Harness> {
   const policy = normalizeCapabilityPolicy({
@@ -141,6 +144,20 @@ async function boot(
     policyHash: hashPolicy(policy),
     authority,
     budget,
+    workspace: options.workspace,
+    analysisScope: options.analysisScope,
+    analysisScopeHash: options.analysisScope ? 'scope-identity' : undefined,
+    analysisStory: options.analysisScope
+      ? { code: 'PRJ-001', name: 'Demo story', allowedContext: 'demo context' }
+      : undefined,
+    agentRunId: options.analysisScope ? 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' : undefined,
+    submitCommitRelevanceVerdict: options.analysisScope
+      ? async (output) => {
+          options.onTriage?.(output.candidateId)
+          return { completed_count: 1, required_count: 1, triage_complete: true }
+        }
+      : undefined,
+    expandAnalysisScope: options.analysisScope ? async () => undefined : undefined,
     commitReview: async (input) => {
       commits.push(input)
       return { runId: 'run-1', committedAt: new Date().toISOString() }
@@ -235,6 +252,49 @@ function validSubmission(evidenceId: string): Record<string, unknown> {
   }
 }
 
+function primaryScope(): import('../db/jobs.js').StoryAnalysisScope {
+  return {
+    task_id: TASK_ID,
+    generation: 1,
+    scope_mode: 'DEVELOPER_WINDOW',
+    status: 'READY',
+    current_scope_level: 'PRIMARY',
+    algorithm_version: 'story-attribution-v2',
+    ruleset_hash: 'a'.repeat(64),
+    candidate_manifest_hash: 'b'.repeat(64),
+    scope_error_code: null,
+    degradation_reasons: [],
+    candidate_count: 1,
+    strong_count: 1,
+    ai_candidate_count: 0,
+    triage_revision: ATTEMPT,
+    triage_required_count: 0,
+    triage_completed_count: 0,
+    triage_complete: true,
+    candidates: [{
+      candidate_id: '77777777-6666-4555-8444-333333333333',
+      tier: 'STRONG',
+      rank_score: 900,
+      reason_codes: ['EXPLICIT_STORY_ID'],
+      repository: 'kdmanage-backend',
+      files: [{ path: 'src/selected.ts', old_path: null }],
+      short_sha: '123456abcdef',
+      subject: 'selected fixture',
+      author_name: 'Developer',
+      author_email_masked: null,
+      committed_at: '2026-09-19T00:00:00.000Z',
+      files_changed: 1,
+      additions: 1,
+      deletions: 0,
+      effective_status: 'EFFECTIVE',
+      diff_status: 'AVAILABLE',
+      triage_verdict: null,
+      selected: true,
+      selection_level: 'PRIMARY',
+    }],
+  }
+}
+
 beforeEach(() => {
   socketRoot = mkdtempSync(join(tmpdir(), 'crp-broker-auth-'))
 })
@@ -298,6 +358,99 @@ describe('broker attempt envelope', () => {
     const response = await h.post('/attempt/snapshot-pins', rootEnvelope(h))
     expect(response.status).toBe(409)
     expect(response.body.code).toBe('ATTEMPT_REVOKED')
+  })
+})
+
+describe('Harness native resource scope over the existing Unix socket route', () => {
+  function workspaceFixture() {
+    const workspaceDir = join(socketRoot, 'workspace')
+    const reposDir = join(workspaceDir, 'repos')
+    mkdirSync(join(reposDir, 'kdmanage-backend', 'src'), { recursive: true })
+    mkdirSync(join(workspaceDir, 'artifacts'), { recursive: true })
+    writeFileSync(join(reposDir, 'kdmanage-backend', 'src', 'selected.ts'), 'selected')
+    writeFileSync(join(reposDir, 'kdmanage-backend', 'src', 'outside.ts'), 'outside')
+    writeFileSync(join(workspaceDir, 'artifacts', 'result.txt'), 'artifact')
+    return {
+      cwd: workspaceDir,
+      reposDir,
+    } as import('../ai/workspace/attempt-workspace.js').AttemptWorkspace
+  }
+
+  const scopeQuery = (h: Harness, toolName: string, args: unknown) => h.post(
+    '/attempt/tool-audit',
+    rootEnvelope(h, { scopeCheck: { toolName, arguments: args } }, toolName),
+  )
+
+  it('preserves V1 behavior and does not turn scopeCheck arguments into audit rows', async () => {
+    const h = await boot({ workspace: workspaceFixture() })
+    const before = h.broker.pendingAudit()
+    const response = await scopeQuery(h, 'bash', {
+      command: 'cat repos/kdmanage-backend/src/outside.ts',
+    })
+    expect(response.body).toEqual({ allowed: true })
+    expect(h.broker.pendingAudit()).toEqual(before)
+    expect(h.broker.usage().toolCalls).toBe(0)
+  })
+
+  it('denies scoped native access and observes GLOBAL immediately after expansion', async () => {
+    const h = await boot({ analysisScope: primaryScope(), workspace: workspaceFixture() })
+    const before = h.broker.pendingAudit()
+
+    expect((await scopeQuery(h, 'read', {
+      file_path: 'repos/kdmanage-backend/src/selected.ts',
+    })).body).toEqual({ allowed: true })
+    expect((await scopeQuery(h, 'read_image', {
+      file_path: 'repos%2Fkdmanage-backend%2Fsrc%2Foutside.ts',
+    })).body).toMatchObject({ allowed: false, code: 'SNAPSHOT_SCOPE_DENIED' })
+    for (const [toolName, args] of [
+      ['grep', { pattern: 'outside', path: 'repos/kdmanage-backend' }],
+      ['glob', { pattern: '**/*.ts', path: 'repos/kdmanage-backend' }],
+      ['bash', { command: 'cat repos/kdmanage-backend/src/outside.ts' }],
+    ] as const) {
+      const denied = await scopeQuery(h, toolName, args)
+      expect(denied.body).toMatchObject({ allowed: false, code: 'SNAPSHOT_SCOPE_DENIED' })
+    }
+    // Queries themselves are authorization-only: no argument bytes, path, command, usage or event row.
+    expect(h.broker.pendingAudit()).toEqual(before)
+    expect(h.broker.usage().toolCalls).toBe(0)
+
+    const expanded = await h.post(
+      '/attempt/expand-analysis-scope',
+      rootEnvelope(h, {
+        targetLevel: 'GLOBAL',
+        reasonCode: 'CROSS_REPOSITORY_CONTRACT',
+      }, 'expand_analysis_scope'),
+    )
+    expect(expanded.body).toMatchObject({ expanded: true, currentLevel: 'GLOBAL' })
+    expect((await scopeQuery(h, 'bash', {
+      command: 'cat repos/kdmanage-backend/src/outside.ts',
+    })).body).toEqual({ allowed: true })
+  })
+
+  it('persists only a path-free stable denial report after a rejected query', async () => {
+    const h = await boot({ analysisScope: primaryScope(), workspace: workspaceFixture() })
+    const denied = await scopeQuery(h, 'read', {
+      file_path: 'repos/kdmanage-backend/src/outside.ts',
+    })
+    expect(denied.body.code).toBe('SNAPSHOT_SCOPE_DENIED')
+
+    await h.post('/attempt/tool-audit', rootEnvelope(h, {
+      decision: 'DENY',
+      reasonCode: 'SNAPSHOT_SCOPE_DENIED',
+      entries: [{
+        toolName: 'read',
+        permissionVerdict: 'DENY',
+        errorCode: 'SNAPSHOT_SCOPE_DENIED',
+      }],
+    }, 'read'))
+    await h.broker.flushAudit()
+    expect(h.decisions).toContainEqual(expect.objectContaining({
+      toolName: 'read',
+      policyLayer: 'broker',
+      reasonCode: 'SNAPSHOT_SCOPE_DENIED',
+    }))
+    expect(JSON.stringify({ audit: h.audit, decisions: h.decisions }))
+      .not.toContain('repos/kdmanage-backend/src/outside.ts')
   })
 })
 
@@ -482,6 +635,106 @@ describe('root-only submit at the broker layer', () => {
     expect(committed.usage.perAgent.map((row) => row.agentId).sort()).toEqual(
       [h.authority.root.agentId, 'child-1'].sort(),
     )
+  })
+
+  it('blocks v2 final submission until every frozen AI candidate is triaged', async () => {
+    const candidateId = '99999999-8888-4777-8666-555555555555'
+    const triaged: string[] = []
+    const h = await boot({
+      analysisScope: {
+        task_id: TASK_ID,
+        generation: 1,
+        scope_mode: 'DEVELOPER_WINDOW',
+        status: 'READY',
+        current_scope_level: 'PRIMARY',
+        algorithm_version: 'story-attribution-v2',
+        ruleset_hash: 'a'.repeat(64),
+        candidate_manifest_hash: 'b'.repeat(64),
+        scope_error_code: null,
+        degradation_reasons: [],
+        candidate_count: 2,
+        strong_count: 1,
+        ai_candidate_count: 1,
+        triage_revision: 1,
+        triage_required_count: 1,
+        triage_completed_count: 0,
+        triage_complete: false,
+        candidates: [{
+          candidate_id: candidateId,
+          tier: 'AI_CANDIDATE',
+          rank_score: 500,
+          reason_codes: ['OWNER_WINDOW_MODULE'],
+          repository: 'kdmanage-backend',
+          files: [{ path: 'src/Order.java', old_path: null }],
+          short_sha: 'abcdef123456',
+          subject: 'candidate change',
+          author_name: 'Developer',
+          author_email_masked: 'd***@example.com',
+          committed_at: '2026-09-19T00:00:00.000Z',
+          files_changed: 1,
+          additions: 2,
+          deletions: 0,
+          effective_status: 'EFFECTIVE',
+          diff_status: 'UNAVAILABLE',
+          triage_verdict: null,
+          selected: false,
+          selection_level: null,
+        }, {
+          candidate_id: '88888888-7777-4666-8555-444444444444',
+          tier: 'STRONG',
+          rank_score: 900,
+          reason_codes: ['EXPLICIT_STORY_ID'],
+          repository: 'kdmanage-backend',
+          files: [{ path: 'src/Order.java', old_path: null }],
+          short_sha: '123456abcdef',
+          subject: 'strong selected change',
+          author_name: 'Developer',
+          author_email_masked: 'd***@example.com',
+          committed_at: '2026-09-18T00:00:00.000Z',
+          files_changed: 1,
+          additions: 1,
+          deletions: 0,
+          effective_status: 'EFFECTIVE',
+          diff_status: 'AVAILABLE',
+          triage_verdict: null,
+          selected: true,
+          selection_level: 'PRIMARY',
+        }],
+      },
+      onTriage: (id) => triaged.push(id),
+    })
+    const read = await h.post(
+      '/attempt/read-code',
+      rootEnvelope(h, { repository: 'kdmanage-backend', path: 'src/Order.java', startLine: 1, endLine: 10 }, 'read_snapshot_code'),
+    )
+    const submission = validSubmission(String(read.body.evidenceId))
+    const blocked = await h.post(
+      '/attempt/submit-review',
+      rootEnvelope(h, { submission }, 'submit_review_result'),
+    )
+    expect(blocked.body).toMatchObject({ accepted: false, code: 'TRIAGE_INCOMPLETE' })
+    expect(h.commits).toHaveLength(0)
+
+    const triage = await h.post(
+      '/attempt/submit-commit-relevance',
+      rootEnvelope(h, {
+        candidateId,
+        verdict: 'UNCERTAIN',
+        reasonCodes: ['DIFF_UNAVAILABLE'],
+        confidence: 0.2,
+        diffAccessIds: [],
+        summary: 'The frozen diff is unavailable, so relevance remains uncertain.',
+      }, 'submit_commit_relevance_verdict'),
+    )
+    expect(triage.body).toMatchObject({ accepted: true, triageComplete: true })
+
+    const accepted = await h.post(
+      '/attempt/submit-review',
+      rootEnvelope(h, { submission }, 'submit_review_result'),
+    )
+    expect(accepted.body.accepted).toBe(true)
+    expect(triaged).toEqual([candidateId])
+    expect(h.commits).toHaveLength(1)
   })
 
   it('forwards the database-issued fencing revision on a retried attempt', async () => {

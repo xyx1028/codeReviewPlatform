@@ -14,6 +14,8 @@ export interface WorkerConfig {
   gitlabBaseUrl: string
   gitlabDeployUser: string | null
   gitlabDeployToken: string | null
+  /** Optional read-only GitLab REST token; never reused for Git clone authentication. */
+  gitlabApiToken: string | null
   workerId: string
   workspaceRoot: string
   codeCacheRoot: string
@@ -212,6 +214,7 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
   )
   const gitlabDeployUser = optStr(env, 'GITLAB_DEPLOY_USER')
   const gitlabDeployToken = optStr(env, 'GITLAB_DEPLOY_TOKEN')
+  const gitlabApiToken = optStr(env, 'GITLAB_API_TOKEN')
 
   if (gitAuthMode === 'token' && (!gitlabDeployUser || !gitlabDeployToken)) {
     throw new ConfigError(
@@ -288,6 +291,7 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     gitlabBaseUrl,
     gitlabDeployUser,
     gitlabDeployToken,
+    gitlabApiToken,
     workerId,
     workspaceRoot,
     codeCacheRoot,

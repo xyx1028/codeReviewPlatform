@@ -52,9 +52,9 @@ describe('v4 capability contract', () => {
 
   it('locates and parses the checked-in manifest', () => {
     expect(resolveContractPath()).toMatch(/v4-capability-contract\.json$/)
-    // R2（V1.6）：skill-badge 从 enabledPlugins 移到 disabledPlugins，与已安装 base bundle
-    // 的真实状态对齐（方案 §21 第 6 条）。修订号与 supabase/migrations/*_v4_harness_manifest_r2.sql 一一对应。
-    expect(contract.manifestRevision).toBe(2)
+    // R3（V1.11）：正式需求提交候选/diff/判定/扩展工具加入冻结能力面；修订号与
+    // 20260919075449_v4_harness_manifest_r3.sql 一一对应。
+    expect(contract.manifestRevision).toBe(3)
     expect(contract.contractVersion).toBe(V4_POLICY_VERSION)
     expect(contract.harnessVersion).toBe('0.1.5-rc.1')
     expect(V4_DEFAULT_POLICY).toEqual(contract.defaultPolicy)
@@ -182,6 +182,22 @@ describe('v4 capability contract', () => {
       capability: 'submitReview',
       mutating: true,
     })
+    expect(brokerRouteCapability('/attempt/list-story-commits')).toEqual({
+      capability: 'snapshotRead',
+      mutating: false,
+    })
+    expect(brokerRouteCapability('/attempt/read-story-commit-diff')).toEqual({
+      capability: 'snapshotRead',
+      mutating: false,
+    })
+    expect(brokerRouteCapability('/attempt/submit-commit-relevance')).toEqual({
+      capability: 'submitReview',
+      mutating: true,
+    })
+    expect(brokerRouteCapability('/attempt/expand-analysis-scope')).toEqual({
+      capability: 'submitReview',
+      mutating: true,
+    })
     // 未知路由必须返回 null，让 Broker fail closed 而不是猜。
     expect(brokerRouteCapability('/attempt/anything-else')).toBeNull()
   })
@@ -213,15 +229,23 @@ describe('v4 role tool projection', () => {
       'web_search',
       'web_fetch',
       'read_snapshot_code',
+      'list_story_commits',
+      'read_story_commit_diff',
+      'submit_commit_relevance_verdict',
+      'expand_analysis_scope',
     ]) {
       expect(tools, tool).toContain(tool)
     }
   })
 
-  it('never exposes submit_review_result to a child role', () => {
+  it('never exposes submit or scope mutation tools to a child role', () => {
     for (const role of AGENT_ROLES.filter((r) => r !== 'root-reviewer')) {
       const tools = resolveToolsForRole({ role, policy, delegationDepth: 1 })
       expect(tools, role).not.toContain(SUBMIT_TOOL_NAME)
+      expect(tools, role).not.toContain('submit_commit_relevance_verdict')
+      expect(tools, role).not.toContain('expand_analysis_scope')
+      expect(tools, role).toContain('list_story_commits')
+      expect(tools, role).toContain('read_story_commit_diff')
       expect(brokerCapabilitiesForRole({ role, policy, delegationDepth: 1 })).not.toContain(
         'submitReview',
       )

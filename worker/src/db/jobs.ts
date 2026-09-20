@@ -4,6 +4,10 @@
  */
 
 import type { BranchName, RepositoryName } from '../git/repositories.js'
+import type {
+  MergeRequestEnrichmentStatus,
+  RepositoryMergeRequestWire,
+} from '../git/gitlab-readonly-client.js'
 import type { DbClient } from './client.js'
 import type {
   RuntimeEventBatchResult,
@@ -39,6 +43,119 @@ export interface JobContext {
   model_config_id: string
   requested_branch: BranchName
   total_stories: number
+  /** V1.11：缺失即历史 v1，绝不能把在途旧 Job 隐式升级。 */
+  analysis_context_version?: 1 | 2
+  commit_window_days?: 14 | 21 | 28
+  required_worker_scope_version?: 1 | 2
+  story_input_catalog_hash?: string | null
+  identity_snapshot_hash?: string | null
+  repository_manifest_hash?: string | null
+  selected_scope_hash?: string | null
+  attribution_algorithm_version?: string | null
+  ruleset_hash?: string | null
+}
+
+export interface FrozenScopeStory {
+  task_id: string
+  story_id: string
+  story_code: string
+  story_name: string
+  owners_text: string
+  normalized_developer_ids: string[]
+  project_name: string | null
+  application_name: string | null
+  release_window: string | null
+  requirement_context: Record<string, unknown>
+  input_hash: string
+}
+
+export interface FrozenScopeIdentity {
+  developer_id: string
+  display_name: string
+  email_fingerprint: string | null
+  author_name_aliases: string[]
+  verification_status: string
+}
+
+export interface FrozenJobScopeInputs {
+  story_input_catalog_hash: string
+  identity_snapshot_hash: string
+  rule_version_id: string
+  ruleset_hash: string
+  idempotent: boolean
+  /**
+   * Worker 生成全部 task scope 所需的冻结明细。当前 foundation RPC 若未返回这两项，
+   * v2 preparation 会显式失败；不能拿实时 review_story/developer_identity 代替冻结输入。
+   */
+  stories?: FrozenScopeStory[]
+  identities?: FrozenScopeIdentity[]
+  previous_repository_heads?: Partial<Record<RepositoryName, string | null>>
+}
+
+export interface StoryAnalysisScopeCandidateFile {
+  /** Repository-relative path frozen from analysis_repository_commit_file. */
+  path: string
+  /** Previous path for a rename/copy; it is also in PRIMARY when present. */
+  old_path?: string | null
+  change_type?: string
+  additions?: number
+  deletions?: number
+  is_binary?: boolean
+}
+
+export interface StoryAnalysisScopeCandidate {
+  candidate_id: string
+  tier: 'STRONG' | 'AI_CANDIDATE' | 'WEAK' | 'EXCLUDED' | 'CONFLICT'
+  rank_score: number
+  reason_codes: string[]
+  /**
+   * Trusted DB-proxy authorization fields. get_story_task_analysis_scope must
+   * project `repository` plus `files[{path,old_path}]` from the frozen commit
+   * rows; they are never accepted from a model request. Older DB proxies may
+   * omit `files`, in which case PRIMARY snapshot access fails closed.
+   */
+  repository: RepositoryName
+  files?: StoryAnalysisScopeCandidateFile[]
+  /** 仅供 Worker/Broker 解析 Git 对象；正式模型工具永不返回。 */
+  commit_sha?: string
+  short_sha: string
+  subject: string
+  author_name: string
+  author_email_masked: string | null
+  committed_at: string
+  files_changed: number
+  additions: number
+  deletions: number
+  effective_status: string
+  diff_status: string
+  /** Current-run verdict projection. Never inherited from another Attempt. */
+  triage_verdict: 'RELATED' | 'UNRELATED' | 'UNCERTAIN' | null
+  /** Database-generated final PRIMARY membership. Missing values fail closed. */
+  selected: boolean
+  selection_level: 'PRIMARY' | null
+}
+
+export interface StoryAnalysisScope {
+  task_id: string
+  generation: number
+  scope_mode: string
+  status: string
+  current_scope_level: 'PRIMARY' | 'RELATED' | 'GLOBAL'
+  algorithm_version: string
+  ruleset_hash: string
+  candidate_manifest_hash: string
+  scope_error_code: string | null
+  degradation_reasons: string[]
+  candidate_count: number
+  strong_count: number
+  ai_candidate_count: number
+  triage_revision: number
+  triage_required_count: number
+  triage_completed_count: number
+  triage_complete: boolean
+  story_input_hash?: string | null
+  requirement_context?: Record<string, unknown>
+  candidates: StoryAnalysisScopeCandidate[]
 }
 
 export interface RepositorySnapshot {
@@ -278,8 +395,95 @@ function toStoryTask(raw: Record<string, unknown>): StoryTask {
   }
 }
 
+export interface GitIdentityMatchInput {
+  inputId: string
+  email: string
+  provider?: 'git' | 'gitlab'
+}
+
+export type GitIdentityMatchStatus = 'MATCHED' | 'UNMATCHED' | 'CONFLICT'
+
+export interface GitIdentityMatchResult {
+  input_id: string
+  provider: 'git' | 'gitlab'
+  email_fingerprint: string
+  masked_email: string
+  match_status: GitIdentityMatchStatus
+  developer_id: string | null
+  display_name: string | null
+  verification_status: string | null
+  author_name_aliases: string[]
+}
+
 export class JobsDb {
   constructor(private db: DbClient) {}
+
+  /**
+   * Normalize and match raw Git emails in PostgreSQL, where the Vault-backed identity pepper lives.
+   * Raw emails are present only in this RPC request and are never copied into returned objects.
+   */
+  async matchAnalysisGitIdentities(
+    authors: readonly GitIdentityMatchInput[],
+  ): Promise<GitIdentityMatchResult[]> {
+    if (authors.length === 0) return []
+    const inputIds = new Set<string>()
+    for (const author of authors) {
+      if (author.inputId.trim() === '' || inputIds.has(author.inputId)) {
+        throw new Error('identity matcher input ids must be non-empty and unique')
+      }
+      inputIds.add(author.inputId)
+    }
+
+    const matched: GitIdentityMatchResult[] = []
+    for (let offset = 0; offset < authors.length; offset += 1000) {
+      const chunk = authors.slice(offset, offset + 1000)
+      const data = await this.db.rpc<unknown>('match_analysis_git_identities', {
+        p_authors: chunk.map((author) => ({
+          input_id: author.inputId,
+          provider: author.provider ?? 'gitlab',
+          email: author.email,
+        })),
+      })
+      for (const raw of unwrapArray<Record<string, unknown>>(data)) {
+        const status = raw.match_status
+        const provider = raw.provider
+        const fingerprint = raw.email_fingerprint
+        const masked = raw.masked_email
+        if (
+          (status !== 'MATCHED' && status !== 'UNMATCHED' && status !== 'CONFLICT')
+          || (provider !== 'git' && provider !== 'gitlab')
+          || typeof fingerprint !== 'string'
+          || !/^[0-9a-f]{64}$/.test(fingerprint)
+          || typeof masked !== 'string'
+        ) {
+          throw new Error('match_analysis_git_identities returned an invalid result')
+        }
+        matched.push({
+          input_id: String(raw.input_id ?? ''),
+          provider,
+          email_fingerprint: fingerprint,
+          masked_email: masked,
+          match_status: status,
+          developer_id: typeof raw.developer_id === 'string' ? raw.developer_id : null,
+          display_name: typeof raw.display_name === 'string' ? raw.display_name : null,
+          verification_status:
+            typeof raw.verification_status === 'string' ? raw.verification_status : null,
+          author_name_aliases: Array.isArray(raw.author_name_aliases)
+            ? raw.author_name_aliases.filter((value): value is string => typeof value === 'string')
+            : [],
+        })
+      }
+    }
+    const matchedIds = new Set(matched.map((result) => result.input_id))
+    if (
+      matched.length !== authors.length
+      || matchedIds.size !== authors.length
+      || matched.some((result) => !inputIds.has(result.input_id))
+    ) {
+      throw new Error('match_analysis_git_identities returned an incomplete result set')
+    }
+    return matched
+  }
 
   async claimJobForPreparation(workerId: string): Promise<PreparationClaim | null> {
     const data = await this.db.rpc<unknown>('claim_job_for_preparation', {
@@ -299,6 +503,221 @@ export class JobsDb {
       p_job_id: jobId,
       p_worker_id: workerId,
       p_snapshots: snapshots,
+    })
+  }
+
+  async freezeAnalysisJobScopeInputs(jobId: string, workerId: string): Promise<FrozenJobScopeInputs> {
+    const data = await this.db.rpc<unknown>('freeze_analysis_job_scope_inputs', {
+      p_job_id: jobId,
+      p_worker_id: workerId,
+    })
+    const row = unwrapMaybeObject<FrozenJobScopeInputs>(data)
+    if (!row?.story_input_catalog_hash || !row.identity_snapshot_hash || !row.ruleset_hash) {
+      throw Object.assign(new Error('freeze_analysis_job_scope_inputs returned an incomplete identity'), {
+        code: 'ANALYSIS_SCOPE_INPUTS_MISSING',
+      })
+    }
+    return row
+  }
+
+  async saveAnalysisRepositoryCommitManifest(input: {
+    jobId: string
+    workerId: string
+    repositoryName: RepositoryName
+    manifest: Record<string, unknown>
+    manifestHash: string
+  }): Promise<Record<string, unknown>> {
+    const data = await this.db.rpc<unknown>('save_analysis_repository_commit_manifest', {
+      p_job_id: input.jobId,
+      p_worker_id: input.workerId,
+      p_repository_name: input.repositoryName,
+      p_manifest: input.manifest,
+      p_manifest_hash: input.manifestHash,
+    })
+    return unwrapMaybeObject<Record<string, unknown>>(data) ?? {}
+  }
+
+  async saveAnalysisRepositoryMergeRequests(input: {
+    jobId: string
+    workerId: string
+    repositoryName: RepositoryName
+    status: MergeRequestEnrichmentStatus
+    errorCode: string | null
+    mergeRequests: RepositoryMergeRequestWire[]
+  }): Promise<Record<string, unknown>> {
+    const data = await this.db.rpc<unknown>('save_analysis_repository_merge_requests', {
+      p_job_id: input.jobId,
+      p_worker_id: input.workerId,
+      p_repository_name: input.repositoryName,
+      p_status: input.status,
+      p_error_code: input.errorCode,
+      p_merge_requests: input.mergeRequests,
+    })
+    return unwrapMaybeObject<Record<string, unknown>>(data) ?? {}
+  }
+
+  async saveAnalysisStoryScopes(input: {
+    jobId: string
+    workerId: string
+    algorithmVersion: string
+    scopes: Array<Record<string, unknown>>
+    scopeCatalogHash: string
+  }): Promise<Record<string, unknown>> {
+    const data = await this.db.rpc<unknown>('save_analysis_story_scopes', {
+      p_job_id: input.jobId,
+      p_worker_id: input.workerId,
+      p_algorithm_version: input.algorithmVersion,
+      p_scopes: input.scopes,
+      p_scope_catalog_hash: input.scopeCatalogHash,
+    })
+    return unwrapMaybeObject<Record<string, unknown>>(data) ?? {}
+  }
+
+  async finalizeAnalysisStoryScope(jobId: string, workerId: string, generation = 1): Promise<Record<string, unknown>> {
+    const data = await this.db.rpc<unknown>('finalize_analysis_story_scope', {
+      p_job_id: jobId,
+      p_worker_id: workerId,
+      p_expected_generation: generation,
+    })
+    return unwrapMaybeObject<Record<string, unknown>>(data) ?? {}
+  }
+
+  async getStoryTaskAnalysisScope(input: { taskId: string; workerId: string; claimToken: string }): Promise<StoryAnalysisScope> {
+    const data = await this.db.rpc<unknown>('get_story_task_analysis_scope', {
+      p_task_id: input.taskId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+    })
+    const row = unwrapMaybeObject<StoryAnalysisScope>(data)
+    if (!row?.candidate_manifest_hash || !row.ruleset_hash) {
+      throw Object.assign(new Error('get_story_task_analysis_scope returned no frozen scope'), {
+        code: 'ANALYSIS_SCOPE_NOT_FROZEN',
+      })
+    }
+    return { ...row, candidates: unwrapArray<StoryAnalysisScopeCandidate>(row.candidates) }
+  }
+
+  async getStoryCommitDiffArchiveMetadata(input: {
+    taskId: string
+    workerId: string
+    claimToken: string
+    candidateId: string
+  }): Promise<{
+    candidate_id: string
+    repository_name: RepositoryName
+    commit_sha: string
+    status: string
+    archive_sha256: string | null
+  }> {
+    const data = await this.db.rpc<unknown>('get_story_commit_diff_archive_metadata', {
+      p_task_id: input.taskId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_candidate_id: input.candidateId,
+    })
+    const row = unwrapMaybeObject<{
+      candidate_id: string
+      repository_name: RepositoryName
+      commit_sha: string
+      status: string
+      archive_sha256: string | null
+    }>(data)
+    if (!row?.candidate_id || !row.commit_sha) {
+      throw Object.assign(new Error('get_story_commit_diff_archive_metadata returned no frozen candidate'), {
+        code: 'STORY_CANDIDATE_INVALID',
+      })
+    }
+    return row
+  }
+
+  async recordStoryCommitAccess(input: {
+    taskId: string
+    workerId: string
+    claimToken: string
+    agentRunId: string
+    agentNodeId: string | null
+    candidateId: string
+    toolCallId: string
+    accessKind: 'DIFF'
+    filePath: string | null
+    cursorValue: string | null
+    bytesReturned: number
+    diffLines: number
+    truncated: boolean
+    archiveSha256: string | null
+  }): Promise<string> {
+    return this.db.rpc<string>('record_story_commit_access', {
+      p_task_id: input.taskId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_agent_run_id: input.agentRunId,
+      p_agent_node_id: input.agentNodeId,
+      p_candidate_id: input.candidateId,
+      p_tool_audit_id: null,
+      p_tool_call_id: input.toolCallId,
+      p_access_kind: input.accessKind,
+      p_file_path: input.filePath,
+      p_cursor_value: input.cursorValue,
+      p_bytes_returned: input.bytesReturned,
+      p_diff_lines: input.diffLines,
+      p_truncated: input.truncated,
+      p_archive_sha256: input.archiveSha256,
+    })
+  }
+
+  async submitStoryCommitRelevanceVerdict(input: {
+    taskId: string
+    workerId: string
+    claimToken: string
+    agentRunId: string
+    candidateId: string
+    triageRevision: number
+    verdict: string
+    reasonCodes: readonly string[]
+    confidence: number
+    diffAccessIds: readonly string[]
+    summary: string
+  }): Promise<{ completed_count: number; required_count: number; triage_complete: boolean }> {
+    const data = await this.db.rpc<unknown>('submit_story_commit_relevance_verdict', {
+      p_task_id: input.taskId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_agent_run_id: input.agentRunId,
+      p_candidate_id: input.candidateId,
+      p_triage_revision: input.triageRevision,
+      p_verdict: input.verdict,
+      p_reason_codes: input.reasonCodes,
+      p_confidence: input.confidence,
+      p_diff_access_ids: input.diffAccessIds,
+      p_summary: input.summary,
+    })
+    const row = unwrapMaybeObject<{ completed_count: number; required_count: number; triage_complete: boolean }>(data)
+    return {
+      completed_count: Number(row?.completed_count ?? 0),
+      required_count: Number(row?.required_count ?? 0),
+      triage_complete: row?.triage_complete === true,
+    }
+  }
+
+  async expandAnalysisScope(input: {
+    taskId: string
+    workerId: string
+    claimToken: string
+    agentRunId: string
+    agentNodeId: string | null
+    fromLevel: string
+    toLevel: string
+    reasonCode: string
+  }): Promise<string> {
+    return this.db.rpc<string>('record_analysis_scope_expansion', {
+      p_task_id: input.taskId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_agent_run_id: input.agentRunId,
+      p_agent_node_id: input.agentNodeId,
+      p_from_level: input.fromLevel,
+      p_to_level: input.toLevel,
+      p_reason_code: input.reasonCode,
     })
   }
 
@@ -471,8 +890,8 @@ export class JobsDb {
       provider: string
       toolPolicyHash: string
     },
-  ): Promise<void> {
-    await this.db.rpc<unknown>('register_analysis_agent_node', {
+  ): Promise<string> {
+    const data = await this.db.rpc<unknown>('register_analysis_agent_node', {
       p_task_id: input.taskId,
       p_worker_id: input.workerId,
       p_claim_token: input.claimToken,
@@ -484,6 +903,9 @@ export class JobsDb {
       p_provider: input.provider,
       p_tool_policy_hash: input.toolPolicyHash,
     })
+    const row = unwrapMaybeObject<{ node_id?: string }>(data)
+    if (!row?.node_id) throw new Error('register_analysis_agent_node returned no node_id')
+    return row.node_id
   }
 
   async markAgentNodeTerminal(
@@ -575,6 +997,10 @@ export class JobsDb {
       profileHash: string | null
       /** V1.6：本次 attempt 实际物化的技能目录身份。恢复门禁按它比对。 */
       skillCatalogHash?: string | null
+      /** V1.11：Worker profile 中的完整 scope continuity identity。 */
+      analysisScopeHash?: string | null
+      /** V1.11：当前 Attempt 冻结的归因规则身份。 */
+      attributionRulesetHash?: string | null
       /**
        * V1.9：`contentHash` 覆盖的前缀字节数。
        *
@@ -599,6 +1025,8 @@ export class JobsDb {
       p_status: 'OPEN',
       p_skill_catalog_hash: input.skillCatalogHash ?? null,
       p_prefix_bytes: input.prefixBytes ?? null,
+      p_analysis_scope_hash: input.analysisScopeHash ?? null,
+      p_attribution_ruleset_hash: input.attributionRulesetHash ?? null,
     })
   }
 
@@ -793,6 +1221,11 @@ export class JobsDb {
     configHash: string | null
     promptVersion: string | null
     modelLabel: string | null
+    scopeGeneration?: number | null
+    triageRevision?: number | null
+    candidateManifestHash?: string | null
+    analysisScopeHash?: string | null
+    attributionRulesetHash?: string | null
   }): Promise<AgentReviewCommitReceipt> {
     const data = await this.db.rpc<unknown>('save_agent_review_result', {
       p_task_id: input.taskId,
@@ -805,6 +1238,11 @@ export class JobsDb {
       p_config_hash: input.configHash,
       p_prompt_version: input.promptVersion,
       p_model_label: input.modelLabel,
+      p_scope_generation: input.scopeGeneration ?? null,
+      p_triage_revision: input.triageRevision ?? null,
+      p_candidate_manifest_hash: input.candidateManifestHash ?? null,
+      p_analysis_scope_hash: input.analysisScopeHash ?? null,
+      p_attribution_ruleset_hash: input.attributionRulesetHash ?? null,
     })
     const receipt = unwrapMaybeObject<AgentReviewCommitReceipt>(data)
     if (!receipt?.run_id) throw new Error('save_agent_review_result returned no receipt')

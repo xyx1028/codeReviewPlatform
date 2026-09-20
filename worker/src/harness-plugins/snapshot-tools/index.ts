@@ -363,4 +363,130 @@ export function apply(ctx: Context, config: SnapshotToolsConfig): void {
       }),
     }),
   )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'list_story_commits',
+      description:
+        'List commits from the frozen candidate manifest for this story. The returned candidateId is the only identifier accepted by read_story_commit_diff; arbitrary commit SHAs are never accepted.',
+      parameters: {
+        tier: { type: 'string', enum: ['STRONG', 'AI_CANDIDATE', 'ALL'], description: 'Candidate tier filter. AI_CANDIDATE also includes WEAK candidates requiring triage.' },
+        repository: { type: 'string', description: 'Optional pinned repository name.' },
+        cursor: { type: 'string', description: 'Opaque nextCursor returned by the previous page.' },
+        limit: { type: 'integer', description: 'Page size from 1 to 100 (default 50).' },
+      },
+      output: {
+        schema: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            generation: { type: 'integer', required: true },
+            manifestHash: { type: 'string', required: true },
+            total: { type: 'integer', required: true },
+            items: {
+              type: 'array', required: true,
+              items: {
+                type: 'object', additionalProperties: false,
+                properties: {
+                  candidateId: { type: 'string', required: true },
+                  tier: { type: 'string', required: true },
+                  repository: { type: 'string', required: true },
+                  shortSha: { type: 'string', required: true },
+                  subject: { type: 'string', required: true },
+                  authorName: { type: 'string', required: true },
+                  committedAt: { type: 'string', required: true },
+                  filesChanged: { type: 'integer', required: true },
+                  additions: { type: 'integer', required: true },
+                  deletions: { type: 'integer', required: true },
+                  reasonCodes: { type: 'array', required: true, items: { type: 'string' } },
+                  effectiveStatus: { type: 'string', required: true },
+                  diffStatus: { type: 'string', required: true },
+                },
+              },
+            },
+            hasMore: { type: 'boolean', required: true },
+            nextCursor: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
+            truncated: { type: 'boolean', required: true },
+          },
+        },
+        render: (_args, value) => {
+          const result = value as { items: Array<Record<string, unknown>>; hasMore: boolean; nextCursor: string | null }
+          const lines = result.items.map((item) =>
+            `${item.candidateId} ${item.tier} ${item.repository}/${item.shortSha}: ${item.subject}`,
+          )
+          if (result.hasMore) lines.push(`nextCursor: ${result.nextCursor}`)
+          return [{ type: 'text', text: lines.length > 0 ? lines.join('\n') : 'No frozen story commit candidates.' }]
+        },
+      },
+      async execute(args, exec) {
+        exec.signal.throwIfAborted()
+        return call('/attempt/list-story-commits', args as Record<string, unknown>, {
+          harnessAgentId: exec.agent?.id,
+          toolName: 'list_story_commits',
+          toolCallId: String(exec.callId),
+        })
+      },
+      presentCall: (args) => ({ card: 'generic', title: 'List story commits', kind: 'search', rawInput: args }),
+    }),
+  )
+
+  ctx.tools.register(
+    defineTool({
+      name: 'read_story_commit_diff',
+      description:
+        'Read a bounded page of the real Git diff for one frozen candidateId. This is navigation evidence for relevance triage, not final implementation evidence. Blocked paths and arbitrary SHAs are rejected.',
+      parameters: {
+        candidateId: { type: 'string', required: true, description: 'candidateId returned by list_story_commits.' },
+        filePath: { type: 'string', description: 'Optional changed repository-relative file path.' },
+        cursor: { type: 'string', description: 'Opaque nextCursor returned by the previous diff page.' },
+      },
+      output: {
+        schema: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            accessId: { type: 'string', required: true },
+            candidateId: { type: 'string', required: true },
+            repository: { type: 'string', required: true },
+            shortSha: { type: 'string', required: true },
+            subject: { type: 'string', required: true },
+            status: { type: 'string', required: true },
+            files: {
+              type: 'array', required: true,
+              items: {
+                type: 'object', additionalProperties: false,
+                properties: {
+                  path: { type: 'string', required: true },
+                  additions: { required: true, oneOf: [{ type: 'integer' }, { type: 'null' }] },
+                  deletions: { required: true, oneOf: [{ type: 'integer' }, { type: 'null' }] },
+                  binary: { type: 'boolean', required: true },
+                },
+              },
+            },
+            filesTotal: { type: 'integer', required: true },
+            filesTruncated: { type: 'boolean', required: true },
+            blockedFileCount: { type: 'integer', required: true },
+            diff: { type: 'string', required: true },
+            diffLines: { type: 'integer', required: true },
+            bytesReturned: { type: 'integer', required: true },
+            archiveHash: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
+            truncated: { type: 'boolean', required: true },
+            nextCursor: { oneOf: [{ type: 'string' }, { type: 'null' }], required: true },
+          },
+        },
+        render: (_args, value) => {
+          const result = value as { accessId: string; status: string; diff: string; truncated: boolean; nextCursor: string | null }
+          const suffix = result.truncated ? `\nnextCursor: ${result.nextCursor}` : ''
+          return [{ type: 'text', text: `status=${result.status} accessId=${result.accessId}\n${result.diff}${suffix}` }]
+        },
+      },
+      async execute(args, exec) {
+        exec.signal.throwIfAborted()
+        return call('/attempt/read-story-commit-diff', args as Record<string, unknown>, {
+          harnessAgentId: exec.agent?.id,
+          toolName: 'read_story_commit_diff',
+          toolCallId: String(exec.callId),
+        })
+      },
+      presentCall: (args) => ({ card: 'generic', title: 'Read story commit diff', kind: 'read', rawInput: args }),
+    }),
+  )
 }

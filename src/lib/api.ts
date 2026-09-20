@@ -3,6 +3,22 @@ import { requireSupabase } from './supabase'
 import type { FieldMapping } from './excel'
 import type { UserDeletionImpact } from './user-deletion'
 import type {
+  AttributionRuleCatalog,
+  AttributionRuleCondition,
+  AttributionRuleDefinition,
+  AttributionRulesApi,
+  AttributionRuleVersion,
+} from '../hooks/useAttributionRules'
+import type {
+  RuntimeAnalysisScopeApi,
+  RuntimeAnalysisScopeCommit,
+  RuntimeAnalysisScopeCommitPage,
+  RuntimeAnalysisScopeSummary,
+  RuntimeRepositoryScope,
+  RuntimeScopeCommitView,
+  RuntimeScopeExpansion,
+} from '../hooks/useRuntimeAnalysisScope'
+import type {
   ActiveAnalysisBatchList,
   AdminUserListItem,
   AgentRunDetail,
@@ -23,6 +39,8 @@ import type {
   BatchOperationLogWithBatch,
   BatchWorkspace,
   DefaultBranch,
+  DeveloperGitIdentityRecord,
+  SaveDeveloperGitIdentityInput,
   HumanReview,
   HumanReviewResult,
   ImportFileRecord,
@@ -793,10 +811,26 @@ export async function setBatchModel(batchId: string, modelConfigId: string) {
   return unwrap<string>({ data, error })
 }
 
-/** 登录用户：校验权限与前置条件，复制批次分支，建立任务与 story task。返回 job id。 */
-export async function enqueueAnalysisJob(batchId: string) {
+export type AnalysisContextVersion = 1 | 2
+export type CommitWindowDays = 14 | 21 | 28
+
+/**
+ * 登录用户：创建分析任务。未传 options 时保持历史 V1 行为；V1.11 页面显式传 version=2。
+ */
+export async function enqueueAnalysisJob(
+  batchId: string,
+  options?: { analysisContextVersion: AnalysisContextVersion; commitWindowDays: CommitWindowDays },
+) {
   const client = requireSupabase()
-  const { data, error } = await client.rpc('enqueue_analysis_job', { p_batch_id: batchId })
+  if (options === undefined || options.analysisContextVersion === 1) {
+    const { data, error } = await client.rpc('enqueue_analysis_job', { p_batch_id: batchId })
+    return unwrap<string>({ data, error })
+  }
+  const { data, error } = await client.rpc('enqueue_analysis_job_with_context', {
+    p_batch_id: batchId,
+    p_analysis_context_version: 2,
+    p_commit_window_days: options.commitWindowDays,
+  })
   return unwrap<string>({ data, error })
 }
 
@@ -1017,6 +1051,519 @@ export async function getAnalysisRuntimeTaskEvents(
     p_limit: limit,
   })
   return unwrap<RuntimeTaskEventHistoryResponse>({ data, error })
+}
+
+// ---------------------------------------------------------------------------
+// V1.11 需求提交归属与精准变更分析（foundation RPC 适配）
+// ---------------------------------------------------------------------------
+
+export async function adminListDeveloperGitIdentities(): Promise<DeveloperGitIdentityRecord[]> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_list_developer_git_identities')
+  return unwrap<DeveloperGitIdentityRecord[]>({ data, error })
+}
+
+export async function adminSaveDeveloperGitIdentity(
+  input: SaveDeveloperGitIdentityInput,
+): Promise<{ developer_id: string; git_identity_id: string; masked_email: string }> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_upsert_developer_git_identity_from_email', {
+    p_developer_id: input.developerId ?? null,
+    p_git_identity_id: input.gitIdentityId ?? null,
+    p_display_name: input.displayName,
+    p_employee_code: input.employeeCode ?? null,
+    p_email: input.email,
+    p_author_name_aliases: input.authorNameAliases,
+    p_gitlab_username: input.gitlabUsername ?? null,
+    p_gitlab_user_id: input.gitlabUserId ?? null,
+    p_developer_status: input.developerStatus,
+    p_verification_status: input.verificationStatus,
+    p_expected_revision: input.expectedRevision ?? null,
+  })
+  return unwrap<{ developer_id: string; git_identity_id: string; masked_email: string }>({ data, error })
+}
+
+type V111JsonObject = Record<string, unknown>
+
+function v111Object(value: unknown): V111JsonObject {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
+  return value as V111JsonObject
+}
+
+function v111String(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback
+}
+
+function v111NullableString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
+}
+
+function v111Number(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function v111StringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function adaptAttributionCondition(
+  value: unknown,
+  ruleCode: string,
+  index: number,
+): AttributionRuleCondition {
+  const condition = v111Object(value)
+  const hasValue = Object.prototype.hasOwnProperty.call(condition, 'value')
+  const rawValue = condition.value
+  const parsedValue = typeof rawValue === 'string' || typeof rawValue === 'boolean' || typeof rawValue === 'number' || rawValue === null
+    ? rawValue
+    : v111StringArray(rawValue)
+  return {
+    id: v111String(condition.id, `${ruleCode}:condition:${String(index)}`),
+    field: v111String(condition.field) as AttributionRuleCondition['field'],
+    operator: v111String(condition.operator) as AttributionRuleCondition['operator'],
+    ...(hasValue ? { value: parsedValue } : {}),
+  }
+}
+
+function adaptAttributionRule(value: unknown): AttributionRuleDefinition {
+  const rule = v111Object(value)
+  if (typeof rule.rule_code === 'string') {
+    const ruleCode = v111String(rule.rule_code)
+    const action = v111Object(rule.action)
+    return {
+      id: v111String(rule.id, ruleCode),
+      rule_code: ruleCode,
+      display_name: v111String(rule.display_name),
+      description: v111String(rule.description),
+      priority: v111Number(rule.priority),
+      enabled: rule.enabled === true,
+      capability: v111String(rule.capability) as AttributionRuleDefinition['capability'],
+      match: v111String(rule.match, 'ALL') as AttributionRuleDefinition['match'],
+      conditions: (Array.isArray(rule.conditions) ? rule.conditions : []).map((item, index) =>
+        adaptAttributionCondition(item, ruleCode, index),
+      ),
+      action: {
+        type: v111String(action.type) as AttributionRuleDefinition['action']['type'],
+        reason_code: v111String(action.reason_code),
+      },
+      system_locked: rule.system_locked === true,
+    }
+  }
+
+  const ruleCode = v111String(rule.ruleCode)
+  const when = v111Object(rule.when)
+  const match = Array.isArray(when.any) ? 'ANY' : 'ALL'
+  const clauses = (match === 'ANY' ? when.any : when.all) ?? []
+  const rawCapability = v111String(rule.capability)
+  const capability = rawCapability === 'MR_OPTIONAL'
+    ? 'MR_ENHANCED'
+    : rawCapability === 'SYSTEM'
+      ? 'RANGE_GATE'
+      : 'GIT_BASE'
+  const action = v111Object(rule.action)
+  return {
+    id: ruleCode,
+    rule_code: ruleCode,
+    display_name: v111String(rule.displayName),
+    description: v111String(rule.description),
+    priority: v111Number(rule.priority),
+    enabled: rule.enabled === true,
+    capability,
+    match,
+    conditions: (Array.isArray(clauses) ? clauses : []).map((item, index) =>
+      adaptAttributionCondition(item, ruleCode, index),
+    ),
+    action: {
+      type: v111String(action.type) as AttributionRuleDefinition['action']['type'],
+      reason_code: v111String(action.reasonCode),
+    },
+    system_locked: rule.systemLocked === true,
+  }
+}
+
+function adaptAttributionValidation(value: unknown) {
+  if (value === null || value === undefined) return null
+  const validation = v111Object(value)
+  return {
+    passed: validation.passed === true || validation.valid === true,
+    validated_revision: v111Number(validation.validated_revision, v111Number(validation.revision)),
+    issues: (Array.isArray(validation.issues) ? validation.issues : []).map((rawIssue) => {
+      const issue = v111Object(rawIssue)
+      return {
+        code: v111String(issue.code),
+        message: v111String(issue.message, v111String(issue.code)),
+        rule_id: v111NullableString(issue.rule_id),
+        severity: v111String(issue.severity, 'ERROR') === 'WARNING' ? 'WARNING' as const : 'ERROR' as const,
+      }
+    }),
+    validated_at: v111String(validation.validated_at),
+  }
+}
+
+function adaptAttributionSimulation(value: unknown) {
+  if (value === null || value === undefined) return null
+  const simulation = v111Object(value)
+  const metrics = v111Object(simulation.metrics)
+  const contractChecks = v111Object(simulation.contract_checks)
+  return {
+    passed: simulation.passed === true,
+    evaluation_kind: v111String(simulation.evaluation_kind, 'SYSTEM_SAFETY_CONTRACT') as 'SYSTEM_SAFETY_CONTRACT',
+    contract_version: v111String(simulation.contract_version, 'SYSTEM_SAFETY_CONTRACT_V1'),
+    assessment_note: v111String(simulation.assessment_note, '仅检查数据库安全契约，不评估规则效果、准确率或召回率。'),
+    sample_set_id: v111String(simulation.sample_set_id),
+    sample_set_label: v111String(simulation.sample_set_label, v111String(simulation.sample_set_id)),
+    simulated_revision: v111Number(simulation.simulated_revision),
+    simulated_ruleset_hash: v111NullableString(simulation.simulated_ruleset_hash),
+    simulated_at: v111String(simulation.simulated_at),
+    metrics: {
+      effect_metrics_available: metrics.effect_metrics_available === true,
+      gold_strong_false_positive_count: v111Number(metrics.gold_strong_false_positive_count),
+      strong_selected_delta: v111Number(metrics.strong_selected_delta),
+      ai_candidate_delta: v111Number(metrics.ai_candidate_delta),
+      excluded_delta: v111Number(metrics.excluded_delta),
+      conflict_delta: v111Number(metrics.conflict_delta),
+      global_fallback_delta: v111Number(metrics.global_fallback_delta),
+    },
+    contract_checks: {
+      system_rule_expected_count: v111Number(contractChecks.system_rule_expected_count, v111Number(metrics.system_rule_expected_count, 13)),
+      system_rule_count: v111Number(contractChecks.system_rule_count, v111Number(metrics.system_rule_count)),
+      custom_rule_count: v111Number(contractChecks.custom_rule_count, v111Number(metrics.custom_rule_count)),
+      condition_count: v111Number(contractChecks.condition_count, v111Number(metrics.condition_count)),
+      failed_check_count: v111Number(contractChecks.failed_check_count, v111Number(metrics.failed_check_count)),
+    },
+    blocking_reasons: v111StringArray(simulation.blocking_reasons),
+  }
+}
+
+function adaptAttributionVersion(value: unknown): AttributionRuleVersion {
+  const version = v111Object(value)
+  return {
+    id: v111String(version.id),
+    version: typeof version.version === 'number' ? version.version : null,
+    status: v111String(version.status) as AttributionRuleVersion['status'],
+    revision: v111Number(version.revision),
+    ruleset_hash: v111NullableString(version.ruleset_hash),
+    source_version_id: v111NullableString(version.source_version_id),
+    rules: (Array.isArray(version.rules) ? version.rules : []).map(adaptAttributionRule),
+    validation: adaptAttributionValidation(version.validation),
+    latest_simulation: adaptAttributionSimulation(version.latest_simulation),
+    created_by_name: v111NullableString(version.created_by_name),
+    created_at: v111NullableString(version.created_at),
+    published_by_name: v111NullableString(version.published_by_name),
+    published_at: v111NullableString(version.published_at),
+    publish_reason: v111NullableString(version.publish_reason),
+    referenced_job_count: typeof version.referenced_job_count === 'number' ? version.referenced_job_count : null,
+  }
+}
+
+/** 适配 V1.11 完整 catalog；数组分支仅保留旧 foundation 部署的只读兼容。 */
+export function adaptAttributionRuleCatalog(value: unknown): AttributionRuleCatalog {
+  if (Array.isArray(value)) {
+    const row = v111Object(value[0])
+    const ruleSetId = v111String(row.id)
+    if (ruleSetId === '') throw new Error('归属规则服务未返回规则集')
+    const currentVersionId = v111NullableString(row.current_version_id)
+    const publishedAt = v111NullableString(row.published_at)
+    const currentVersion: AttributionRuleVersion | null = currentVersionId === null ? null : {
+      id: currentVersionId,
+      version: typeof row.current_version === 'number' ? row.current_version : null,
+      status: 'PUBLISHED',
+      revision: 0,
+      ruleset_hash: v111NullableString(row.ruleset_hash),
+      source_version_id: null,
+      rules: (Array.isArray(row.rules) ? row.rules : []).map(adaptAttributionRule),
+      validation: null,
+      latest_simulation: null,
+      created_by_name: null,
+      created_at: publishedAt,
+      published_by_name: null,
+      published_at: publishedAt,
+      publish_reason: null,
+      referenced_job_count: null,
+    }
+    return {
+      rule_set_id: ruleSetId,
+      rule_set_name: v111String(row.display_name, '需求提交归属规则'),
+      current_published_version_id: currentVersionId,
+      versions: currentVersion === null ? [] : [currentVersion],
+      sample_sets: [],
+      mr_enhanced_available: null,
+    }
+  }
+
+  const catalog = v111Object(value)
+  const ruleSetId = v111String(catalog.rule_set_id)
+  if (ruleSetId === '') throw new Error('归属规则服务未返回规则集')
+  return {
+    rule_set_id: ruleSetId,
+    rule_set_name: v111String(catalog.rule_set_name, '需求提交归属规则'),
+    current_published_version_id: v111NullableString(catalog.current_published_version_id),
+    versions: (Array.isArray(catalog.versions) ? catalog.versions : []).map(adaptAttributionVersion),
+    sample_sets: (Array.isArray(catalog.sample_sets) ? catalog.sample_sets : []).map((rawSample) => {
+      const sample = v111Object(rawSample)
+      return {
+        id: v111String(sample.id),
+        label: v111String(sample.label),
+        frozen_at: v111String(sample.frozen_at),
+        story_count: v111Number(sample.story_count),
+        commit_count: v111Number(sample.commit_count),
+        evaluation_kind: v111String(sample.evaluation_kind, 'SYSTEM_SAFETY_CONTRACT') as 'SYSTEM_SAFETY_CONTRACT',
+        description: v111String(sample.description),
+      }
+    }),
+    mr_enhanced_available: typeof catalog.mr_enhanced_available === 'boolean' ? catalog.mr_enhanced_available : null,
+  }
+}
+
+function attributionRulesForRpc(rules: AttributionRuleDefinition[]): V111JsonObject[] {
+  return rules.map((rule, index) => ({
+    ruleCode: rule.rule_code,
+    displayName: rule.display_name,
+    description: rule.description,
+    priority: rule.priority,
+    enabled: rule.enabled,
+    capability: rule.capability === 'MR_ENHANCED' ? 'MR_OPTIONAL' : rule.capability === 'RANGE_GATE' ? 'SYSTEM' : 'GIT_BASE',
+    when: {
+      [rule.match === 'ANY' ? 'any' : 'all']: rule.conditions.map((condition) => ({
+        field: condition.field,
+        operator: condition.operator,
+        ...(condition.value === undefined ? {} : { value: condition.value }),
+      })),
+    },
+    action: { type: rule.action.type, reasonCode: rule.action.reason_code },
+    systemLocked: rule.system_locked,
+    sortOrder: index,
+  }))
+}
+
+export async function adminListAttributionRuleSets(): Promise<AttributionRuleCatalog> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_get_attribution_rule_catalog')
+  return adaptAttributionRuleCatalog(unwrap<unknown>({ data, error }))
+}
+
+async function requireAttributionRuleVersion(versionId: string): Promise<AttributionRuleVersion> {
+  const catalog = await adminListAttributionRuleSets()
+  const version = catalog.versions.find((item) => item.id === versionId)
+  if (version === undefined) throw new Error('归属规则服务未返回操作后的版本，请刷新后重试')
+  return version
+}
+
+async function adminCreateAttributionRuleDraft(sourceVersionId: string): Promise<AttributionRuleVersion> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_create_attribution_rule_draft', {
+    p_source_version_id: sourceVersionId,
+  })
+  return requireAttributionRuleVersion(unwrap<string>({ data, error }))
+}
+
+async function adminSaveAttributionRuleDraft(input: {
+  draftVersionId: string
+  expectedRevision: number
+  rules: AttributionRuleDefinition[]
+}): Promise<AttributionRuleVersion> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_save_attribution_rule_draft', {
+    p_draft_version_id: input.draftVersionId,
+    p_expected_revision: input.expectedRevision,
+    p_rules: attributionRulesForRpc(input.rules),
+  })
+  unwrap<number>({ data, error })
+  return requireAttributionRuleVersion(input.draftVersionId)
+}
+
+async function adminValidateAttributionRuleDraft(input: {
+  draftVersionId: string
+  expectedRevision: number
+}) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_validate_attribution_rule_draft', {
+    p_draft_version_id: input.draftVersionId,
+  })
+  const validation = adaptAttributionValidation(unwrap<unknown>({ data, error }))
+  if (validation === null) throw new Error('数据库未返回归属规则校验结果')
+  if (validation.validated_revision !== input.expectedRevision) throw new Error('归属规则 revision 已变化，请刷新后重试')
+  return validation
+}
+
+async function adminSimulateAttributionRuleDraft(input: {
+  draftVersionId: string
+  expectedRevision: number
+  sampleSetId: string
+}) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_simulate_attribution_rule_draft', {
+    p_draft_version_id: input.draftVersionId,
+    p_expected_revision: input.expectedRevision,
+    p_sample_set_id: input.sampleSetId,
+  })
+  const simulation = adaptAttributionSimulation(unwrap<unknown>({ data, error }))
+  if (simulation === null) throw new Error('数据库未返回可信安全契约检查结果')
+  return simulation
+}
+
+async function adminPublishAttributionRuleVersion(input: {
+  draftVersionId: string
+  expectedRevision: number
+  reason: string
+}): Promise<AttributionRuleVersion> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_publish_attribution_rule_version', {
+    p_draft_version_id: input.draftVersionId,
+    p_expected_revision: input.expectedRevision,
+    p_reason: input.reason,
+  })
+  const result = v111Object(unwrap<unknown>({ data, error }))
+  return requireAttributionRuleVersion(v111String(result.version_id))
+}
+
+async function adminRestoreAttributionRuleVersion(input: {
+  sourceVersionId: string
+  reason: string
+}): Promise<AttributionRuleVersion> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_restore_attribution_rule_version', {
+    p_source_version_id: input.sourceVersionId,
+    p_reason: input.reason,
+  })
+  const result = v111Object(unwrap<unknown>({ data, error }))
+  return requireAttributionRuleVersion(v111String(result.version_id))
+}
+
+export const attributionRulesApi: AttributionRulesApi = {
+  draftManagementAvailable: true,
+  trustedSimulationAvailable: true,
+  unavailableReason: null,
+  listRuleSets: adminListAttributionRuleSets,
+  createDraft: adminCreateAttributionRuleDraft,
+  saveDraft: adminSaveAttributionRuleDraft,
+  validateDraft: adminValidateAttributionRuleDraft,
+  simulateDraft: adminSimulateAttributionRuleDraft,
+  publishVersion: adminPublishAttributionRuleVersion,
+  restoreVersion: adminRestoreAttributionRuleVersion,
+}
+
+/** 将最终 scope summary RPC 返回值转换为共享卡片模型。 */
+export function adaptRuntimeAnalysisScopeSummary(value: unknown): RuntimeAnalysisScopeSummary | null {
+  if (value === null) return null
+  const summary = v111Object(value)
+  if (v111String(summary.task_id) === '') return null
+  const repositories: RuntimeRepositoryScope[] = (Array.isArray(summary.repositories) ? summary.repositories : []).map((value) => {
+    const repository = v111Object(value)
+    return {
+      repository_name: v111String(repository.repository_name),
+      base_sha: v111NullableString(repository.base_sha),
+      head_sha: v111String(repository.head_sha),
+      range_source: v111String(repository.range_source),
+      commit_count: typeof repository.commit_count === 'number' ? repository.commit_count : null,
+      enumeration_status: v111String(repository.enumeration_status),
+      range_start_at: v111String(repository.range_start_at),
+      range_end_at: v111String(repository.range_end_at),
+      resolved_at: v111String(repository.resolved_at),
+    }
+  })
+  const expansions: RuntimeScopeExpansion[] = (Array.isArray(summary.expansions) ? summary.expansions : []).map((value) => {
+    const expansion = v111Object(value)
+    return {
+      id: v111String(expansion.id),
+      attempt: v111Number(expansion.attempt),
+      agent_label: v111String(expansion.agent_label),
+      from_level: v111String(expansion.from_level) as RuntimeScopeExpansion['from_level'],
+      to_level: v111String(expansion.to_level) as RuntimeScopeExpansion['to_level'],
+      reason_code: v111String(expansion.reason_code),
+      occurred_at: v111String(expansion.occurred_at),
+    }
+  })
+  return {
+    task_id: v111String(summary.task_id),
+    generation: v111Number(summary.generation),
+    status: v111String(summary.status) as RuntimeAnalysisScopeSummary['status'],
+    mode: v111String(summary.mode) as RuntimeAnalysisScopeSummary['mode'],
+    error_code: v111NullableString(summary.error_code),
+    window_days: typeof summary.window_days === 'number' ? summary.window_days : null,
+    candidate_count: v111Number(summary.candidate_count),
+    strong_count: v111Number(summary.strong_count),
+    ai_candidate_count: v111Number(summary.ai_candidate_count),
+    ai_related_count: v111Number(summary.ai_related_count),
+    ai_uncertain_count: v111Number(summary.ai_uncertain_count),
+    read_count: v111Number(summary.read_count),
+    reverted_count: v111Number(summary.reverted_count),
+    current_scope_level: v111String(summary.current_scope_level) as RuntimeAnalysisScopeSummary['current_scope_level'],
+    algorithm_version: v111String(summary.algorithm_version),
+    manifest_hash: v111NullableString(summary.manifest_hash),
+    degradation_reasons: v111StringArray(summary.degradation_reasons),
+    frozen_at: v111NullableString(summary.frozen_at),
+    repositories,
+    expansions,
+  }
+}
+
+function adaptRuntimeScopeCommit(value: unknown): RuntimeAnalysisScopeCommit {
+  const item = v111Object(value)
+  return {
+    candidate_id: v111String(item.candidate_id),
+    generation: v111Number(item.generation),
+    view: v111String(item.view) as RuntimeAnalysisScopeCommit['view'],
+    relation_status: v111String(item.relation_status) as RuntimeAnalysisScopeCommit['relation_status'],
+    effective_status: v111String(item.effective_status) as RuntimeAnalysisScopeCommit['effective_status'],
+    repository_name: v111String(item.repository_name),
+    short_sha: v111String(item.short_sha),
+    committed_at: v111String(item.committed_at),
+    author_display_name: v111String(item.author_display_name),
+    author_email_masked: v111NullableString(item.author_email_masked),
+    subject: v111String(item.subject),
+    files_changed: v111Number(item.files_changed),
+    additions: v111Number(item.additions),
+    deletions: v111Number(item.deletions),
+    reason_codes: v111StringArray(item.reason_codes),
+    actually_read: item.actually_read === true,
+    read_count: v111Number(item.read_count),
+  }
+}
+
+/** 适配已由服务端按 generation、view 和 cursor 过滤的提交页。 */
+export function adaptRuntimeAnalysisScopeCommitPage(value: unknown): RuntimeAnalysisScopeCommitPage {
+  const page = v111Object(value)
+  return {
+    task_id: v111String(page.task_id),
+    generation: v111Number(page.generation),
+    items: (Array.isArray(page.items) ? page.items : []).map(adaptRuntimeScopeCommit),
+    next_cursor: page.next_cursor === null || page.next_cursor === undefined
+      ? null
+      : v111String(page.next_cursor),
+    total: v111Number(page.total),
+  }
+}
+
+export async function getAnalysisStoryScopeSummary(taskId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('get_analysis_story_scope_summary', {
+    p_task_id: taskId,
+  })
+  return adaptRuntimeAnalysisScopeSummary(unwrap<unknown>({ data, error }))
+}
+
+export async function getAnalysisStoryScopeCommits(input: {
+  taskId: string
+  generation: number
+  view: RuntimeScopeCommitView
+  cursor: string | null
+  limit: number
+}) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('get_analysis_story_scope_commits', {
+    p_task_id: input.taskId,
+    p_generation: input.generation,
+    p_view: input.view,
+    p_cursor: input.cursor,
+    p_limit: input.limit,
+  })
+  return adaptRuntimeAnalysisScopeCommitPage(unwrap<unknown>({ data, error }))
+}
+
+export const runtimeAnalysisScopeApi: RuntimeAnalysisScopeApi = {
+  getSummary: getAnalysisStoryScopeSummary,
+  listCommits: getAnalysisStoryScopeCommits,
 }
 
 // ---------------------------------------------------------------------------

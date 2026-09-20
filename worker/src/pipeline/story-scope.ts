@@ -1,0 +1,337 @@
+import { createHash } from 'node:crypto'
+import { ATTRIBUTION_ALGORITHM_VERSION, attributeStoryCommit, createStoryCandidateManifest, type IdentityMatchStatus, type StoryCommitAttributionInput, type StoryCommitAttributionResult } from '../analysis/story-commit-attribution.js'
+import type { CollectedRepositoryHistory } from '../git/story-history.js'
+import type { RepositoryMergeRequestEnrichment } from '../git/gitlab-readonly-client.js'
+
+export interface FrozenStoryScopeInput {
+  task_id: string
+  story_id: string
+  story_code: string
+  story_name: string
+  owners_text: string
+  normalized_developer_ids: string[]
+  project_name: string | null
+  application_name: string | null
+  release_window: string | null
+  requirement_context: Record<string, unknown>
+  input_hash: string
+}
+
+export interface FrozenIdentityScopeInput {
+  developer_id: string
+  display_name: string
+  email_fingerprint: string | null
+  author_name_aliases: string[]
+  verification_status: string
+}
+
+export interface StoryScopeWire {
+  task_id: string
+  generation: number
+  scope_mode: 'EXACT_STORY_COMMITS' | 'HYBRID_CANDIDATES' | 'DEVELOPER_WINDOW' | 'REQUIREMENT_REF_ONLY' | 'GLOBAL_FALLBACK'
+  status: 'READY' | 'DEGRADED'
+  current_scope_level: 'PRIMARY' | 'GLOBAL'
+  candidate_manifest_hash: string
+  scope_error_code: string | null
+  degradation_reasons: string[]
+  candidates: Array<{
+    candidate_id: string
+    repository_name: string
+    sha: string
+    tier: 'STRONG' | 'AI_CANDIDATE' | 'WEAK' | 'EXCLUDED' | 'CONFLICT'
+    selection_source: 'RULE' | 'IDENTITY_WINDOW' | 'FALLBACK'
+    rank_score: number
+    reason_codes: string[]
+    identity_match_type: 'VERIFIED_EMAIL' | 'NAME_ALIAS' | 'NONE' | 'AMBIGUOUS'
+    story_match_location: 'COMMIT_TRAILER' | 'COMMIT_SUBJECT' | 'COMMIT_BODY' | 'BRANCH' | 'MR' | 'NONE'
+    rule_code: string | null
+    effective_status: 'EFFECTIVE' | 'REVERTED' | 'PARTIAL' | 'UNKNOWN'
+  }>
+}
+
+export interface BuiltStoryScopes {
+  algorithmVersion: typeof ATTRIBUTION_ALGORITHM_VERSION
+  scopes: StoryScopeWire[]
+  scopeCatalogHash: string
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => compareText(a, b)).map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(',')}}`
+}
+
+function deterministicUuid(parts: readonly string[]): string {
+  const hex = createHash('sha256').update(parts.join('\n'), 'utf8').digest('hex').slice(0, 32).split('')
+  hex[12] = '5'
+  hex[16] = ((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16)
+  const value = hex.join('')
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`
+}
+
+function identityForCommit(story: FrozenStoryScopeInput, identities: readonly FrozenIdentityScopeInput[], entry: Record<string, unknown>): { status: IdentityMatchStatus; type: StoryScopeWire['candidates'][number]['identity_match_type'] } {
+  const owners = new Set(story.normalized_developer_ids)
+  const eligible = identities.filter((identity) => owners.has(identity.developer_id) && identity.verification_status === 'VERIFIED')
+  const matchStatus = String(entry.author_identity_status ?? 'UNAVAILABLE')
+  if (matchStatus === 'CONFLICT') return { status: 'AMBIGUOUS', type: 'AMBIGUOUS' }
+  if (matchStatus === 'UNAVAILABLE') return { status: 'UNRESOLVED', type: 'NONE' }
+  if (matchStatus === 'MATCHED') {
+    const developerId = String(entry.author_developer_id ?? '')
+    if (developerId !== '') {
+      return owners.has(developerId)
+        ? { status: 'VERIFIED', type: 'VERIFIED_EMAIL' }
+        : { status: 'UNRESOLVED', type: 'NONE' }
+    }
+  }
+  const fingerprint = String(entry.author_email_fingerprint ?? '')
+  const exact = eligible.filter((identity) => identity.email_fingerprint === fingerprint)
+  if (exact.length === 1) return { status: 'VERIFIED', type: 'VERIFIED_EMAIL' }
+  if (exact.length > 1) return { status: 'AMBIGUOUS', type: 'AMBIGUOUS' }
+  // A database-confirmed match to another developer must not be weakened into a name guess.
+  if (matchStatus === 'MATCHED') return { status: 'UNRESOLVED', type: 'NONE' }
+  const author = String(entry.author_name ?? '').trim().toLowerCase()
+  const names = eligible.filter((identity) => identity.display_name.trim().toLowerCase() === author || identity.author_name_aliases.some((alias) => alias.trim().toLowerCase() === author))
+  if (names.length === 1) return { status: 'WEAK_NAME', type: 'NAME_ALIAS' }
+  if (names.length > 1) return { status: 'AMBIGUOUS', type: 'AMBIGUOUS' }
+  return { status: 'UNRESOLVED', type: 'NONE' }
+}
+
+function moduleOverlap(story: FrozenStoryScopeInput, entry: Record<string, unknown>): boolean {
+  const needles = [story.project_name, story.application_name]
+    .flatMap((value) => String(value ?? '').toLowerCase().split(/[^\p{L}\p{N}]+/u))
+    .filter((value) => value.length >= 3)
+  if (needles.length === 0) return false
+  const files = Array.isArray(entry.files) ? entry.files as Array<Record<string, unknown>> : []
+  return files.some((file) => needles.some((needle) => String(file.path ?? '').toLowerCase().includes(needle)))
+}
+
+function ruleCode(result: StoryCommitAttributionResult): string | null {
+  const reasons = new Set(result.reasonCodes)
+  if (reasons.has('EXPLICIT_STORY_ID')) return 'ATTR_EXPLICIT_COMMIT_STORY_ID'
+  if (reasons.has('EXPLICIT_MR_STORY_ID')) return 'ATTR_EXPLICIT_MR_STORY_ID'
+  if (reasons.has('SAME_EXPLICIT_MR')) return 'ATTR_SAME_EXPLICIT_MR_COMMIT'
+  if (reasons.has('REVERT_OF_RELATED_COMMIT')) return 'ATTR_REVERT_CHAIN'
+  if (reasons.has('OTHER_STORY_EXPLICIT')) return 'ATTR_OTHER_STORY_EXCLUSION'
+  if (reasons.has('STORY_CODE_WITH_SUPPORT')) return 'ATTR_STORY_CODE_WITH_SUPPORT'
+  if (reasons.has('OWNER_WINDOW_MODULE')) return 'ATTR_OWNER_WINDOW_MODULE_CANDIDATE'
+  if (reasons.has('UNSTRUCTURED_STORY_MENTION')) return 'ATTR_STORY_TEXT_CANDIDATE'
+  return null
+}
+
+function tier(result: StoryCommitAttributionResult): StoryScopeWire['candidates'][number]['tier'] | null {
+  if (result.decision === 'AUTO_SELECTED_EXPLICIT' || result.decision === 'AUTO_SELECTED_STRONG') return 'STRONG'
+  if (result.decision === 'AI_RELEVANCE_REQUIRED') return 'AI_CANDIDATE'
+  if (result.decision === 'WEAK_FALLBACK') return 'WEAK'
+  if (result.decision === 'EXCLUDED') return 'EXCLUDED'
+  if (result.decision === 'CONFLICT') return 'CONFLICT'
+  return null
+}
+
+function isGeneratedPath(path: string): boolean {
+  const normalized = path.replace(/\\/g, '/').toLowerCase()
+  return /(^|\/)(dist|build|coverage|generated|gen|target\/generated-sources|vendor|node_modules)(\/|$)/.test(normalized)
+    || /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|composer\.lock)$/.test(normalized)
+    || /(?:\.generated\.|\.g\.|\.designer\.|_generated\.)/.test(normalized)
+}
+
+function isMainlyGenerated(entry: Record<string, unknown>): boolean {
+  const files = Array.isArray(entry.files) ? entry.files as Array<Record<string, unknown>> : []
+  if (files.length === 0) return false
+  const generated = files.filter((file) => isGeneratedPath(String(file.path ?? ''))).length
+  return generated === files.length || generated * 2 >= files.length
+}
+
+function storyLocation(result: StoryCommitAttributionResult): StoryScopeWire['candidates'][number]['story_match_location'] {
+  if (result.storyMatches.some((match) => match.location === 'STRUCTURED_MR')) return 'MR'
+  if (result.storyMatches.some((match) => match.location === 'STRUCTURED_COMMIT')) return 'COMMIT_TRAILER'
+  if (result.storyMatches.some((match) => match.location === 'SOURCE_BRANCH')) return 'BRANCH'
+  if (result.storyMatches.some((match) => match.location === 'SUBJECT')) return 'COMMIT_SUBJECT'
+  if (result.storyMatches.some((match) => match.location === 'BODY')) return 'COMMIT_BODY'
+  return 'NONE'
+}
+
+function globalScope(story: FrozenStoryScopeInput, reason: string, generation = 1): StoryScopeWire {
+  const manifest = createStoryCandidateManifest(story.story_code, generation, [])
+  return {
+    task_id: story.task_id,
+    generation,
+    scope_mode: 'GLOBAL_FALLBACK',
+    status: 'DEGRADED',
+    current_scope_level: 'GLOBAL',
+    candidate_manifest_hash: manifest.manifestHash,
+    scope_error_code: reason,
+    degradation_reasons: [reason],
+    candidates: [],
+  }
+}
+
+export function buildStoryScopes(input: {
+  stories: readonly FrozenStoryScopeInput[]
+  identities: readonly FrozenIdentityScopeInput[]
+  histories: readonly CollectedRepositoryHistory[]
+  mergeRequests?: readonly RepositoryMergeRequestEnrichment[]
+  rulesetHash: string
+  generation?: number
+}): BuiltStoryScopes {
+  const generation = input.generation ?? 1
+  const incomplete = input.histories.find((history) => history.manifest.enumeration_status !== 'COMPLETE')
+  const batchCodes = input.stories.map((story) => story.story_code)
+  const mergeRequestsByCommit = new Map<string, RepositoryMergeRequestEnrichment['mergeRequests']>()
+  for (const enrichment of input.mergeRequests ?? []) {
+    if (enrichment.status !== 'COMPLETE' && enrichment.status !== 'PARTIAL') continue
+    for (const mergeRequest of enrichment.mergeRequests) {
+      for (const membership of mergeRequest.commits) {
+        const key = `${enrichment.repository}:${membership.sha}`
+        const current = mergeRequestsByCommit.get(key) ?? []
+        if (!current.some((item) => item.merge_request_iid === mergeRequest.merge_request_iid)) {
+          mergeRequestsByCommit.set(key, [...current, mergeRequest].sort(
+            (left, right) => left.merge_request_iid - right.merge_request_iid,
+          ))
+        }
+      }
+    }
+  }
+  const scopes = input.stories.map((story): StoryScopeWire => {
+    if (incomplete) return globalScope(story, `RANGE_${incomplete.manifest.enumeration_status}`, generation)
+    type CandidateDescriptor = {
+      identityType: StoryScopeWire['candidates'][number]['identity_match_type']
+      entry: Record<string, unknown>
+      attribution: Omit<StoryCommitAttributionInput, 'revertsRelatedCommit'>
+    }
+    const descriptors: CandidateDescriptor[] = []
+    for (const history of input.histories) {
+      for (const entry of history.manifest.commits) {
+        const identity = identityForCommit(story, input.identities, entry)
+        const candidateId = deterministicUuid([story.task_id, history.manifest.repository, String(entry.sha)])
+        const relatedMergeRequests = mergeRequestsByCommit.get(
+          `${history.manifest.repository}:${String(entry.sha)}`,
+        ) ?? []
+        const mrStructuredText = [...new Set(
+          relatedMergeRequests.flatMap((mergeRequest) => mergeRequest.structured_story_ids),
+        )].sort(compareText).map((code) => `Story-Id: ${code}`).join('\n')
+        const sourceBranches = [...new Set(
+          relatedMergeRequests.map((mergeRequest) => mergeRequest.source_branch),
+        )].sort(compareText).join(' ')
+        descriptors.push({
+          identityType: identity.type,
+          entry,
+          attribution: {
+            candidateId,
+            repository: history.manifest.repository,
+            sha: String(entry.sha),
+            currentStoryCode: story.story_code,
+            batchStoryCodes: batchCodes,
+            subject: String(entry.subject ?? ''),
+            body: String(entry.message_body ?? ''),
+            sourceBranch: sourceBranches || null,
+            mrStructuredText: mrStructuredText || null,
+            reachableFromFrozenHead: true,
+            rangeCompleteness: 'COMPLETE',
+            identityStatus: identity.status,
+            withinFrozenWindow: true,
+            moduleOverlap: moduleOverlap(story, entry),
+            sameExplicitMr: relatedMergeRequests.some((mergeRequest) =>
+              mergeRequest.structured_story_ids.some(
+                (code) => code.trim().toUpperCase() === story.story_code.trim().toUpperCase(),
+              ),
+            ),
+            bot: /\b(bot|automation)\b/i.test(String(entry.author_name ?? '')),
+            generated: isMainlyGenerated(entry),
+            revertEffect: entry.effective_status === 'REVERTED'
+              ? 'FULL'
+              : entry.effective_status === 'PARTIAL' ? 'PARTIAL' : 'NONE',
+          },
+        })
+      }
+    }
+
+    // Phase 1 deliberately disables the revert-chain shortcut. Only commits
+    // independently associated with this Story can become a trusted target.
+    const preliminary = descriptors.map((descriptor) => ({
+      descriptor,
+      result: attributeStoryCommit({ ...descriptor.attribution, revertsRelatedCommit: false }),
+    }))
+    const relatedCommitKeys = new Set(preliminary
+      .filter(({ result }) => result.selected)
+      .map(({ descriptor }) => `${descriptor.attribution.repository}:${descriptor.attribution.sha}`))
+
+    // Phase 2 promotes a Revert only when its parsed target is already in the
+    // current Story's frozen associated set. A generic/unrelated Revert can no
+    // longer manufacture a STRONG candidate merely by being a Revert.
+    const attributed = descriptors.map((descriptor) => {
+      const revertedSha = typeof descriptor.entry.reverted_sha === 'string'
+        ? descriptor.entry.reverted_sha.toLowerCase()
+        : ''
+      const revertsRelatedCommit = Boolean(descriptor.entry.is_revert)
+        && revertedSha !== ''
+        && relatedCommitKeys.has(`${descriptor.attribution.repository}:${revertedSha}`)
+      return {
+        identityType: descriptor.identityType,
+        result: attributeStoryCommit({ ...descriptor.attribution, revertsRelatedCommit }),
+      }
+    })
+    const relevant = attributed.filter(({ result }) => tier(result) !== null)
+    if (relevant.length === 0) return globalScope(story, 'NO_CANDIDATE', generation)
+    if (relevant.length > 200) return globalScope(story, 'STORY_CANDIDATE_LIMIT_EXCEEDED', generation)
+    const manifest = createStoryCandidateManifest(story.story_code, generation, relevant.map(({ result }) => result))
+    const candidates = manifest.candidates.map((result) => {
+      const identityType = relevant.find((item) => item.result.candidateId === result.candidateId)?.identityType ?? 'NONE'
+      const candidateTier = tier(result)!
+      const candidateRuleCode = ruleCode(result)
+      return {
+        candidate_id: result.candidateId,
+        repository_name: result.repository,
+        sha: result.sha,
+        tier: candidateTier,
+        selection_source: candidateTier === 'WEAK' || candidateRuleCode === null
+          ? 'FALLBACK' as const
+          : candidateTier === 'AI_CANDIDATE' && result.reasonCodes.includes('OWNER_WINDOW_MODULE')
+            ? 'IDENTITY_WINDOW' as const
+            : 'RULE' as const,
+        rank_score: result.rankScore,
+        reason_codes: [...result.reasonCodes],
+        identity_match_type: identityType,
+        story_match_location: storyLocation(result),
+        rule_code: candidateRuleCode,
+        effective_status: result.effectiveStatus,
+      }
+    })
+    const strong = candidates.filter((candidate) => candidate.tier === 'STRONG').length
+    const ai = candidates.filter((candidate) => candidate.tier === 'AI_CANDIDATE' || candidate.tier === 'WEAK').length
+    const recommendation = manifest.candidates.find((candidate) => candidate.selected)?.scopeRecommendation
+      ?? manifest.candidates.find((candidate) => candidate.decision === 'AI_RELEVANCE_REQUIRED')?.scopeRecommendation
+      ?? 'GLOBAL_FALLBACK'
+    const scopeMode: StoryScopeWire['scope_mode'] = strong > 0 && ai > 0
+      ? 'HYBRID_CANDIDATES'
+      : recommendation === 'EXACT_STORY_COMMITS' || recommendation === 'DEVELOPER_WINDOW' || recommendation === 'REQUIREMENT_REF_ONLY'
+        ? recommendation
+        : 'GLOBAL_FALLBACK'
+    return {
+      task_id: story.task_id,
+      generation,
+      scope_mode: scopeMode,
+      status: scopeMode === 'GLOBAL_FALLBACK' ? 'DEGRADED' : 'READY',
+      current_scope_level: scopeMode === 'GLOBAL_FALLBACK' ? 'GLOBAL' : 'PRIMARY',
+      candidate_manifest_hash: manifest.manifestHash,
+      scope_error_code: scopeMode === 'GLOBAL_FALLBACK' ? 'NO_STRONG_SCOPE' : null,
+      degradation_reasons: scopeMode === 'GLOBAL_FALLBACK' ? ['NO_STRONG_SCOPE'] : [],
+      candidates,
+    }
+  })
+  const identity = {
+    algorithmVersion: ATTRIBUTION_ALGORITHM_VERSION,
+    generation,
+    rulesetHash: input.rulesetHash,
+    stories: input.stories.map((story) => ({ taskId: story.task_id, inputHash: story.input_hash })).sort((a, b) => compareText(a.taskId, b.taskId)),
+    scopes: scopes.map((scope) => ({ taskId: scope.task_id, manifestHash: scope.candidate_manifest_hash })).sort((a, b) => compareText(a.taskId, b.taskId)),
+  }
+  return {
+    algorithmVersion: ATTRIBUTION_ALGORITHM_VERSION,
+    scopes,
+    scopeCatalogHash: `sha256:${createHash('sha256').update(`story-scope-catalog-v1\n${stableJson(identity)}\n`, 'utf8').digest('hex')}`,
+  }
+}

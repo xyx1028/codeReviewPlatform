@@ -100,6 +100,11 @@ function reviewCommitInput() {
     configHash: 'config-hash',
     promptVersion: 'agent-review-v1',
     modelLabel: 'Review model / review-model',
+    scopeGeneration: 3,
+    triageRevision: 2,
+    candidateManifestHash: 'candidate-manifest-hash',
+    analysisScopeHash: 'analysis-scope-hash',
+    attributionRulesetHash: 'ruleset-hash',
   }
 }
 
@@ -215,6 +220,39 @@ describe('JobsDb canonical RPC contract', () => {
     expect(task?.job.requested_branch).toBe('feature_dev')
     expect(task?.model.request_timeout_ms).toBe(123456)
     expect(task?.snapshots).toHaveLength(1)
+  })
+
+  it('batch-matches Git identities through the database without echoing raw emails', async () => {
+    const rawEmails = [
+      'Matched.Owner@Example.Invalid',
+      'unmatched@example.invalid',
+      'conflict@example.invalid',
+    ]
+    const rows = rawEmails.map((_, index) => ({
+      input_id: `commit-${index}:author`,
+      provider: 'gitlab',
+      email_fingerprint: String(index + 1).repeat(64),
+      masked_email: `${String(index + 1)}***@example.invalid`,
+      match_status: (['MATCHED', 'UNMATCHED', 'CONFLICT'] as const)[index],
+      developer_id: index === 0 ? 'developer-1' : null,
+      display_name: index === 0 ? 'Developer One' : null,
+      verification_status: index === 0 ? 'VERIFIED' : null,
+      author_name_aliases: index === 0 ? ['Dev One'] : [],
+    }))
+    const db = new RecordingDb({ match_analysis_git_identities: rows })
+    const jobs = new JobsDb(db)
+
+    const result = await jobs.matchAnalysisGitIdentities(rawEmails.map((email, index) => ({
+      inputId: `commit-${index}:author`, email, provider: 'gitlab',
+    })))
+
+    expect(result.map((row) => row.match_status)).toEqual(['MATCHED', 'UNMATCHED', 'CONFLICT'])
+    expect(db.last()).toMatchObject({
+      fn: 'match_analysis_git_identities',
+      params: { p_authors: rawEmails.map((email, index) => ({ input_id: `commit-${index}:author`, provider: 'gitlab', email })) },
+    })
+    const output = JSON.stringify(result)
+    for (const email of rawEmails) expect(output.toLowerCase()).not.toContain(email.toLowerCase())
   })
 
   it('returns null when no story task is claimable', async () => {
@@ -404,6 +442,30 @@ describe('JobsDb canonical RPC contract', () => {
         p_config_hash: 'config-hash',
         p_prompt_version: 'agent-review-v1',
         p_model_label: 'Review model / review-model',
+        p_scope_generation: 3,
+        p_triage_revision: 2,
+        p_candidate_manifest_hash: 'candidate-manifest-hash',
+        p_analysis_scope_hash: 'analysis-scope-hash',
+        p_attribution_ruleset_hash: 'ruleset-hash',
+      },
+    })
+  })
+
+  it('maps V1.11 scope identities into the session checkpoint RPC', async () => {
+    const db = new RecordingDb()
+    const jobs = new JobsDb(db)
+    await jobs.saveSessionCheckpoint({
+      taskId: 'task-1', workerId: 'worker-1', claimToken: CLAIM_TOKEN, agentAttempt: 2,
+      sessionId: 'session-1', sessionRevision: 4, storageLocator: '/sessions/session-1.jsonl',
+      contentHash: 'content-hash', eventCount: 12, harnessVersion: 'harness/v3',
+      profileHash: 'profile-hash', skillCatalogHash: 'skill-hash', prefixBytes: 123,
+      analysisScopeHash: 'analysis-scope-hash', attributionRulesetHash: 'ruleset-hash',
+    })
+    expect(db.last()).toMatchObject({
+      fn: 'save_analysis_session_checkpoint',
+      params: {
+        p_analysis_scope_hash: 'analysis-scope-hash',
+        p_attribution_ruleset_hash: 'ruleset-hash',
       },
     })
   })
@@ -521,6 +583,80 @@ describe('JobsDb canonical RPC contract', () => {
     })
   })
 
+  it('maps the V1.11 scope foundation RPCs with claim and job fencing inputs', async () => {
+    const scope = {
+      task_id: 'task-1', generation: 1, scope_mode: 'DEVELOPER_WINDOW', status: 'READY',
+      current_scope_level: 'PRIMARY', algorithm_version: 'story-attribution-v2',
+      ruleset_hash: 'a'.repeat(64), candidate_manifest_hash: 'b'.repeat(64),
+      scope_error_code: null, degradation_reasons: [], candidate_count: 1, strong_count: 0,
+      ai_candidate_count: 1, triage_revision: 2, triage_required_count: 1,
+      triage_completed_count: 0, triage_complete: false, candidates: [],
+    }
+    const db = new RecordingDb({
+      freeze_analysis_job_scope_inputs: {
+        story_input_catalog_hash: 'c'.repeat(64), identity_snapshot_hash: 'd'.repeat(64),
+        rule_version_id: 'rule-1', ruleset_hash: 'a'.repeat(64), idempotent: false,
+      },
+      get_story_task_analysis_scope: scope,
+      get_story_commit_diff_archive_metadata: {
+        candidate_id: 'candidate-1', repository_name: 'kdmanage-backend',
+        commit_sha: SHA, status: 'AVAILABLE', archive_sha256: 'f'.repeat(64),
+      },
+      record_story_commit_access: 'access-1',
+      submit_story_commit_relevance_verdict: { completed_count: 1, required_count: 1, triage_complete: true },
+      record_analysis_scope_expansion: 'expansion-1',
+    })
+    const jobs = new JobsDb(db)
+
+    await expect(jobs.freezeAnalysisJobScopeInputs('job-1', 'worker-1')).resolves.toMatchObject({ ruleset_hash: 'a'.repeat(64) })
+    await jobs.saveAnalysisRepositoryCommitManifest({
+      jobId: 'job-1', workerId: 'worker-1', repositoryName: 'kdmanage-backend',
+      manifest: { head_sha: SHA }, manifestHash: `sha256:${'e'.repeat(64)}`,
+    })
+    await jobs.saveAnalysisStoryScopes({
+      jobId: 'job-1', workerId: 'worker-1', algorithmVersion: 'story-attribution-v2',
+      scopes: [scope], scopeCatalogHash: `sha256:${'f'.repeat(64)}`,
+    })
+    await jobs.finalizeAnalysisStoryScope('job-1', 'worker-1', 1)
+    await expect(jobs.getStoryTaskAnalysisScope({ taskId: 'task-1', workerId: 'worker-1', claimToken: CLAIM_TOKEN })).resolves.toEqual(scope)
+    await expect(jobs.getStoryCommitDiffArchiveMetadata({
+      taskId: 'task-1', workerId: 'worker-1', claimToken: CLAIM_TOKEN, candidateId: 'candidate-1',
+    })).resolves.toMatchObject({ commit_sha: SHA })
+    await expect(jobs.recordStoryCommitAccess({
+      taskId: 'task-1', workerId: 'worker-1', claimToken: CLAIM_TOKEN,
+      agentRunId: 'run-1', agentNodeId: 'node-1', candidateId: 'candidate-1',
+      toolCallId: 'call-1', accessKind: 'DIFF', filePath: null, cursorValue: null,
+      bytesReturned: 120, diffLines: 12, truncated: false, archiveSha256: 'f'.repeat(64),
+    })).resolves.toBe('access-1')
+    await expect(jobs.submitStoryCommitRelevanceVerdict({
+      taskId: 'task-1', workerId: 'worker-1', claimToken: CLAIM_TOKEN,
+      agentRunId: 'run-1', candidateId: 'candidate-1', triageRevision: 2,
+      verdict: 'UNCERTAIN', reasonCodes: ['DIFF_UNAVAILABLE'], confidence: 0.2,
+      diffAccessIds: [], summary: 'diff unavailable',
+    })).resolves.toEqual({ completed_count: 1, required_count: 1, triage_complete: true })
+    await expect(jobs.expandAnalysisScope({
+      taskId: 'task-1', workerId: 'worker-1', claimToken: CLAIM_TOKEN,
+      agentRunId: 'run-1', agentNodeId: null, fromLevel: 'PRIMARY', toLevel: 'GLOBAL',
+      reasonCode: 'CANDIDATES_INSUFFICIENT',
+    })).resolves.toBe('expansion-1')
+
+    expect(db.calls.map((call) => call.fn)).toEqual([
+      'freeze_analysis_job_scope_inputs',
+      'save_analysis_repository_commit_manifest',
+      'save_analysis_story_scopes',
+      'finalize_analysis_story_scope',
+      'get_story_task_analysis_scope',
+      'get_story_commit_diff_archive_metadata',
+      'record_story_commit_access',
+      'submit_story_commit_relevance_verdict',
+      'record_analysis_scope_expansion',
+    ])
+    expect(db.calls[7]?.params).toMatchObject({
+      p_task_id: 'task-1', p_worker_id: 'worker-1', p_claim_token: CLAIM_TOKEN,
+      p_agent_run_id: 'run-1', p_candidate_id: 'candidate-1', p_triage_revision: 2,
+    })
+  })
+
   it('recomputes one converged run rollup by id', async () => {
     const db = new RecordingDb()
     const jobs = new JobsDb(db)
@@ -585,6 +721,11 @@ describe('database error-code normalization', () => {
       'SKILL_BUNDLE_INVALID',
       'SKILL_BUNDLE_LIMIT_EXCEEDED',
       'SESSION_SKILL_SET_MISMATCH',
+      'ANALYSIS_SCOPE_IDENTITY_MISSING',
+      'ANALYSIS_SCOPE_IDENTITY_MISMATCH',
+      'ANALYSIS_SCOPE_TRIAGE_INCOMPLETE',
+      'SESSION_ANALYSIS_SCOPE_MISMATCH',
+      'TRIAGE_CONTEXT_MISMATCH',
     ]
 
     expect(KNOWN_DB_ERROR_CODES).toEqual(expectedCodes)
@@ -609,5 +750,55 @@ describe('database error-code normalization', () => {
   it('returns undefined without a recognized marker or SQLSTATE', () => {
     expect(normalizeDbErrorCode('random failure')).toBeUndefined()
     expect(normalizeDbErrorCode(null)).toBeUndefined()
+  })
+})
+
+
+describe('V1.11 MR enrichment RPC adapter', () => {
+  it('saves job-fenced repository MR facts without altering their status', async () => {
+    const db = new RecordingDb({
+      save_analysis_repository_merge_requests: { status: 'PARTIAL', merge_request_count: 1 },
+    })
+    const jobs = new JobsDb(db)
+    const mergeRequests = [{
+      provider_project_id: 'kwork/manage/kdmanage-backend',
+      merge_request_iid: 17,
+      title: 'Story-Id: REQ-001',
+      description: null,
+      source_branch: 'feature/REQ-001',
+      target_branch: 'feature_dev',
+      author_username: 'developer',
+      author_provider_id: '77',
+      author_display_name: null,
+      provider_created_at: '2026-09-18T00:00:00.000Z',
+      provider_updated_at: '2026-09-19T00:00:00.000Z',
+      merged_at: null,
+      merge_commit_sha: null,
+      squash_commit_sha: null,
+      structured_story_ids: ['REQ-001'],
+      metadata_hash: `sha256:${'a'.repeat(64)}`,
+      collected_at: '2026-09-19T01:00:00.000Z',
+      commits: [{ sha: SHA, membership_type: 'COMMIT' as const }],
+    }]
+
+    await expect(jobs.saveAnalysisRepositoryMergeRequests({
+      jobId: 'job-1',
+      workerId: 'worker-1',
+      repositoryName: 'kdmanage-backend',
+      status: 'PARTIAL',
+      errorCode: 'MR_METADATA_TIMEOUT',
+      mergeRequests,
+    })).resolves.toEqual({ status: 'PARTIAL', merge_request_count: 1 })
+    expect(db.last()).toEqual({
+      fn: 'save_analysis_repository_merge_requests',
+      params: {
+        p_job_id: 'job-1',
+        p_worker_id: 'worker-1',
+        p_repository_name: 'kdmanage-backend',
+        p_status: 'PARTIAL',
+        p_error_code: 'MR_METADATA_TIMEOUT',
+        p_merge_requests: mergeRequests,
+      },
+    })
   })
 })

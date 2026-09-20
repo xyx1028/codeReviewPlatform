@@ -44,6 +44,7 @@ export const humanReviewOptions = Object.entries(humanReviewLabels).map(([value,
 export const analysisJobStatusLabels: Record<string, string> = {
   QUEUED: '排队中',
   PREPARING_CODE: '准备代码',
+  PREPARING_SCOPE: '准备分析范围',
   PROCESSING: '分析中',
   FINALIZING: '汇总结果',
   SUCCEEDED: '已完成',
@@ -736,6 +737,7 @@ export const runtimeFreshnessMeta: Record<
 export const analysisJobStatusMeta: Record<string, { label: string; color: string }> = {
   QUEUED: { label: '排队中', color: 'default' },
   PREPARING_CODE: { label: '准备代码', color: 'cyan' },
+  PREPARING_SCOPE: { label: '准备分析范围', color: 'purple' },
   PROCESSING: { label: '分析中', color: 'processing' },
   FINALIZING: { label: '汇总结果', color: 'geekblue' },
   SUCCEEDED: { label: '已完成', color: 'green' },

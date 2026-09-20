@@ -247,6 +247,37 @@ export async function buildDeepSeekHarnessReview(
    * 错误处理里，运维分不清是哪一层坏了。
    */
   const skills = await resolveFrozenSkills(input)
+  const analysisScope = (input.task.job.analysis_context_version ?? 1) === 2
+    ? await input.jobsDb.getStoryTaskAnalysisScope({
+        taskId: input.task.id,
+        workerId: input.workerId,
+        claimToken: input.task.claim_token,
+      })
+    : undefined
+  if (analysisScope && !input.task.agent_run_id) {
+    rejectContract(
+      V4_ERROR_CODES.AGENT_IDENTITY_INVALID,
+      'claimed v2 task has no database-issued agent run id',
+    )
+  }
+  const analysisScopeIdentity = analysisScope
+    ? [
+        input.task.job.story_input_catalog_hash,
+        input.task.job.identity_snapshot_hash,
+        input.task.job.repository_manifest_hash,
+        input.task.job.selected_scope_hash,
+        input.task.job.attribution_algorithm_version,
+        input.task.job.ruleset_hash,
+        analysisScope.story_input_hash,
+        analysisScope.candidate_manifest_hash,
+        String(analysisScope.generation),
+      ]
+    : undefined
+  if (analysisScopeIdentity?.some((value) => typeof value !== 'string' || value.length === 0)) {
+    throw Object.assign(new Error('claimed v2 task is missing frozen scope continuity hashes'), {
+      code: 'ANALYSIS_SCOPE_IDENTITY_MISSING',
+    })
+  }
 
   /*
    * V1.7 阶段二：按**冻结快照**里的网络类型决定模型请求走不走本机代理。
@@ -275,11 +306,15 @@ export async function buildDeepSeekHarnessReview(
     story: {
       code: input.task.story_code,
       name: input.task.story_name,
-      description: buildStoryDescription(input.task),
+      description: analysisScope
+        ? buildScopedStoryDescription(input.task, analysisScope)
+        : buildStoryDescription(input.task),
       acceptanceCriteria: input.task.acceptance_criteria,
       projectName: input.task.project_name,
       applicationName: input.task.application_name,
     },
+    analysisScope,
+    analysisScopeIdentity: analysisScopeIdentity?.join(':'),
     snapshots,
     route: {
       providerId: 'review-route',
@@ -353,6 +388,52 @@ export async function buildDeepSeekHarnessReview(
           claimToken: input.task.claim_token,
         }),
       requestAttemptCancel: (reason) => input.jobsDb.requestAttemptCancel(input.task.id, reason),
+      getStoryCommitDiffMetadata: analysisScope
+        ? (candidateId) => input.jobsDb.getStoryCommitDiffArchiveMetadata({
+            taskId: input.task.id,
+            workerId: input.workerId,
+            claimToken: input.task.claim_token,
+            candidateId,
+          })
+        : undefined,
+      recordStoryCommitAccess: analysisScope
+        ? (access) => input.jobsDb.recordStoryCommitAccess({
+            taskId: input.task.id,
+            workerId: input.workerId,
+            claimToken: input.task.claim_token,
+            agentRunId: input.task.agent_run_id!,
+            ...access,
+          })
+        : undefined,
+      submitCommitRelevanceVerdict: analysisScope
+        ? (output) => input.jobsDb.submitStoryCommitRelevanceVerdict({
+            taskId: input.task.id,
+            workerId: input.workerId,
+            claimToken: input.task.claim_token,
+            agentRunId: input.task.agent_run_id!,
+            candidateId: output.candidateId,
+            triageRevision: output.triageRevision,
+            verdict: output.verdict,
+            reasonCodes: output.reasonCodes,
+            confidence: output.confidence,
+            diffAccessIds: output.diffAccessIds,
+            summary: output.summary,
+          })
+        : undefined,
+      expandAnalysisScope: analysisScope
+        ? async (expansion) => {
+            await input.jobsDb.expandAnalysisScope({
+              taskId: input.task.id,
+              workerId: input.workerId,
+              claimToken: input.task.claim_token,
+              agentRunId: input.task.agent_run_id!,
+              agentNodeId: expansion.agentNodeId,
+              fromLevel: expansion.fromLevel,
+              toLevel: expansion.toLevel,
+              reasonCode: expansion.reasonCode,
+            })
+          }
+        : undefined,
     },
   })
 }
@@ -454,4 +535,25 @@ export function buildStoryDescription(task: StoryTask): string {
     .filter(([, value]) => value !== null && value !== undefined && String(value).trim() !== '')
     .map(([key, value]) => `${key}: ${String(value)}`)
   return lines.length > 0 ? lines.join('\n') : task.story_name
+}
+
+/** V1.11 只使用冻结 scope RPC 明确返回的需求白名单，不读取原始 source_data。 */
+export function buildScopedStoryDescription(
+  task: StoryTask,
+  scope: { requirement_context?: Record<string, unknown> },
+): string {
+  const context = scope.requirement_context ?? {}
+  const allowedKeys = ['detailed_description', 'related_features', 'release_window'] as const
+  const lines = allowedKeys.flatMap((key) => {
+    const value = context[key]
+    return value === null || value === undefined || String(value).trim() === ''
+      ? []
+      : [`${key}: ${String(value)}`]
+  })
+  if (lines.length > 0) return lines.join('\n')
+  return [
+    task.story_name,
+    task.project_name ? `project: ${task.project_name}` : null,
+    task.application_name ? `application: ${task.application_name}` : null,
+  ].filter((value): value is string => value !== null).join('\n')
 }

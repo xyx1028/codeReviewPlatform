@@ -19,6 +19,7 @@ import {
   V4_POLICY_VERSION,
 } from './ai/policy/v4-capability-policy.js'
 import { AGENT_REVIEW_PROMPT_VERSION } from './ai/prompts/agent-review-v1.js'
+import { AGENT_REVIEW_V2_PROMPT_VERSION } from './ai/prompts/agent-review-v2.js'
 import type { ReviewRunner } from './ai/runtime/contracts.js'
 import { buildDeepSeekHarnessReview } from './ai/runtime/factory.js'
 import { enforceSessionRetention } from './ai/session/session-retention.js'
@@ -338,8 +339,16 @@ export async function runStoryTask(
               policy_hash: input.identity.policyHash,
             },
             configHash: input.configHash ?? null,
-            promptVersion: AGENT_REVIEW_PROMPT_VERSION,
+            promptVersion:
+              (task.job.analysis_context_version ?? 1) === 2
+                ? AGENT_REVIEW_V2_PROMPT_VERSION
+                : AGENT_REVIEW_PROMPT_VERSION,
             modelLabel: `${task.model.display_name} / ${task.model.model_name}`,
+            scopeGeneration: input.scopeIdentity?.generation ?? null,
+            triageRevision: input.scopeIdentity?.triageRevision ?? null,
+            candidateManifestHash: input.scopeIdentity?.candidateManifestHash ?? null,
+            analysisScopeHash: input.scopeIdentity?.analysisScopeHash ?? null,
+            attributionRulesetHash: input.scopeIdentity?.rulesetHash ?? null,
           })
           .then((receipt) => ({
             runId: receipt.run_id,
@@ -768,6 +777,7 @@ export function startWorker(
           policy_version: V4_POLICY_VERSION,
           harness_version: loadCapabilityContract().harnessVersion,
           capability_contract_hash: contractHash(),
+          storyCommitScopeVersion: 2,
           // drain 状态进心跳：调度中心页面据此区分"忙"和"正在排空、马上要重建"。
           draining: draining(),
           active_attempts: activeAttempts(),

@@ -447,6 +447,57 @@ export function apply(ctx: Context, config: AgentAuthorityConfig): void {
         } as never
       }
 
+      const skillAttribution = attributeSkill(toolName, exec.arguments)
+
+      // Harness-native resource tools execute without a Broker dispatch. Before any of them runs,
+      // synchronously ask the Broker that owns the dynamic V2 scope and DB-frozen candidates.
+      // The query branch never persists these model-controlled arguments. Legacy V1 and GLOBAL
+      // return allow; transport/protocol uncertainty fails closed with one stable code.
+      if (RESOURCE_TOOLS.has(toolName)) {
+        let scopeAllowed = false
+        let scopeReason =
+          'native resource access could not be authorized; use snapshot tools or expand the analysis scope'
+        try {
+          const response = await brokerPost<{
+            allowed?: boolean
+            code?: string
+            reason?: string
+          }>(channel, '/attempt/tool-audit', {
+            taskId: config.taskId,
+            agentAttempt: config.agentAttempt,
+            agentCapability: identity.agentCapability,
+            agentId: identity.agentId,
+            sessionId: identity.sessionId,
+            toolName,
+            scopeCheck: { toolName, arguments: exec.arguments },
+          })
+          scopeAllowed = response.status >= 200 && response.status < 300 && response.body.allowed === true
+          if (
+            response.body.code === 'SNAPSHOT_SCOPE_DENIED' &&
+            typeof response.body.reason === 'string' &&
+            response.body.reason !== ''
+          ) {
+            scopeReason = response.body.reason
+          }
+        } catch {
+          // Authorization channel uncertainty is not observability failure: never execute the tool.
+        }
+        if (!scopeAllowed) {
+          reportDenial({
+            agentCapability: identity.agentCapability,
+            agentId: identity.agentId,
+            sessionId: identity.sessionId,
+            toolName,
+            reasonCode: 'SNAPSHOT_SCOPE_DENIED',
+            correlationId,
+          })
+          return {
+            decision: 'deny',
+            reason: `[SNAPSHOT_SCOPE_DENIED] ${scopeReason}`,
+          } as never
+        }
+      }
+
       if (DELEGATION_TOOLS[toolName]) {
         // 委派开始：下一个出现的新 Agent 归这个父节点。串行 mutation 保证这里不会歧义。
         registry.beginDelegation(
@@ -473,8 +524,6 @@ export function apply(ctx: Context, config: AgentAuthorityConfig): void {
         occurredAt: startedAt.toISOString(),
       })
       const t0 = Date.now()
-
-      const skillAttribution = attributeSkill(toolName, exec.arguments)
 
       try {
         const result = await next()

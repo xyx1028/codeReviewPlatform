@@ -14,6 +14,7 @@ const config: WorkerConfig = {
   gitlabBaseUrl: 'https://git.example.com',
   gitlabDeployUser: null,
   gitlabDeployToken: null,
+  gitlabApiToken: null,
   workerId: 'worker-preparation',
   workspaceRoot: '/tmp/jobs',
   codeCacheRoot: '/tmp/cache',

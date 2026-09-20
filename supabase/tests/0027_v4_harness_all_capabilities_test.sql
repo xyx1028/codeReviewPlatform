@@ -61,10 +61,10 @@ declare
     'public.reserve_analysis_agent_budget(uuid,text,uuid,integer,text,text,integer)',
     'public.commit_analysis_agent_usage(uuid,text,uuid,integer,jsonb,jsonb)',
     'public.append_analysis_tool_audit(uuid,text,uuid,integer,jsonb,jsonb)',
-    'public.save_analysis_session_checkpoint(uuid,text,uuid,integer,text,integer,text,text,integer,text,text,text)',
-    'public.load_resumable_analysis_attempt(uuid,text,uuid)',
+    'public.save_analysis_session_checkpoint(uuid,text,uuid,integer,text,integer,text,text,integer,text,text,text,text,bigint,text,text)',
+    'public.load_resumable_analysis_attempt(uuid,text,uuid,boolean)',
     'public.save_analysis_artifact(uuid,text,uuid,integer,text,text,text,text,bigint,text)',
-    'public.record_analysis_attempt_profile(uuid,text,uuid,integer,text,text,text,text,text,text,text)',
+    'public.record_analysis_attempt_profile(uuid,text,uuid,integer,text,text,text,text,text,text,text,text)',
     'public.heartbeat_analysis_attempt(uuid,text,uuid,integer)'
   ];
   v_browser_rpcs text[] := array[
@@ -1202,8 +1202,10 @@ begin
   );
   reset role;
 
-  -- 没有近期的 worker 心跳行，reclaim 应当接管这一条。
+  -- 最终安全判据要求 Worker 与 task 两条独立心跳都陈旧。
   delete from public.analysis_worker_heartbeat where worker_id = v_worker;
+  update public.analysis_story_task set heartbeat_at=now()-interval '91 seconds'
+  where id=v_task;
   set local role service_role;
   v_count := public.reclaim_stale_story_task_leases();
   reset role;

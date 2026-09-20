@@ -87,6 +87,9 @@ import {
   buildAgentReviewPrompt,
   type AgentReviewStory,
 } from '../prompts/agent-review-v1.js'
+import { AGENT_REVIEW_V2_PROMPT_VERSION, buildAgentReviewV2Prompt } from '../prompts/agent-review-v2.js'
+import type { StoryAnalysisScope } from '../../db/jobs.js'
+import type { CommitRelevanceOutput } from '../../analysis/commit-relevance-contract.js'
 import type {
   ReviewRunner,
   ReviewRunInput,
@@ -185,6 +188,9 @@ export interface DeepSeekHarnessAcpEngineOptions {
   agentAttempt: number
   branch: string
   story: AgentReviewStory
+  /** V1.11 冻结范围；缺省表示 legacy v1。 */
+  analysisScope?: StoryAnalysisScope
+  analysisScopeIdentity?: string
   snapshots: SnapshotStore
   route: ModelRouteSpec
   /** 运维熔断前、数据库冻结快照的规范哈希；身份校验不能使用熔断后的有效策略哈希。 */
@@ -248,7 +254,7 @@ export interface DeepSeekHarnessAcpEngineOptions {
   commitReview(input: CommitReviewInput): Promise<CommitReviewResult>
   /** V4 治理面的数据库钩子。缺省时只在内存中治理（用于单测）。 */
   db?: {
-    registerAgentNode(identity: AgentIdentity): Promise<void>
+    registerAgentNode(identity: AgentIdentity): Promise<string | void>
     markAgentTerminal(
       agentId: string,
       status: 'FINISHED' | 'FAILED' | 'CANCELLED',
@@ -277,6 +283,8 @@ export interface DeepSeekHarnessAcpEngineOptions {
       skillCatalogHash?: string | null
       /** V1.9：contentHash 覆盖的前缀字节数。在途 checkpoint 靠它做前缀判定。 */
       prefixBytes?: number | null
+      analysisScopeHash?: string | null
+      attributionRulesetHash?: string | null
     }): Promise<void>
     recordProfile(input: {
       harnessVersion: string
@@ -321,6 +329,41 @@ export interface DeepSeekHarnessAcpEngineOptions {
      * attempt 是 no-op。
      */
     requestAttemptCancel(reason: string): Promise<boolean>
+    getStoryCommitDiffMetadata?(candidateId: string): Promise<{
+      candidate_id: string
+      repository_name: RepositoryName
+      commit_sha: string
+      status: string
+      archive_sha256: string | null
+    }>
+    recordStoryCommitAccess?(input: {
+      agentNodeId: string | null
+      candidateId: string
+      toolCallId: string
+      accessKind: 'DIFF'
+      filePath: string | null
+      cursorValue: string | null
+      bytesReturned: number
+      diffLines: number
+      truncated: boolean
+      archiveSha256: string | null
+    }): Promise<string>
+    submitCommitRelevanceVerdict?(input: CommitRelevanceOutput & {
+      scopeGeneration: number
+      triageRevision: number
+      candidateManifestHash: string
+      rulesetHash: string
+    }): Promise<{
+      completed_count: number
+      required_count: number
+      triage_complete: boolean
+    }>
+    expandAnalysisScope?(input: {
+      agentNodeId: string
+      fromLevel: 'PRIMARY' | 'RELATED' | 'GLOBAL'
+      toLevel: 'RELATED' | 'GLOBAL'
+      reasonCode: string
+    }): Promise<void>
   }
   /** 检出固定 Commit 到只读视图。缺省时跳过物化（单测）。 */
   checkoutPinned?(input: { gitDir: string; commitSha: string; targetDir: string }): void
@@ -359,7 +402,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
     const policyHash = this.options.frozenPolicyHash ?? effectivePolicyHash
     const log = input.logger.child({
       engine: 'deepseek-harness-acp',
-      prompt_version: AGENT_REVIEW_PROMPT_VERSION,
+      prompt_version: this.promptVersion(),
       policy_version: policy.version,
     })
 
@@ -426,6 +469,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
     }
 
     const identity = mintRootIdentity(this.options.taskId, continuityAttempt)
+    const agentNodeIds = new Map<string, string>()
     const authority = new AgentAuthorityLedger({
       taskId: this.options.taskId,
       agentAttempt: this.options.agentAttempt,
@@ -433,12 +477,13 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       rootAgentId: identity.rootAgentId,
       rootSessionId: identity.rootSessionId,
       persistNode: this.options.db
-        ? (node) => {
+        ? async (node) => {
             // Agent 注册成功的时刻就是 agent_idle_ms 窗口的起点。用 persistNode 而不是
             // 事件流：AGENT_REGISTERED 由数据库触发器原子写（数据库是 lineage 的唯一
             // 仲裁），Worker 侧看不到那条事件。
             attribution.observeAgentRegistered(node.agentId)
-            return this.options.db!.registerAgentNode(node)
+            const nodeId = await this.options.db!.registerAgentNode(node)
+            if (typeof nodeId === 'string') agentNodeIds.set(node.agentId, nodeId)
           }
         : undefined,
     })
@@ -609,6 +654,32 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         budget,
         egress,
         workspace,
+        analysisScope: this.options.analysisScope,
+        analysisScopeHash: this.options.analysisScopeIdentity,
+        analysisStory: this.options.analysisScope
+          ? {
+              code: this.options.story.code,
+              name: this.options.story.name,
+              allowedContext: this.options.story.description,
+            }
+          : undefined,
+        agentRunId: this.options.runtimeContext?.agentRunId,
+        getStoryCommitDiffMetadata: this.options.db?.getStoryCommitDiffMetadata,
+        recordStoryCommitAccess: this.options.db?.recordStoryCommitAccess
+          ? async (access) => {
+              const nodeId = agentNodeIds.get(access.agentNodeId)
+              if (!nodeId) throw new Error('AGENT_NODE_ID_UNAVAILABLE: diff access has no persisted agent node')
+              return this.options.db!.recordStoryCommitAccess!({ ...access, agentNodeId: nodeId })
+            }
+          : undefined,
+        submitCommitRelevanceVerdict: this.options.db?.submitCommitRelevanceVerdict,
+        expandAnalysisScope: this.options.db?.expandAnalysisScope
+          ? async (expansion) => {
+              const nodeId = agentNodeIds.get(expansion.agentNodeId)
+              if (!nodeId) throw new Error('AGENT_NODE_ID_UNAVAILABLE: scope expansion has no persisted agent node')
+              return this.options.db!.expandAnalysisScope!({ ...expansion, agentNodeId: nodeId })
+            }
+          : undefined,
         commitReview: async (review) => {
           // save_agent_review_result 会烧毁 task claim。usage、分 Agent 计量和自动扫描到的
           // Artifact 都依赖该 claim，必须在正式提交前完成；失败/取消路径仍由 finally 兜底。
@@ -689,6 +760,15 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
           catalogHash: skillCatalogHash,
           bundles: this.options.skills?.bundles ?? [],
         },
+        analysisScopeHash: this.options.analysisScopeIdentity ?? (this.options.analysisScope
+          ? [
+              this.options.analysisScope.candidate_manifest_hash,
+              this.options.analysisScope.ruleset_hash,
+              this.options.analysisScope.algorithm_version,
+              this.options.analysisScope.story_input_hash ?? '',
+              String(this.options.analysisScope.generation),
+            ].join(':')
+          : undefined),
       })
       log.info('agent_attempt_skills_materialized', {
         event: 'agent_attempt_skills_materialized',
@@ -735,7 +815,8 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       emit({ type: 'PROFILE_FROZEN', payload: {} })
       // 根节点由平台创建，不经过模型的 register_agent 路由，因此必须在启动 Harness 前
       // 显式持久化。只有数据库确认 root identity 后，进程才获得执行机会。
-      await this.options.db?.registerAgentNode(authority.root)
+      const rootNodeId = await this.options.db?.registerAgentNode(authority.root)
+      if (typeof rootNodeId === 'string') agentNodeIds.set(authority.root.agentId, rootNodeId)
       attribution.observeAgentRegistered(authority.root.agentId)
 
       log.info('agent_attempt_started', {
@@ -929,6 +1010,8 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
             profileHash: profile?.configHash ?? null,
             skillCatalogHash,
             prefixBytes: described.prefixBytes,
+            analysisScopeHash: this.options.analysisScopeIdentity ?? null,
+            attributionRulesetHash: this.options.analysisScope?.ruleset_hash ?? null,
           })
           checkpointsWritten += 1
           log.info('session_checkpoint_saved', {
@@ -1268,7 +1351,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
           profile_config_hash: profile?.configHash ?? null,
           harness_version: contract.harnessVersion,
           capability_contract_hash: contractHash(contract),
-          prompt_version: AGENT_REVIEW_PROMPT_VERSION,
+          prompt_version: this.promptVersion(),
           policy_version: policy.version,
         },
         agent_count: authority.totalCount(),
@@ -1383,16 +1466,23 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
   }
 
   private prompt(rootToolCount: number): string {
-    return `${AGENT_REVIEW_SYSTEM_PROMPT}\n\n---\n\n${buildAgentReviewPrompt({
+    const base = {
       story: this.options.story,
       branch: this.options.branch,
       pins: this.options.snapshots.pins(),
-      // 让模型知道自己的硬上限：不告知的实测后果是它一直检索、从不提交。
       maxModelRequests: this.options.policy.modelBudget.maxRootRequests,
       maxAgents: this.options.policy.agents.maxAgentsPerAttempt,
       maxDelegationDepth: this.options.policy.agents.maxDelegationDepth,
       toolCount: rootToolCount,
-    })}`
+    }
+    if (this.options.analysisScope) {
+      return buildAgentReviewV2Prompt({ ...base, scope: this.options.analysisScope })
+    }
+    return `${AGENT_REVIEW_SYSTEM_PROMPT}\n\n---\n\n${buildAgentReviewPrompt(base)}`
+  }
+
+  private promptVersion(): string {
+    return this.options.analysisScope ? AGENT_REVIEW_V2_PROMPT_VERSION : AGENT_REVIEW_PROMPT_VERSION
   }
 
   private usage(broker: AttemptControlHandle): ReviewUsage {

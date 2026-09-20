@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V1.11 开发提交填写规范 · IDEA 与 GitLab 示例</title>
+<style>
+:root{--ink:#102a43;--muted:#63758c;--blue:#2e6fe8;--green:#159168;--cyan:#12a7a0;--red:#e5484d;--amber:#d88a10;--line:#d7e2ee;--dark:#202327;--dark2:#2b2f34;--gitlab:#292961}
+*{box-sizing:border-box}body{margin:0;background:#e9eef4;color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}.sheet{position:relative;width:296mm;height:209mm;margin:18px auto;padding:9mm 10mm 7mm;background:#fff;overflow:hidden;box-shadow:0 16px 42px #18334e25}.sheet:before{content:"";position:absolute;left:0;right:0;top:0;height:4px;background:linear-gradient(90deg,var(--blue),var(--cyan))}.head{display:flex;justify-content:space-between;align-items:center}.brand{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:900}.logo{display:grid;place-items:center;width:36px;height:36px;border-radius:10px;color:#fff;background:linear-gradient(135deg,var(--blue),var(--cyan));font-size:17px}.tag{padding:5px 10px;border-radius:999px;background:#fff2d4;color:#96600e;font-size:9px;font-weight:800}.intro{display:flex;justify-content:space-between;align-items:end;margin:7px 0 9px}.intro h1{margin:0;font-size:24px;line-height:1.12;letter-spacing:-.6px}.intro h1 em{color:var(--blue);font-style:normal}.intro p{width:42%;margin:0;color:var(--muted);font-size:9.5px;line-height:1.55;text-align:right}.scenes{display:grid;grid-template-columns:.8fr 1.2fr;gap:10px}.scene{position:relative;border:1px solid var(--line);border-radius:14px;padding:9px;background:#f8fafc}.scene-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px}.scene-title{display:flex;align-items:center;gap:8px;font-weight:900;font-size:12px}.no{display:grid;place-items:center;width:27px;height:27px;border-radius:8px;color:#fff;background:var(--blue)}.scene:nth-child(2) .no{background:var(--green)}.scene-head span:last-child{color:var(--muted);font-size:8.5px}.ide{height:94mm;border-radius:10px;overflow:hidden;background:var(--dark);color:#dce5ed;border:1px solid #111}.ide-top{display:flex;align-items:center;gap:6px;padding:7px 9px;background:#181a1d;font-size:9px;font-weight:800}.dots{display:flex;gap:4px}.dots i{width:7px;height:7px;border-radius:50%;background:#ff5f57}.dots i:nth-child(2){background:#ffbd2e}.dots i:nth-child(3){background:#28c840}.ide-body{display:grid;grid-template-columns:1fr 1.3fr;height:calc(100% - 29px)}.changes{padding:10px;border-right:1px solid #3a3f45;color:#9aa5b1;font-size:9px}.changes b{display:block;color:#dce5ed;margin-bottom:7px}.file{margin-top:7px;padding:6px;background:#292d32;border-radius:5px}.commit-area{display:flex;flex-direction:column;padding:9px}.label{font-size:8.5px;color:#aab5c0;margin-bottom:5px}.textarea{position:relative;flex:1;padding:10px;border:2px solid var(--red);border-radius:6px;background:#262a2f;color:#e8edf2;font:10px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}.accent{color:#62dfb7;font-weight:900}.buttons{display:flex;gap:5px;margin-top:7px}.btn{padding:6px 10px;border-radius:5px;background:#353a40;color:#fff;font-size:8px;font-weight:800}.btn.primary{background:#2d6cdf}.callout{position:absolute;z-index:3;padding:4px 7px;border-radius:7px;color:#fff;background:var(--red);font-size:8px;font-weight:900;box-shadow:0 4px 12px #e5484d40}.idea-call{right:20px;top:45px}.idea-call:after{content:"";position:absolute;right:16px;top:100%;border:6px solid transparent;border-top-color:var(--red)}.gitlab{height:94mm;border:1px solid #cdd5df;border-radius:10px;overflow:hidden;background:#fff}.gl-top{height:27px;padding:7px 11px;background:var(--gitlab);color:#fff;font-size:9px;font-weight:900}.gl-body{padding:9px 13px}.gl-body h3{margin:0 0 8px;font-size:11px}.field-label{display:flex;justify-content:space-between;margin:6px 0 3px;font-size:8px;font-weight:800}.input,.description{border:2px solid var(--red);border-radius:5px;background:#fff;color:#25364a;font:9px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}.input{padding:7px 8px}.description{height:51mm;padding:8px;white-space:pre-wrap}.merge-options{margin-top:6px;color:#68798d;font-size:8px}.gl-call-title{right:21px;top:47px}.gl-call-desc{right:21px;top:93px}.gl-call-title:after,.gl-call-desc:after{content:"";position:absolute;right:17px;top:100%;border:6px solid transparent;border-top-color:var(--red)}.copy{display:grid;grid-template-columns:.65fr 1.35fr;gap:10px;margin-top:8px}.copy-card{padding:8px 10px;border-radius:11px;border:1px solid var(--line);background:#f4f8fc}.copy-head,.copy-unit-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}.copy-head b,.copy-unit-head b{font-size:10px}.copy-head span{color:var(--green);font-size:8px;font-weight:800}.copy-btn{border:0;border-radius:6px;padding:4px 8px;color:#fff;background:var(--green);font-size:7.5px;font-weight:900;cursor:pointer}.copy-btn.done{background:var(--blue)}.mr-copy-grid{display:grid;grid-template-columns:.72fr 1.28fr;gap:6px}.copy-unit{min-width:0}.code{margin:0;min-height:45px;color:#dff8ef;background:#133a52;border-radius:7px;padding:6px 9px;font:8.2px/1.38 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.code.description-code{font-size:7.2px;line-height:1.28}.notes{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:7px}.note{padding:6px 8px;border-radius:9px;background:#edf6ff;color:#4d627b;font-size:8px;line-height:1.35}.note b{color:var(--blue)}.footer{position:absolute;left:10mm;right:10mm;bottom:4mm;display:flex;justify-content:space-between;color:var(--muted);font-size:8px}.footer strong{color:var(--green)}.print{position:fixed;right:18px;bottom:18px;border:0;border-radius:9px;padding:9px 13px;color:#fff;background:var(--ink);font-weight:800;cursor:pointer}
+@media(max-width:900px){body{background:#fff}.sheet{width:100%;height:auto;min-height:100vh;margin:0;padding:22px 16px 60px;overflow:visible;box-shadow:none}.intro{align-items:flex-start;flex-direction:column;gap:8px}.intro p{width:100%;text-align:left}.scenes,.copy,.notes,.mr-copy-grid{grid-template-columns:1fr}.ide,.gitlab{height:460px}.footer{position:static;margin-top:15px}.print{display:none}}
+@page{size:296mm 209mm;margin:0}@media print{body{background:#fff}.sheet{width:296mm;height:209mm;min-height:0;margin:0;padding:9mm 10mm 7mm;overflow:hidden;box-shadow:none}.intro{align-items:end;flex-direction:row}.intro p{width:42%;text-align:right}.scenes{grid-template-columns:.8fr 1.2fr}.copy{grid-template-columns:.65fr 1.35fr}.mr-copy-grid{grid-template-columns:.72fr 1.28fr}.notes{grid-template-columns:repeat(3,1fr)}.ide,.gitlab{height:94mm}.footer{position:absolute;margin:0}.print,.copy-btn{display:none}}
+</style>
+</head>
+<body>
+<main class="sheet">
+<header class="head"><div class="brand"><span class="logo">V11</span>开发提交填写规范</div><span class="tag">依据实际 IDEA / GitLab 操作界面绘制</span></header>
+<section class="intro"><h1>两个地方要填写：<em>IDEA Commit + GitLab MR</em></h1><p>下图是通用示意，不含真实仓库和人员信息。把示例中的 <b>REQ-001</b> 换成 Excel 或平台里的真实需求编码。</p></section>
+<section class="scenes">
+  <article class="scene">
+    <div class="scene-head"><div class="scene-title"><span class="no">1</span>IDEA 提交代码</div><span>左侧 Commit 工具窗口</span></div><span class="callout idea-call">在 Commit 输入框这样写</span>
+    <div class="ide"><div class="ide-top"><span class="dots"><i></i><i></i><i></i></span>Commit</div><div class="ide-body"><div class="changes"><b>Changes</b>☐ Changes 4 files<div class="file">▾ src<br>　✓ OrderService.java<br>　✓ OrderServiceTest.java</div></div><div class="commit-area"><div class="label">Commit Message</div><div class="textarea">增加批量关闭订单接口
+
+<span class="accent">Story-Id: REQ-001</span></div><div class="buttons"><span class="btn">Commit</span><span class="btn primary">Commit and Push...</span></div></div></div></div>
+  </article>
+  <article class="scene">
+    <div class="scene-head"><div class="scene-title"><span class="no">2</span>GitLab 创建合并申请（MR）</div><span>New merge request 页面</span></div><span class="callout gl-call-title">标题填写需求编码</span><span class="callout gl-call-desc">Description 粘贴模板</span>
+    <div class="gitlab"><div class="gl-top">GitLab　Projects　Groups　Merge requests</div><div class="gl-body"><h3>New merge request</h3><div class="field-label"><span>Title</span><span>必填位置 ①</span></div><div class="input"><span class="accent">[REQ-001]</span> 支持批量关闭订单</div><div class="field-label"><span>Description</span><span>必填位置 ②</span></div><div class="description">## 关联需求
+<span class="accent">Story-Id: REQ-001</span>
+
+## 本次修改
+- 新增批量关闭订单接口
+- 补充权限校验和测试
+
+## 验证情况
+- [x] 单元测试通过
+
+## 影响与风险
+- 影响范围：订单服务
+- 已知风险：无
+- 回滚方式：回滚本 MR</div><div class="merge-options">☐ Delete source branch　　☐ Squash commits when merge request is accepted</div></div></div>
+  </article>
+</section>
+<section class="copy">
+  <div class="copy-card"><div class="copy-head"><b>IDEA Commit 可复制内容</b><button class="copy-btn" onclick="copyBlock('commit-copy',this)">复制 Commit</button></div><pre class="code" id="commit-copy">&lt;修改说明&gt;
+
+Story-Id: REQ-001</pre></div>
+  <div class="copy-card"><div class="copy-head"><b>GitLab MR 可复制内容</b><span>分开复制到 Title 和 Description</span></div><div class="mr-copy-grid">
+    <div class="copy-unit"><div class="copy-unit-head"><b>Title</b><button class="copy-btn" onclick="copyBlock('mr-title-copy',this)">复制标题</button></div><pre class="code" id="mr-title-copy">[REQ-001] &lt;需求简述&gt;</pre></div>
+    <div class="copy-unit"><div class="copy-unit-head"><b>Description</b><button class="copy-btn" onclick="copyBlock('mr-description-copy',this)">复制描述</button></div><pre class="code description-code" id="mr-description-copy">## 关联需求
+Story-Id: REQ-001
+
+## 本次修改
+- &lt;修改内容&gt;
+
+## 验证情况
+- [ ] &lt;验证内容&gt;
+
+## 影响与风险
+- 影响范围：&lt;填写&gt;
+- 已知风险：&lt;填写或无&gt;
+- 回滚方式：&lt;填写&gt;</pre></div>
+  </div></div>
+</section>
+<section class="notes"><div class="note"><b>多个需求：</b>优先拆分；无法拆分时，每个 Story-Id 独立一行。</div><div class="note"><b>Revert：</b>保留回滚标记、原因和原需求 Story-Id。</div><div class="note"><b>Squash：</b>合并前确认最终 Commit 仍保留 Story-Id。</div></section>
+<footer class="footer"><span><strong>只记住：</strong>IDEA Commit 末尾写 Story-Id；GitLab MR 标题和描述都写需求编码。</span><span>虚构界面示例 · 非生产数据</span></footer>
+</main>
+<button class="print" onclick="window.print()">打印 / 导出 PDF</button>
+<script>
+async function copyBlock(id, button) {
+  const text = document.getElementById(id).textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand('copy');
+    area.remove();
+  }
+  const original = button.textContent;
+  button.textContent = '已复制';
+  button.classList.add('done');
+  setTimeout(() => { button.textContent = original; button.classList.remove('done'); }, 1200);
+}
+</script>
+</body>
+</html>

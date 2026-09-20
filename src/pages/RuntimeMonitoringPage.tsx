@@ -14,11 +14,13 @@ import {
   adminListActiveAnalysisBatches,
   adminListAnalysisWorkers,
   getAnalysisRuntimeTaskEvents,
+  runtimeAnalysisScopeApi,
 } from '../lib/api'
 import { computeRuntimeFreshness, useRuntimeConsole } from '../hooks/useRuntimeConsole'
 import { RuntimeBatchList } from '../components/monitoring/RuntimeBatchList'
 import { RuntimeTaskList } from '../components/monitoring/RuntimeTaskList'
 import { RuntimeAgentTree } from '../components/monitoring/RuntimeAgentTree'
+import { RuntimeAnalysisScopeCard } from '../components/monitoring/RuntimeAnalysisScopeCard'
 import { RuntimeActivityTimeline } from '../components/monitoring/RuntimeActivityTimeline'
 import { RuntimeFreshnessBadge } from '../components/monitoring/RuntimeFreshnessBadge'
 import { formatAge } from '../lib/runtime-format'
@@ -363,6 +365,11 @@ export function RuntimeMonitoringPage({ isAdmin }: { isAdmin: boolean }) {
         </aside>
 
         <section className="runtime-workbench__detail">
+          <RuntimeAnalysisScopeCard
+            taskId={selectedTask?.task_id ?? null}
+            api={runtimeAnalysisScopeApi}
+          />
+
           <RuntimeAgentTree
             task={selectedTask}
             selectedAttempt={selectedAttemptNumber}

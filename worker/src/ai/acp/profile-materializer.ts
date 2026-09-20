@@ -129,6 +129,8 @@ export interface AttemptProfileSpec {
     catalogHash: string
     bundles: readonly ProvisionedSkill[]
   }
+  /** V1.11：冻结 Story scope 的连续性身份；v1 缺省为 legacy。 */
+  analysisScopeHash?: string
 }
 
 export interface MaterializedAttemptProfile {
@@ -622,6 +624,7 @@ export function computeConfigHash(
   patch: unknown[],
   pluginEntries: Record<string, string>,
   skillCatalogHash?: string,
+  analysisScopeHash?: string,
 ): string {
   const redactedPatch = JSON.parse(JSON.stringify(patch)) as Array<{
     id?: string
@@ -652,6 +655,7 @@ export function computeConfigHash(
   hash.update(JSON.stringify(redactedPatch))
   hash.update(JSON.stringify(Object.keys(pluginEntries).sort()))
   hash.update(`skill-catalog:${skillCatalogHash ?? emptyCatalogHash()}`)
+  hash.update(`analysis-scope:${analysisScopeHash ?? 'legacy-v1'}`)
   return hash.digest('hex')
 }
 
@@ -759,7 +763,7 @@ export function materializeAttemptProfile(
       profileName: ACP_PROFILE_NAME,
       profileDir,
       patchPath,
-      configHash: computeConfigHash(templateDir, patch, pluginEntries, skillCatalogHash),
+      configHash: computeConfigHash(templateDir, patch, pluginEntries, skillCatalogHash, spec.analysisScopeHash),
       contractHash: contractHash(loadCapabilityContract()),
       rootTools: resolveToolsForRole({
         role: 'root-reviewer',
