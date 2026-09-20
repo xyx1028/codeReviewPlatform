@@ -4,6 +4,11 @@
 begin;
 set local client_min_messages=warning;
 
+-- 固件里的员工号一律用 V113-TEST- 前缀：employee_code 全局唯一（不分大小写），
+-- 用 69171 这种真实写法会在本地库已有真人身份时直接撞 DEVELOPER_EMPLOYEE_CODE_CONFLICT，
+-- 让测试红在环境而不是红在逻辑。
+
+
 create or replace function pg_temp.assert(p_condition boolean,p_message text)
 returns void language plpgsql as $$
 begin
@@ -39,7 +44,7 @@ begin
   perform set_config('request.jwt.claims',json_build_object(
     'sub',v_owner::text,'role','authenticated')::text,true);
   begin
-    perform public.update_my_developer_profile('薛宇轩','69171');
+    perform public.update_my_developer_profile('薛宇轩','V113-TEST-51006');
     perform pg_temp.assert(false,'renaming without an identity row must fail');
   exception when others then
     get stacked diagnostics v_error=message_text;
@@ -58,14 +63,14 @@ begin
   ----------------------------------------------------------------------------
   perform set_config('request.jwt.claims',json_build_object(
     'sub',v_owner::text,'role','authenticated')::text,true);
-  v_result:=public.update_my_developer_profile('薛宇轩','69171');
+  v_result:=public.update_my_developer_profile('薛宇轩','V113-TEST-51006');
   reset role;
   perform pg_temp.assert(v_result->>'display_name'='薛宇轩'
-    and v_result->>'employee_code'='69171'
+    and v_result->>'employee_code'='V113-TEST-51006'
     and (v_result->>'revision')::integer=2,
     'the caller can rename their own developer identity');
   perform pg_temp.assert(
-    (select display_name='薛宇轩' and employee_code='69171' and status='VERIFIED'
+    (select display_name='薛宇轩' and employee_code='V113-TEST-51006' and status='VERIFIED'
      from public.developer_identity where id=v_developer),
     'the rename lands on the row and keeps the verified status');
   perform pg_temp.assert(exists(

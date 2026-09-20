@@ -104,7 +104,8 @@ begin
     perform pg_temp.assert(false,'more than ten aliases must be rejected');
   exception when others then
     get stacked diagnostics v_error=message_text;
-    perform pg_temp.assert(v_error='GIT_IDENTITY_TOO_MANY_ALIASES','alias cap returns a stable code');
+    -- 20260920060736 起上限由表上的触发器统一执行，错误码与候选绑定路径对齐。
+    perform pg_temp.assert(v_error='AUTHOR_ALIAS_LIMIT_EXCEEDED','alias cap returns a stable code');
   end;
   begin
     perform public.update_my_git_identity_details(v_fresh,array['x'],null,99);

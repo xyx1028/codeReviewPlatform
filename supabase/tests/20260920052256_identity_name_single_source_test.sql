@@ -4,6 +4,11 @@
 begin;
 set local client_min_messages=warning;
 
+-- 固件里的员工号一律用 V113-TEST- 前缀：employee_code 全局唯一（不分大小写），
+-- 用 69171 这种真实写法会在本地库已有真人身份时直接撞 DEVELOPER_EMPLOYEE_CODE_CONFLICT，
+-- 让测试红在环境而不是红在逻辑。
+
+
 create or replace function pg_temp.assert(p_condition boolean,p_message text)
 returns void language plpgsql as $$
 begin
@@ -34,7 +39,7 @@ begin
   perform set_config('request.jwt.claims',json_build_object(
     'sub',v_owner::text,'role','authenticated')::text,true);
   set local role authenticated;
-  v_result:=public.update_my_identity_profile('薛宇轩','69171');
+  v_result:=public.update_my_identity_profile('薛宇轩','V113-TEST-52256A');
   reset role;
   perform pg_temp.assert(v_result->'profile'->>'display_name'='薛宇轩'
     and v_result->>'developer_id' is null,
@@ -50,18 +55,18 @@ begin
   -- 2. 绑过邮箱之后：同一次保存把姓名与员工号同步进开发人员身份
   ----------------------------------------------------------------------------
   insert into public.developer_identity(display_name,employee_code,status,auth_user_id)
-  values('薛宇轩','69171','VERIFIED',v_owner) returning id into v_developer;
+  values('薛宇轩','V113-TEST-52256A','VERIFIED',v_owner) returning id into v_developer;
 
   perform set_config('request.jwt.claims',json_build_object(
     'sub',v_owner::text,'role','authenticated')::text,true);
   set local role authenticated;
-  v_result:=public.update_my_identity_profile('薛某某','E-69171');
+  v_result:=public.update_my_identity_profile('薛某某','V113-TEST-52256B');
   reset role;
   perform pg_temp.assert((v_result->>'developer_id')::uuid=v_developer
-    and v_result->>'employee_code'='E-69171',
+    and v_result->>'employee_code'='V113-TEST-52256B',
     'the identity is mirrored in the same call');
   perform pg_temp.assert(
-    (select display_name='薛某某' and employee_code='E-69171'
+    (select display_name='薛某某' and employee_code='V113-TEST-52256B'
      from public.developer_identity where id=v_developer)
     and (select display_name='薛某某' from public.user_profile where id=v_owner),
     'account profile and developer identity can no longer drift apart');

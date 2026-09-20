@@ -158,7 +158,13 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
           >
             <Input autoComplete="off" placeholder="developer@example.com" />
           </Form.Item>
-          <Form.Item name="aliases" label="Git 作者别名"><Input placeholder="多个名称用逗号分隔，例如：Zhang San，zhangsan" /></Form.Item>
+          <Form.Item
+            name="aliases"
+            label="Git 作者别名"
+            extra="提交里的 git config user.name，通常是英文或拼音，不是中文姓名。"
+          >
+            <Input placeholder="多个用逗号分隔，例如 yuxuan_xue, guolichen2025" />
+          </Form.Item>
           <Space size={12} style={{ display: 'flex' }}>
             <Form.Item name="gitlabUsername" label="GitLab 用户名"><Input /></Form.Item>
             <Form.Item name="gitlabUserId" label="GitLab User ID"><Input /></Form.Item>

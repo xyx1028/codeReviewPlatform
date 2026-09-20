@@ -31,6 +31,9 @@ describe('describeGitIdentityError', () => {
     expect(describeGitIdentityError('GIT_IDENTITY_IN_USE')).toContain('停用')
     expect(describeGitIdentityError('GIT_IDENTITY_DISABLED')).toContain('新增')
     expect(describeGitIdentityError('GIT_IDENTITY_WOULD_MATCH_NOTHING')).toContain('至少保留一项')
+    // 上限由表上的触发器统一执行，所以实际收到的是 AUTHOR_ALIAS_LIMIT_EXCEEDED；
+    // 旧码一并保留，避免混跑新旧数据库时文案突然退化成裸错误。
+    expect(describeGitIdentityError('AUTHOR_ALIAS_LIMIT_EXCEEDED')).toContain('10')
     expect(describeGitIdentityError('GIT_IDENTITY_TOO_MANY_ALIASES')).toContain('10')
     expect(describeGitIdentityError('GIT_IDENTITY_ALIAS_INVALID')).toContain('64')
   })

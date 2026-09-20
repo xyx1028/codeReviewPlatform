@@ -49,7 +49,8 @@ export function describeGitIdentityError(message: string): string {
   if (message.includes('GIT_IDENTITY_WOULD_MATCH_NOTHING')) {
     return '这条记录没有邮箱，清空别名和 GitLab 用户名后就匹配不到任何提交了。请至少保留一项。'
   }
-  if (message.includes('GIT_IDENTITY_TOO_MANY_ALIASES')) return '作者别名最多 10 个。'
+  if (message.includes('AUTHOR_ALIAS_LIMIT_EXCEEDED')
+    || message.includes('GIT_IDENTITY_TOO_MANY_ALIASES')) return '作者别名最多 10 个（去重后计算）。'
   if (message.includes('GIT_IDENTITY_ALIAS_INVALID')) {
     return '作者别名不能超过 64 个字符，也不能包含控制字符。'
   }

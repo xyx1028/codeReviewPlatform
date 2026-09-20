@@ -68,6 +68,7 @@ const identityStatusMeta = GIT_IDENTITY_STATUS_META
 
 interface GitIdentityFormValues {
   gitlabUsername?: string
+  authorNameAliases?: string[]
 }
 
 /** 编辑一行 Git 身份时能改的东西：只有当初自己填进去的两列，邮箱不在其中。 */
@@ -166,8 +167,14 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
       // 姓名与员工号只有一个来源：个人中心的「基本资料」。
       displayName: (identityProfile?.display_name ?? profileDisplayName ?? '').trim(),
       employeeCode: identityProfile?.employee_code ?? null,
-      // 别名不让人填：数据库直接用这个邮箱在提交里真实出现过的作者名。
-      authorNameAliases: null,
+      // 留空就交给数据库用这个邮箱在提交里真实出现过的作者名（coalesce 到 candidate.author_names），
+      // 填了就用填的 —— 不要传空数组，那等于明确声明"一个别名都不要"。
+      authorNameAliases: (() => {
+        const aliases = (values.authorNameAliases ?? [])
+          .map((alias) => alias.trim())
+          .filter((alias) => alias !== '')
+        return aliases.length === 0 ? null : aliases
+      })(),
       gitlabUsername: values.gitlabUsername?.trim() || null,
       gitlabUserId: discovery?.gitlab_user_id ?? null,
       // 已保存的邮箱不可编辑（库里只有 HMAC），所以这里永远是"新增一条"。
@@ -374,12 +381,12 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
           <Form.Item
             name="authorNameAliases"
             label="Git 作者别名"
-            extra="这个邮箱在提交里用过的作者名。邮箱对不上时平台才会退而用它做弱匹配，最多 10 个。"
+            extra="这个邮箱在提交里用过的作者名，也就是 git config user.name，通常是英文或拼音（例如 yuxuan_xue）。邮箱对不上时平台才会退而用它做弱匹配，最多 10 个。"
             rules={[{ type: 'array', max: 10, message: '最多 10 个别名' }]}
           >
             <Select
               mode="tags"
-              placeholder="回车添加，例如：薛宇轩、yuxuan_xue"
+              placeholder="回车添加，例如 yuxuan_xue"
               tokenSeparators={[',', '，', ' ']}
               open={false}
               suffixIcon={null}
@@ -492,7 +499,14 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
             <Form.Item label="选择你的提交邮箱" required>
               <Radio.Group
                 value={selectedCandidateId}
-                onChange={(event) => setSelectedCandidateId(event.target.value as string)}
+                onChange={(event) => {
+                  const candidateId = event.target.value as string
+                  setSelectedCandidateId(candidateId)
+                  // 把这个邮箱在提交里真实出现过的作者名填进别名框：让人看见实际会保存什么，
+                  // 而不是面对一个空框去猜"自动"是什么意思。
+                  const picked = candidates.find((item) => item.candidate_id === candidateId)
+                  form.setFieldValue('authorNameAliases', picked?.author_names.slice(0, 10) ?? [])
+                }}
                 style={{ display: 'flex', flexDirection: 'column', gap: 12, width: '100%' }}
               >
                 {candidates.map((candidate) => (
@@ -503,6 +517,23 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
                   </Radio>
                 ))}
               </Radio.Group>
+            </Form.Item>
+          ) : null}
+
+          {candidates.length > 0 ? (
+            <Form.Item
+              name="authorNameAliases"
+              label="Git 作者别名（可留空）"
+              extra="已自动填入这个邮箱在提交里真实出现过的作者名（也就是 git config user.name，通常是英文或拼音），一般不用改。邮箱对不上时平台才会退而用它做弱匹配，最多 10 个。"
+              rules={[{ type: 'array', max: 10, message: '最多 10 个别名' }]}
+            >
+              <Select
+                mode="tags"
+                placeholder="留空即可；也可回车添加，例如 yuxuan_xue"
+                tokenSeparators={[',', '，', ' ']}
+                open={false}
+                suffixIcon={null}
+              />
             </Form.Item>
           ) : null}
 
