@@ -567,6 +567,29 @@ export async function runModelConnectivityTest(
 }
 
 /**
+ * 数据库侧回填时可能抛出的稳定错误码。
+ *
+ * 不把它们收敛成 GIT_EMAIL_DISCOVERY_FAILED 是刻意的：本地实测过一次
+ * `IDENTITY_PEPPER_MISSING` 被吞成通用失败，页面只会说"请重试"，而真正要做的是让管理员去
+ * 配 Vault secret —— 用户重试一百次都不会好。原因必须原样透出来。
+ */
+const DISCOVERY_DB_ERROR_CODES = [
+  'IDENTITY_PEPPER_MISSING',
+  'GIT_EMAIL_CANDIDATE_LIST_INVALID',
+  'GIT_EMAIL_DISCOVERY_NOT_FOUND',
+  'TASK_LEASE_LOST',
+] as const
+
+export function gitEmailDiscoveryErrorCode(error: unknown): string {
+  if (error instanceof GitLabReadonlyError) return error.code
+  const message = error instanceof Error ? error.message : String(error)
+  for (const code of DISCOVERY_DB_ERROR_CODES) {
+    if (message.includes(code)) return code
+  }
+  return 'GIT_EMAIL_DISCOVERY_FAILED'
+}
+
+/**
  * V1.13：执行一次"用 GitLab 用户名反查提交邮箱"。
  *
  * 只有本地 Worker 能做这件事：`git.kingdee.com` 在内网，Supabase 云端访问不到。
@@ -631,7 +654,7 @@ export async function runGitEmailDiscovery(
       }).catch(() => false)
       return
     }
-    const code = error instanceof GitLabReadonlyError ? error.code : 'GIT_EMAIL_DISCOVERY_FAILED'
+    const code = gitEmailDiscoveryErrorCode(error)
     await jobsDb.failGitEmailDiscovery({
       discoveryId: claim.id,
       workerId: config.workerId,

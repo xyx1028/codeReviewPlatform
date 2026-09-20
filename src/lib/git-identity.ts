@@ -24,7 +24,7 @@ export const GIT_IDENTITY_STATUS_META: Record<DeveloperIdentityStatus, { label: 
  */
 export function describeGitIdentityError(message: string): string {
   if (message.includes('IDENTITY_PEPPER_MISSING')) {
-    return '平台还没有配置身份加密密钥（analysis_identity_pepper），请联系管理员后再保存。'
+    return '平台还没有配置身份加密密钥（Vault 里的 analysis_identity_pepper），请联系管理员配置后再试。'
   }
   if (message.includes('GIT_EMAIL_ALREADY_BOUND')) {
     return '这个 Git 邮箱已经绑定在另一个成员名下。请确认邮箱，或联系管理员处理冲突。'

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { GitLabReadonlyClient, GitLabReadonlyError } from '../git/gitlab-readonly-client.js'
+import { gitEmailDiscoveryErrorCode } from '../index.js'
 
 const BASE = 'https://git.example.com'
 
@@ -15,7 +16,7 @@ interface StubRoute {
  * 模糊匹配会让 URL 拼错的回归悄悄通过。
  */
 function stubFetch(routes: Record<string, StubRoute>, calls: string[] = []) {
-  const impl = (async (input: URL | RequestInfo) => {
+  const impl = (async (input: unknown) => {
     const url = new URL(String(input))
     const key = `${url.pathname}?${[...url.searchParams.entries()]
       .filter(([name]) => name !== 'per_page' && name !== 'page')
@@ -272,5 +273,30 @@ describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
       mrCommitsKey('kwork/manage/tmanage-backend', 5),
       mrCommitsKey('kwork/manage/tmanage-backend', 4),
     ])
+  })
+})
+
+describe('gitEmailDiscoveryErrorCode', () => {
+  it('GitLab 侧的错误码原样保留', () => {
+    expect(gitEmailDiscoveryErrorCode(new GitLabReadonlyError('GITLAB_USER_NOT_FOUND', 'x')))
+      .toBe('GITLAB_USER_NOT_FOUND')
+    expect(gitEmailDiscoveryErrorCode(new GitLabReadonlyError('MR_METADATA_TIMEOUT', 'x')))
+      .toBe('MR_METADATA_TIMEOUT')
+  })
+
+  it('数据库抛的稳定错误码必须透出，不能收敛成通用失败', () => {
+    // 本地实测踩过：pepper 没配时被吞成 GIT_EMAIL_DISCOVERY_FAILED，
+    // 页面只会说"请重试"，而真正要做的是让管理员去配 Vault secret。
+    expect(gitEmailDiscoveryErrorCode(new Error(
+      'failed to run RPC complete_git_email_discovery: IDENTITY_PEPPER_MISSING',
+    ))).toBe('IDENTITY_PEPPER_MISSING')
+    expect(gitEmailDiscoveryErrorCode(new Error('… TASK_LEASE_LOST …'))).toBe('TASK_LEASE_LOST')
+    expect(gitEmailDiscoveryErrorCode(new Error('… GIT_EMAIL_CANDIDATE_LIST_INVALID …')))
+      .toBe('GIT_EMAIL_CANDIDATE_LIST_INVALID')
+  })
+
+  it('认不出来的异常才退化成通用失败', () => {
+    expect(gitEmailDiscoveryErrorCode(new Error('socket hang up'))).toBe('GIT_EMAIL_DISCOVERY_FAILED')
+    expect(gitEmailDiscoveryErrorCode('boom')).toBe('GIT_EMAIL_DISCOVERY_FAILED')
   })
 })
