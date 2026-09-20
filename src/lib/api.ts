@@ -45,7 +45,6 @@ import type {
   GitEmailDiscovery,
   MyGitIdentityProfile,
   SaveMyGitIdentityFromCandidateInput,
-  SaveMyGitIdentityInput,
   HumanReview,
   HumanReviewResult,
   ImportFileRecord,
@@ -1099,35 +1098,6 @@ export async function getMyGitIdentity(): Promise<MyGitIdentityProfile> {
   return unwrap<MyGitIdentityProfile>({ data, error })
 }
 
-export async function saveMyGitIdentity(
-  input: SaveMyGitIdentityInput,
-): Promise<{
-  developer_id: string
-  git_identity_id: string
-  git_revision: number
-  masked_email: string
-  claimed_existing_developer: boolean
-}> {
-  const client = requireSupabase()
-  const { data, error } = await client.rpc('upsert_my_git_identity_from_email', {
-    p_git_identity_id: input.gitIdentityId ?? null,
-    p_display_name: input.displayName,
-    p_employee_code: input.employeeCode ?? null,
-    p_email: input.email,
-    p_author_name_aliases: input.authorNameAliases,
-    p_gitlab_username: input.gitlabUsername ?? null,
-    p_gitlab_user_id: input.gitlabUserId ?? null,
-    p_expected_revision: input.expectedRevision ?? null,
-  })
-  return unwrap<{
-    developer_id: string
-    git_identity_id: string
-    git_revision: number
-    masked_email: string
-    claimed_existing_developer: boolean
-  }>({ data, error })
-}
-
 /** 移除是停用而不是删除：已冻结的 Job 身份快照以 restrict 引用历史行。 */
 export async function disableMyGitIdentity(
   gitIdentityId: string,
@@ -1139,6 +1109,80 @@ export async function disableMyGitIdentity(
     p_expected_revision: expectedRevision ?? null,
   })
   return unwrap<{ git_identity_id: string; verification_status: DeveloperIdentityStatus }>({ data, error })
+}
+
+/**
+ * 编辑一行 Git 身份里**自己填的那两列**：作者别名与 GitLab 用户名。
+ *
+ * 邮箱不在其中 —— 它只能由 GitLab 反查落库，所以想换邮箱是"新增一条 + 停用旧的"，
+ * 而不是在这里改。
+ */
+export async function updateMyGitIdentityDetails(input: {
+  gitIdentityId: string
+  authorNameAliases: string[]
+  gitlabUsername?: string | null
+  expectedRevision?: number | null
+}): Promise<{
+  git_identity_id: string
+  git_revision: number
+  author_name_aliases: string[] | null
+  gitlab_username: string | null
+}> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('update_my_git_identity_details', {
+    p_git_identity_id: input.gitIdentityId,
+    p_author_name_aliases: input.authorNameAliases,
+    p_gitlab_username: input.gitlabUsername ?? null,
+    p_expected_revision: input.expectedRevision ?? null,
+  })
+  return unwrap<{
+    git_identity_id: string
+    git_revision: number
+    author_name_aliases: string[] | null
+    gitlab_username: string | null
+  }>({ data, error })
+}
+
+/**
+ * 真删一行 Git 身份。只有从没被分析快照冻结过的行才删得掉，
+ * 否则数据库会以 GIT_IDENTITY_IN_USE 拒绝并要求改用停用 —— 硬删会切断历史结论的追溯链。
+ */
+export async function deleteMyGitIdentity(
+  gitIdentityId: string,
+  expectedRevision?: number | null,
+): Promise<{ git_identity_id: string; deleted: boolean }> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('delete_my_git_identity', {
+    p_git_identity_id: gitIdentityId,
+    p_expected_revision: expectedRevision ?? null,
+  })
+  return unwrap<{ git_identity_id: string; deleted: boolean }>({ data, error })
+}
+
+/**
+ * 「我是谁」的唯一入口：同时写账号用户名和（若已存在的）开发人员身份。
+ *
+ * 这两者指的是同一件事 —— 需求表里「开发人员」那一栏（真实格式是「向俊杰（41865）」）。
+ * 分两处维护只会让它们悄悄不一致，而不一致时归属规则对不上人却不会报错。
+ */
+export async function updateMyIdentityProfile(
+  displayName: string,
+  employeeCode?: string | null,
+): Promise<{
+  profile: UserProfile
+  developer_id: string | null
+  employee_code: string | null
+}> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('update_my_identity_profile', {
+    p_display_name: displayName,
+    p_employee_code: employeeCode ?? null,
+  })
+  return unwrap<{
+    profile: UserProfile
+    developer_id: string | null
+    employee_code: string | null
+  }>({ data, error })
 }
 
 // ---------------------------------------------------------------------------

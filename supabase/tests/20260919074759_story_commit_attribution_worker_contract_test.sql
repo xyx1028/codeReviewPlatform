@@ -68,6 +68,7 @@ declare
   v_git_identity uuid:='11330000-7000-4000-a000-000000000002';
   v_secret uuid;
   v_pepper uuid;
+  v_pepper_value text;
   v_rule_version uuid;
   v_rule_hash text;
   v_fingerprint text;
@@ -84,13 +85,24 @@ begin
   set local role service_role;
   v_secret:=public.admin_vault_create_secret(
     'v111-contract-model-not-a-real-key','v111_contract_model_key');
-  select vault.create_secret(
-    'v111-contract-pepper-not-a-real-secret','analysis_identity_pepper') into v_pepper;
   reset role;
+
+  -- 本机可能已经配过 pepper（真实使用或别的测试留下）。无条件 create_secret 会撞 vault 的
+  -- name 唯一索引，让测试结果取决于环境残留，所以有就复用它，并用它算 fingerprint。
+  select secret.decrypted_secret into v_pepper_value
+  from vault.decrypted_secrets secret
+  where secret.name='analysis_identity_pepper'
+  order by secret.created_at desc limit 1;
+  if coalesce(v_pepper_value,'')='' then
+    v_pepper_value:='v111-contract-pepper-not-a-real-secret';
+    set local role service_role;
+    select vault.create_secret(v_pepper_value,'analysis_identity_pepper') into v_pepper;
+    reset role;
+  end if;
 
   v_fingerprint:=encode(extensions.hmac(
     convert_to('dev.owner@example.invalid','UTF8'),
-    convert_to('v111-contract-pepper-not-a-real-secret','UTF8'),'sha256'),'hex');
+    convert_to(v_pepper_value,'UTF8'),'sha256'),'hex');
 
   insert into public.developer_identity(
     id,display_name,employee_code,status,created_by,updated_by

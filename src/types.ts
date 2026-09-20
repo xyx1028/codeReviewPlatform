@@ -1270,22 +1270,13 @@ export interface MyGitIdentityProfile {
   identities: MyGitIdentityRecord[]
 }
 
-export interface SaveMyGitIdentityInput {
-  gitIdentityId?: string | null
-  displayName: string
-  employeeCode?: string | null
-  email: string
-  authorNameAliases: string[]
-  gitlabUsername?: string | null
-  gitlabUserId?: string | null
-  expectedRevision?: number | null
-}
-
 export type GitEmailDiscoveryStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
 
-/** 从本人 MR 里反查出来的一个提交邮箱候选。浏览器只拿到脱敏邮箱，没有指纹。 */
+/** 从本人 MR 里反查出来的一个提交邮箱候选。浏览器拿得到自己的明文邮箱，但拿不到指纹。 */
 export interface GitEmailDiscoveryCandidate {
   candidate_id: string
+  /** 明文邮箱，仅本人可见；只存在于临时候选行，不会进入正式身份表。 */
+  email: string | null
   masked_email: string
   email_domain: string
   author_names: string[]

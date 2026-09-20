@@ -1016,6 +1016,26 @@ a.dashboard-distribution-item:focus-visible {
   box-shadow: 0 8px 18px rgba(22, 119, 255, 0.18);
 }
 
+/*
+ * 「开发人员姓名 + 修改」单独一行。
+ *
+ * 不复用 .profile-form-actions：那条规则给容器内**所有**按钮加了 min-width:116px 和蓝色阴影，
+ * 放一个 link 按钮进去会被撑成一个带阴影的色块，盖住旁边的姓名。
+ */
+.profile-identity-owner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+.profile-identity-owner .ant-btn {
+  min-width: 0;
+  padding: 0 4px;
+  font-weight: 500;
+  box-shadow: none;
+}
+
 /* 安全卡片只做一行「说明 + 按钮」，密码表单放进弹窗，页面不再被三个输入框拉长。 */
 .profile-security-card .ant-card-body {
   padding: 24px 32px;

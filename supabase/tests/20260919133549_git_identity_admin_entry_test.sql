@@ -34,7 +34,20 @@ begin
     (v_user,'REVIEWER','V1.11 normal user')
   on conflict(id) do update set role=excluded.role,display_name=excluded.display_name;
 
-  select vault.create_secret(v_pepper,'analysis_identity_pepper') into v_secret;
+  -- 本机可能已经配过 pepper（真实使用或另一个测试留下）。无条件 create_secret 会撞
+  -- vault 的 name 唯一索引，让测试结果取决于环境残留，所以有就复用它。
+  declare v_existing_pepper text;
+  begin
+    select secret.decrypted_secret into v_existing_pepper
+    from vault.decrypted_secrets secret
+    where secret.name='analysis_identity_pepper'
+    order by secret.created_at desc limit 1;
+    if coalesce(v_existing_pepper,'')<>'' then
+      v_pepper:=v_existing_pepper;
+    else
+      select vault.create_secret(v_pepper,'analysis_identity_pepper') into v_secret;
+    end if;
+  end;
   v_expected:=encode(extensions.hmac(
     convert_to(v_normalized,'UTF8'),convert_to(v_pepper,'UTF8'),'sha256'
   ),'hex');

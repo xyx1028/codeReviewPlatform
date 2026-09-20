@@ -11,6 +11,7 @@ import {
   Popconfirm,
   Radio,
   Row,
+  Select,
   Space,
   Table,
   Tag,
@@ -20,20 +21,19 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   changeMyPassword,
+  deleteMyGitIdentity,
   disableMyGitIdentity,
   enqueueMyGitEmailDiscovery,
   getMyGitEmailDiscovery,
   getMyGitIdentity,
-  saveMyGitIdentity,
   saveMyGitIdentityFromCandidate,
-  updateMyDisplayName,
+  updateMyGitIdentityDetails,
+  updateMyIdentityProfile,
 } from '../lib/api'
 import {
   GIT_IDENTITY_STATUS_META,
-  describeGitEmailCandidate,
   describeGitEmailDiscoveryPhase,
   describeGitIdentityError,
-  parseAuthorNameAliases,
 } from '../lib/git-identity'
 import type { DeveloperIdentityStatus, MyGitIdentityRecord, UserRole } from '../types'
 
@@ -67,29 +67,33 @@ function containsControlCharacter(value: string) {
 const identityStatusMeta = GIT_IDENTITY_STATUS_META
 
 interface GitIdentityFormValues {
-  displayName: string
-  employeeCode?: string
   gitlabUsername?: string
-  email?: string
-  aliases?: string
+}
+
+/** 编辑一行 Git 身份时能改的东西：只有当初自己填进去的两列，邮箱不在其中。 */
+interface GitIdentityEditFormValues {
+  authorNameAliases?: string[]
+  gitlabUsername?: string
 }
 
 /**
  * 个人中心里的 Git 身份自助维护。
  *
- * 主路径是"填 GitLab 用户名 → 本地 Worker 去 GitLab 反查你自己提的 MR → 从那些提交里
- * 列出你用过的邮箱 → 你点选一个"。这样人不用手打邮箱，也就不会打错；点选的那一条带着
- * GitLab 提交作为证据，存成"生效中"。手输邮箱仍然保留，但没有证据，只能存成"未验证"。
+ * 唯一路径是"填 GitLab 用户名 → 本地 Worker 去 GitLab 反查你自己提的 MR → 从那些提交里
+ * 列出你用过的邮箱 → 你点选一个"。**不提供手输邮箱**：手输没有任何证据，而没有证据的邮箱
+ * 在归属引擎里根本不参与匹配（story-scope 只取 verification_status='VERIFIED'），
+ * 留着它只会让人以为配好了。真查不到（新人还没提过 MR）由管理员在「用户管理」页代录。
  *
- * 明文邮箱从头到尾不进浏览器：候选只带 y***@kingdee.com 这种脱敏形式和 candidate_id。
+ * 候选按产品要求展示邮箱原文（只给本人自己的候选）；正式身份表里只有 HMAC 与脱敏形式。
+ * 姓名与员工号不在这里维护，统一来自上面的「基本资料」。
  */
 function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string | null }) {
   const { message } = AntApp.useApp()
   const queryClient = useQueryClient()
   const [form] = Form.useForm<GitIdentityFormValues>()
-  const [editing, setEditing] = useState<MyGitIdentityRecord | null>(null)
+  const [editForm] = Form.useForm<GitIdentityEditFormValues>()
   const [open, setOpen] = useState(false)
-  const [manualMode, setManualMode] = useState(false)
+  const [editing, setEditing] = useState<MyGitIdentityRecord | null>(null)
   const [discoveryId, setDiscoveryId] = useState<string | null>(null)
   const [discoveryStartedAt, setDiscoveryStartedAt] = useState<number | null>(null)
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null)
@@ -145,49 +149,63 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
     onError: (error) => message.error(describeGitIdentityError(error.message)),
   })
 
-  const onSaved = async (result: { masked_email: string; claimed_existing_developer: boolean }, verified: boolean) => {
+  const onSaved = async (result: { masked_email: string; claimed_existing_developer: boolean }) => {
     setOpen(false)
-    setEditing(null)
-    setManualMode(false)
     resetDiscovery()
     form.resetFields()
     await queryClient.invalidateQueries({ queryKey: ['my-git-identity'] })
     message.success(
       `${result.claimed_existing_developer ? '已认领管理员预先录入的开发人员身份，并绑定 ' : 'Git 邮箱已保存：'}`
-      + `${result.masked_email}${verified ? '（生效中）' : '（未验证）'}`,
+      + `${result.masked_email}（生效中）`,
     )
   }
 
   const saveCandidateMutation = useMutation({
     mutationFn: (values: GitIdentityFormValues) => saveMyGitIdentityFromCandidate({
       candidateId: selectedCandidateId!,
-      displayName: values.displayName.trim(),
-      employeeCode: values.employeeCode?.trim() || null,
-      // 留空就用 GitLab 提交里真实出现过的作者名，不逼人自己猜 git config user.name。
-      authorNameAliases: values.aliases === undefined || values.aliases.trim() === ''
-        ? null
-        : parseAuthorNameAliases(values.aliases),
+      // 姓名与员工号只有一个来源：个人中心的「基本资料」。
+      displayName: (identityProfile?.display_name ?? profileDisplayName ?? '').trim(),
+      employeeCode: identityProfile?.employee_code ?? null,
+      // 别名不让人填：数据库直接用这个邮箱在提交里真实出现过的作者名。
+      authorNameAliases: null,
       gitlabUsername: values.gitlabUsername?.trim() || null,
       gitlabUserId: discovery?.gitlab_user_id ?? null,
-      gitIdentityId: editing?.git_identity_id ?? null,
-      expectedRevision: editing?.git_revision ?? null,
+      // 已保存的邮箱不可编辑（库里只有 HMAC），所以这里永远是"新增一条"。
+      gitIdentityId: null,
+      expectedRevision: null,
     }),
-    onSuccess: (result) => onSaved(result, result.verification_status === 'VERIFIED'),
+    onSuccess: (result) => onSaved(result),
     onError: (error) => message.error(describeGitIdentityError(error.message)),
   })
 
-  const saveManualMutation = useMutation({
-    mutationFn: (values: GitIdentityFormValues) => saveMyGitIdentity({
-      gitIdentityId: editing?.git_identity_id ?? null,
-      displayName: values.displayName.trim(),
-      employeeCode: values.employeeCode?.trim() || null,
-      email: (values.email ?? '').trim(),
-      authorNameAliases: parseAuthorNameAliases(values.aliases),
+  const editMutation = useMutation({
+    mutationFn: (values: GitIdentityEditFormValues) => updateMyGitIdentityDetails({
+      gitIdentityId: editing!.git_identity_id,
+      authorNameAliases: (values.authorNameAliases ?? [])
+        .map((alias) => alias.trim())
+        .filter((alias) => alias !== ''),
       gitlabUsername: values.gitlabUsername?.trim() || null,
-      gitlabUserId: null,
-      expectedRevision: editing?.git_revision ?? null,
+      expectedRevision: editing!.git_revision,
     }),
-    onSuccess: (result) => onSaved(result, false),
+    onSuccess: async () => {
+      setEditing(null)
+      await queryClient.invalidateQueries({ queryKey: ['my-git-identity'] })
+      message.success('已更新')
+    },
+    onError: (error) => message.error(describeGitIdentityError(error.message)),
+  })
+
+  /**
+   * 删除是真删。数据库只在这条身份从没被分析快照冻结过时才放行，
+   * 否则回 GIT_IDENTITY_IN_USE —— 那种情况要走「停用」，不能静默替换成另一种语义。
+   */
+  const deleteMutation = useMutation({
+    mutationFn: (record: MyGitIdentityRecord) =>
+      deleteMyGitIdentity(record.git_identity_id, record.git_revision),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['my-git-identity'] })
+      message.success('已删除该 Git 邮箱')
+    },
     onError: (error) => message.error(describeGitIdentityError(error.message)),
   })
 
@@ -201,34 +219,20 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
     onError: (error) => message.error(describeGitIdentityError(error.message)),
   })
 
-  const defaultGitlabUsername = () => identities.find((item) => item.gitlab_username)?.gitlab_username ?? undefined
-
-  const beginCreate = () => {
-    setEditing(null)
-    setManualMode(false)
-    resetDiscovery()
-    form.setFieldsValue({
-      displayName: identityProfile?.display_name ?? profileDisplayName ?? '',
-      employeeCode: identityProfile?.employee_code ?? undefined,
-      gitlabUsername: defaultGitlabUsername(),
-      email: '',
-      aliases: '',
-    })
-    setOpen(true)
-  }
-
   const beginEdit = (record: MyGitIdentityRecord) => {
     setEditing(record)
-    setManualMode(false)
-    resetDiscovery()
-    form.setFieldsValue({
-      displayName: identityProfile?.display_name ?? profileDisplayName ?? '',
-      employeeCode: identityProfile?.employee_code ?? undefined,
-      gitlabUsername: record.gitlab_username ?? defaultGitlabUsername(),
-      // 数据库里只有 HMAC，没有明文可回显；换邮箱要么重新查找，要么手输。
-      email: '',
-      aliases: record.author_name_aliases.join('，'),
+    editForm.setFieldsValue({
+      authorNameAliases: record.author_name_aliases,
+      gitlabUsername: record.gitlab_username ?? undefined,
     })
+  }
+
+  const defaultGitlabUsername = () => identities.find((item) => item.gitlab_username)?.gitlab_username ?? undefined
+
+  /** 新增一个 Git 邮箱。已保存的邮箱不可编辑（库里只有 HMAC，没有明文），只能新增或停用。 */
+  const beginBind = () => {
+    resetDiscovery()
+    form.setFieldsValue({ gitlabUsername: defaultGitlabUsername() })
     setOpen(true)
   }
 
@@ -238,7 +242,7 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
         <Title level={4}>Git 身份</Title>
         <Text type="secondary">
           告诉平台你本机 Git 提交用的是哪个邮箱，需求分析才能把你的提交和你负责的需求对上。
-          邮箱只在数据库函数内计算 HMAC，页面、业务表和日志里都只有脱敏形式。
+          邮箱由平台从你在 GitLab 上的提交里反查出来；存进身份表的只有它的 HMAC 与脱敏形式。
         </Text>
       </div>
 
@@ -266,11 +270,9 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
 
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
         <div className="profile-form-actions">
-          <Button type="primary" onClick={beginCreate}>新增 Git 邮箱</Button>
+          <Button type="primary" onClick={beginBind}>新增 Git 邮箱</Button>
           <Text type="secondary">
-            {identityProfile?.display_name
-              ? `当前开发人员姓名：${identityProfile.display_name}${identityProfile.employee_code ? `（${identityProfile.employee_code}）` : ''}`
-              : '姓名需与需求里的开发人员写法一致'}
+            按 GitLab 用户名反查你的提交邮箱，选中即可绑定；姓名与员工号在上面「基本资料」里维护。
           </Text>
         </div>
         <Table<MyGitIdentityRecord>
@@ -306,25 +308,39 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
             },
             {
               title: '操作',
-              width: 150,
+              width: 190,
               render: (_value, record) => (
-                record.verification_status === 'DISABLED' ? (
-                  <Text type="secondary">已停用</Text>
-                ) : (
-                  <Space size={0}>
-                    <Button type="link" onClick={() => beginEdit(record)}>编辑</Button>
-                    <Popconfirm
-                      title="停用这个 Git 邮箱？"
-                      description="停用后新的分析不再用它匹配作者；已完成的分析记录保持不变。"
-                      okText="停用"
-                      cancelText="取消"
-                      okButtonProps={{ loading: disableMutation.isPending }}
-                      onConfirm={() => disableMutation.mutate(record)}
-                    >
-                      <Button type="link" danger>停用</Button>
-                    </Popconfirm>
-                  </Space>
-                )
+                <Space size={4}>
+                  {record.verification_status === 'DISABLED' ? (
+                    <Text type="secondary">已停用</Text>
+                  ) : (
+                    <>
+                      <Button type="link" style={{ padding: 0 }} onClick={() => beginEdit(record)}>
+                        编辑
+                      </Button>
+                      <Popconfirm
+                        title="停用这个 Git 邮箱？"
+                        description="停用后新的分析不再用它匹配作者；已完成的分析记录保持不变。"
+                        okText="停用"
+                        cancelText="取消"
+                        okButtonProps={{ loading: disableMutation.isPending }}
+                        onConfirm={() => disableMutation.mutate(record)}
+                      >
+                        <Button type="link" danger style={{ padding: 0 }}>停用</Button>
+                      </Popconfirm>
+                    </>
+                  )}
+                  <Popconfirm
+                    title="删除这个 Git 邮箱？"
+                    description="删除后这条记录彻底消失。若它已被历史分析引用，平台会拒绝删除并提示改用停用。"
+                    okText="删除"
+                    cancelText="取消"
+                    okButtonProps={{ danger: true, loading: deleteMutation.isPending }}
+                    onConfirm={() => deleteMutation.mutate(record)}
+                  >
+                    <Button type="link" danger style={{ padding: 0 }}>删除</Button>
+                  </Popconfirm>
+                </Space>
               ),
             },
           ]}
@@ -332,172 +348,170 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
       </Space>
 
       <Modal
+        open={editing !== null}
+        width={560}
+        title="编辑 Git 身份"
+        onCancel={() => setEditing(null)}
+        afterClose={() => editForm.resetFields()}
+        destroyOnHidden
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={editMutation.isPending}
+        onOk={() => editForm.submit()}
+      >
+        <Form
+          form={editForm}
+          layout="vertical"
+          onFinish={(values) => editMutation.mutate(values)}
+        >
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            title={`Git 邮箱：${editing?.masked_email ?? '未配置'}（不可修改）`}
+            description="邮箱只能由平台从 GitLab 提交里反查确认，身份表里存的是它的 HMAC；要换邮箱请新增一条再停用这条。"
+          />
+          <Form.Item
+            name="authorNameAliases"
+            label="Git 作者别名"
+            extra="这个邮箱在提交里用过的作者名。邮箱对不上时平台才会退而用它做弱匹配，最多 10 个。"
+            rules={[{ type: 'array', max: 10, message: '最多 10 个别名' }]}
+          >
+            <Select
+              mode="tags"
+              placeholder="回车添加，例如：薛宇轩、yuxuan_xue"
+              tokenSeparators={[',', '，', ' ']}
+              open={false}
+              suffixIcon={null}
+            />
+          </Form.Item>
+          <Form.Item
+            name="gitlabUsername"
+            label="GitLab 用户名"
+            extra="git.kingdee.com 个人设置里 Account 页面的 Path。"
+            rules={[
+              { pattern: /^[A-Za-z0-9][A-Za-z0-9_.-]{0,48}$/, message: '只能包含字母、数字、下划线、点和短横线' },
+            ]}
+          >
+            <Input placeholder="yuxuan_xue" autoComplete="off" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
         open={open}
         width={640}
-        title={editing ? '更换 / 确认 Git 邮箱' : '新增 Git 邮箱'}
-        onCancel={() => { setOpen(false); setEditing(null) }}
-        afterClose={() => { form.resetFields(); resetDiscovery(); setManualMode(false) }}
+        title="新增 Git 邮箱"
+        onCancel={() => setOpen(false)}
+        afterClose={() => { form.resetFields(); resetDiscovery() }}
         destroyOnHidden
         footer={[
-          <Button key="cancel" onClick={() => { setOpen(false); setEditing(null) }}>取消</Button>,
-          manualMode ? (
-            <Button
-              key="save-manual"
-              type="primary"
-              danger
-              loading={saveManualMutation.isPending}
-              onClick={() => form.submit()}
-            >
-              仍然手动保存（未验证）
-            </Button>
-          ) : (
-            <Button
-              key="save-candidate"
-              type="primary"
-              disabled={selectedCandidateId === null}
-              loading={saveCandidateMutation.isPending}
-              onClick={() => form.submit()}
-            >
-              保存所选邮箱
-            </Button>
-          ),
+          <Button key="cancel" onClick={() => setOpen(false)}>取消</Button>,
+          <Button
+            key="save-candidate"
+            type="primary"
+            disabled={selectedCandidateId === null}
+            loading={saveCandidateMutation.isPending}
+            onClick={() => form.submit()}
+          >
+            保存所选邮箱
+          </Button>,
         ]}
       >
         <Form
           form={form}
           layout="vertical"
-          onFinish={(values) => (manualMode ? saveManualMutation : saveCandidateMutation).mutate(values)}
+          onFinish={(values) => saveCandidateMutation.mutate(values)}
         >
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            title={`将绑定到：${identityProfile?.display_name ?? profileDisplayName ?? '（未设置用户名）'}`
+              + `${identityProfile?.employee_code ? `（员工号 ${identityProfile.employee_code}）` : ''}`}
+            description="姓名与员工号取自上面的「基本资料」，需与需求里「开发人员」一栏一致；要改请到那里改。"
+          />
+
           <Form.Item
-            name="displayName"
-            label="开发人员姓名"
-            extra="必须与需求里「开发人员」一栏的写法一致，否则无法把需求和你的提交对上。"
-            rules={[{ required: true, whitespace: true, message: '请输入与需求一致的姓名' }, { max: 64, message: '姓名不能超过 64 个字符' }]}
+            name="gitlabUsername"
+            label="GitLab 用户名"
+            extra="就是 git.kingdee.com 个人设置里 Account 页面的 Path，例如 yuxuan_xue。"
+            rules={[
+              { required: true, whitespace: true, message: '请输入 GitLab 用户名' },
+              { pattern: /^[A-Za-z0-9][A-Za-z0-9_.-]{0,48}$/, message: '只能包含字母、数字、下划线、点和短横线' },
+            ]}
           >
-            <Input placeholder="例如：张三" />
+            <Input
+              placeholder="yuxuan_xue"
+              autoComplete="off"
+              onChange={() => resetDiscovery()}
+            />
           </Form.Item>
-          <Form.Item name="employeeCode" label="员工号（推荐）" extra="有同名同事时用它区分。">
-            <Input placeholder="例如：E-10086" />
-          </Form.Item>
+          <div className="profile-form-actions" style={{ marginBottom: 16 }}>
+            <Button
+              onClick={() => {
+                const username = (form.getFieldValue('gitlabUsername') as string | undefined)?.trim() ?? ''
+                if (username === '') {
+                  message.warning('请先填写 GitLab 用户名')
+                  return
+                }
+                // 没有用户名时保存一定会被数据库拒（DEVELOPER_DISPLAY_NAME_REQUIRED），
+                // 与其让人查完才撞墙，不如在这里就说清要先去基本资料填。
+                if ((identityProfile?.display_name ?? profileDisplayName ?? '').trim() === '') {
+                  message.warning('请先在上面「基本资料」里填写用户名（需与需求里的开发人员一致）')
+                  return
+                }
+                discoverMutation.mutate(username)
+              }}
+              loading={discoverMutation.isPending || waiting}
+            >
+              {discovery === null ? '查找我的提交邮箱' : '重新查找'}
+            </Button>
+            <Text type="secondary">
+              平台会读取你在四个仓库里提的合并申请，从其中的提交里取出你用过的邮箱。
+            </Text>
+          </div>
 
-          {manualMode ? (
-            <>
-              <Alert
-                type="warning"
-                showIcon
-                style={{ marginBottom: 16 }}
-                title="手动填写的邮箱会被标记为「未验证」"
-                description="平台没有证据证明这个邮箱是你的提交邮箱，作者维度的归属规则不会采用它。建议改用上面的查找方式。"
-              />
-              <Form.Item
-                name="email"
-                label="Git author email"
-                extra={editing
-                  ? `数据库里只存 HMAC，没有明文可回显；修改请重新输入完整邮箱。当前：${editing.masked_email ?? '未配置'}`
-                  : '本机 git config user.email 的值。'}
-                rules={[{ required: true, type: 'email', message: '请输入有效邮箱' }]}
+          {phase.kind === 'WAITING_WORKER' || phase.kind === 'RUNNING' ? (
+            <Alert type="info" showIcon style={{ marginBottom: 16 }} title={phase.hint} />
+          ) : null}
+          {phase.kind === 'NO_WORKER' ? (
+            <Alert type="warning" showIcon style={{ marginBottom: 16 }} title="没有可用的 Worker" description={phase.hint} />
+          ) : null}
+          {phase.kind === 'FAILED' ? (
+            <Alert type="error" showIcon style={{ marginBottom: 16 }} title="查找失败" description={phase.hint} />
+          ) : null}
+          {phase.kind === 'DONE_EMPTY' ? (
+            <Alert type="warning" showIcon style={{ marginBottom: 16 }} title="没有找到提交邮箱" description={phase.hint} />
+          ) : null}
+          {phase.kind === 'DONE' ? (
+            <Alert type="success" showIcon style={{ marginBottom: 16 }} title={phase.hint} />
+          ) : null}
+
+          {candidates.length > 0 ? (
+            <Form.Item label="选择你的提交邮箱" required>
+              <Radio.Group
+                value={selectedCandidateId}
+                onChange={(event) => setSelectedCandidateId(event.target.value as string)}
+                style={{ display: 'flex', flexDirection: 'column', gap: 12, width: '100%' }}
               >
-                <Input autoComplete="off" placeholder="you@example.com" />
-              </Form.Item>
-              <Form.Item name="aliases" label="Git 作者别名" extra="多个用逗号分隔；填写 git config user.name 可能出现的写法。">
-                <Input placeholder="例如：Zhang San，zhangsan" />
-              </Form.Item>
-              <Form.Item name="gitlabUsername" label="GitLab 用户名">
-                <Input placeholder="选填" />
-              </Form.Item>
-              <Button type="link" style={{ paddingLeft: 0 }} onClick={() => setManualMode(false)}>
-                ← 回到按 GitLab 用户名查找
-              </Button>
-            </>
-          ) : (
-            <>
-              <Form.Item
-                name="gitlabUsername"
-                label="GitLab 用户名"
-                extra="就是 git.kingdee.com 个人设置里 Account 页面的 Path，例如 yuxuan_xue。"
-                rules={[
-                  { required: true, whitespace: true, message: '请输入 GitLab 用户名' },
-                  { pattern: /^[A-Za-z0-9][A-Za-z0-9_.-]{0,48}$/, message: '只能包含字母、数字、下划线、点和短横线' },
-                ]}
-              >
-                <Input
-                  placeholder="yuxuan_xue"
-                  autoComplete="off"
-                  onChange={() => resetDiscovery()}
-                />
-              </Form.Item>
-              <div className="profile-form-actions" style={{ marginBottom: 16 }}>
-                <Button
-                  onClick={() => {
-                    const username = (form.getFieldValue('gitlabUsername') as string | undefined)?.trim() ?? ''
-                    if (username === '') {
-                      message.warning('请先填写 GitLab 用户名')
-                      return
-                    }
-                    discoverMutation.mutate(username)
-                  }}
-                  loading={discoverMutation.isPending || waiting}
-                >
-                  {discovery === null ? '查找我的提交邮箱' : '重新查找'}
-                </Button>
-                <Text type="secondary">
-                  平台会读取你在四个仓库里提的合并申请，从其中的提交里取出你用过的邮箱。
-                </Text>
-              </div>
+                {candidates.map((candidate) => (
+                  <Radio key={candidate.candidate_id} value={candidate.candidate_id} disabled={candidate.already_bound}>
+                    {/* 明文只存在于本人自己的临时候选行；正式身份表里只有 HMAC 与脱敏值。 */}
+                    <Text strong>{candidate.email ?? candidate.masked_email}</Text>
+                    {candidate.already_bound ? <Tag style={{ marginLeft: 8 }}>已被绑定</Tag> : null}
+                  </Radio>
+                ))}
+              </Radio.Group>
+            </Form.Item>
+          ) : null}
 
-              {phase.kind === 'WAITING_WORKER' || phase.kind === 'RUNNING' ? (
-                <Alert type="info" showIcon style={{ marginBottom: 16 }} title={phase.hint} />
-              ) : null}
-              {phase.kind === 'NO_WORKER' ? (
-                <Alert type="warning" showIcon style={{ marginBottom: 16 }} title="没有可用的 Worker" description={phase.hint} />
-              ) : null}
-              {phase.kind === 'FAILED' ? (
-                <Alert type="error" showIcon style={{ marginBottom: 16 }} title="查找失败" description={phase.hint} />
-              ) : null}
-              {phase.kind === 'DONE_EMPTY' ? (
-                <Alert type="warning" showIcon style={{ marginBottom: 16 }} title="没有找到提交邮箱" description={phase.hint} />
-              ) : null}
-              {phase.kind === 'DONE' ? (
-                <Alert type="success" showIcon style={{ marginBottom: 16 }} title={phase.hint} />
-              ) : null}
-
-              {candidates.length > 0 ? (
-                <Form.Item label="选择你的提交邮箱" required>
-                  <Radio.Group
-                    value={selectedCandidateId}
-                    onChange={(event) => setSelectedCandidateId(event.target.value as string)}
-                    style={{ display: 'flex', flexDirection: 'column', gap: 12, width: '100%' }}
-                  >
-                    {candidates.map((candidate) => (
-                      <Radio key={candidate.candidate_id} value={candidate.candidate_id} disabled={candidate.already_bound}>
-                        <Space direction="vertical" size={0}>
-                          <Text strong>
-                            {candidate.masked_email}
-                            {candidate.already_bound ? <Tag style={{ marginLeft: 8 }}>已被绑定</Tag> : null}
-                          </Text>
-                          <Text type="secondary">{describeGitEmailCandidate(candidate)}</Text>
-                          {candidate.merge_request_refs.length > 0 ? (
-                            <Text type="secondary">来自 {candidate.merge_request_refs.join('、')}</Text>
-                          ) : null}
-                        </Space>
-                      </Radio>
-                    ))}
-                  </Radio.Group>
-                </Form.Item>
-              ) : null}
-
-              <Form.Item
-                name="aliases"
-                label="Git 作者别名（留空则用 GitLab 提交里的作者名）"
-                extra="平台会把所选邮箱在提交里实际出现过的作者名一起存下来。"
-              >
-                <Input placeholder="例如：Zhang San，zhangsan" />
-              </Form.Item>
-              <Button type="link" style={{ paddingLeft: 0 }} onClick={() => setManualMode(true)}>
-                查不到？改为手动填写邮箱（会标记为未验证）
-              </Button>
-            </>
-          )}
+          {phase.kind === 'DONE_EMPTY' ? (
+            <Text type="secondary">
+              查不到通常是因为你还没在这四个仓库提过合并申请。平台不提供手动填写 ——
+              没有 GitLab 提交作为证据的邮箱在归属分析里不会被采用。请联系管理员代录。
+            </Text>
+          ) : null}
         </Form>
       </Modal>
     </Card>
@@ -507,18 +521,31 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
 export function ProfilePage({ email, displayName, role }: ProfilePageProps) {
   const { message } = AntApp.useApp()
   const queryClient = useQueryClient()
-  const [profileForm] = Form.useForm<{ displayName: string }>()
+  const [profileForm] = Form.useForm<{ displayName: string; employeeCode?: string }>()
   const [passwordForm] = Form.useForm<PasswordFormValues>()
   const [passwordModalOpen, setPasswordModalOpen] = useState(false)
+  /**
+   * 用户名 + 员工号是"我是谁"的唯一声明处：保存时一并同步到开发人员身份，
+   * 供归属规则跟需求里「开发人员」那一栏（格式如「向俊杰（41865）」）对齐。
+   */
   const updateNameMutation = useMutation({
-    mutationFn: (nextDisplayName: string) => updateMyDisplayName(nextDisplayName),
-    onSuccess: (profile) => {
-      queryClient.setQueryData(['my-profile'], profile)
+    mutationFn: (values: { displayName: string; employeeCode?: string }) =>
+      updateMyIdentityProfile(values.displayName, values.employeeCode?.trim() || null),
+    onSuccess: (result) => {
+      queryClient.setQueryData(['my-profile'], result.profile)
       queryClient.invalidateQueries({ queryKey: ['admin-users'] })
-      profileForm.setFieldValue('displayName', profile.display_name ?? '')
-      message.success('用户名已更新')
+      queryClient.invalidateQueries({ queryKey: ['my-git-identity'] })
+      profileForm.setFieldsValue({
+        displayName: result.profile.display_name ?? '',
+        employeeCode: result.employee_code ?? undefined,
+      })
+      message.success(
+        result.developer_id === null
+          ? '用户名已更新'
+          : '用户名与员工号已更新，并同步到你的开发人员身份',
+      )
     },
-    onError: (error) => message.error(error.message),
+    onError: (error) => message.error(describeGitIdentityError(error.message)),
   })
   const changePasswordMutation = useMutation({
     mutationFn: ({ currentPassword, newPassword }: PasswordFormValues) =>
@@ -548,7 +575,7 @@ export function ProfilePage({ email, displayName, role }: ProfilePageProps) {
         <div>
           <Text className="profile-eyebrow">ACCOUNT SETTINGS</Text>
           <Title level={2}>个人中心</Title>
-          <Text type="secondary">管理你的公开用户名、账号信息、登录密码与 Git 身份。</Text>
+          <Text type="secondary">管理你的用户名与员工号（需求里的「开发人员」就是它）、登录密码与 Git 身份。</Text>
         </div>
       </div>
 
@@ -568,18 +595,21 @@ export function ProfilePage({ email, displayName, role }: ProfilePageProps) {
             <div className="profile-editor">
               <div className="profile-section-heading">
                 <Title level={4}>基本资料</Title>
-                <Text type="secondary">设置一个便于团队成员识别你的用户名。</Text>
+                <Text type="secondary">
+                  这里填的就是需求表里「开发人员」那一栏的你 —— 归属分析靠它把需求和你的提交对上，
+                  所以写法要与需求一致（例如「向俊杰（41865）」对应用户名 向俊杰、员工号 41865）。
+                </Text>
               </div>
               <Form
                 form={profileForm}
                 layout="vertical"
                 className="profile-name-form"
-                onFinish={({ displayName: nextDisplayName }) => updateNameMutation.mutate(nextDisplayName)}
+                onFinish={(values) => updateNameMutation.mutate(values)}
               >
                 <Form.Item
                   name="displayName"
                   label="用户名"
-                  extra="用于页面顶部、用户管理和后续操作记录中的用户识别。"
+                  extra="用于页面顶部与操作记录，同时作为需求里「开发人员」的姓名。"
                   rules={[
                     { required: true, whitespace: true, message: '请输入用户名' },
                     { max: 32, message: '用户名不能超过 32 个字符' },
@@ -593,11 +623,27 @@ export function ProfilePage({ email, displayName, role }: ProfilePageProps) {
                 >
                   <Input size="large" maxLength={32} showCount placeholder="请输入用户名" autoComplete="nickname" />
                 </Form.Item>
+                <Form.Item
+                  name="employeeCode"
+                  label="员工号"
+                  extra="需求里「开发人员」括号里的那个号，用来区分同名同事；不确定可以留空。"
+                  rules={[
+                    { max: 32, message: '员工号不能超过 32 个字符' },
+                    {
+                      validator: (_rule, value: string | undefined) =>
+                        value && containsControlCharacter(value)
+                          ? Promise.reject(new Error('员工号不能包含控制字符'))
+                          : Promise.resolve(),
+                    },
+                  ]}
+                >
+                  <Input size="large" maxLength={32} placeholder="例如：41865" autoComplete="off" />
+                </Form.Item>
                 <div className="profile-form-actions">
                   <Button size="large" type="primary" htmlType="submit" loading={updateNameMutation.isPending}>
-                    保存用户名
+                    保存
                   </Button>
-                  <Text type="secondary">保存后将在全站同步显示</Text>
+                  <Text type="secondary">保存后全站同步，并同步到你的开发人员身份</Text>
                 </div>
               </Form>
             </div>

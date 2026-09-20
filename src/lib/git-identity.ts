@@ -1,8 +1,4 @@
-import type {
-  DeveloperIdentityStatus,
-  GitEmailDiscovery,
-  GitEmailDiscoveryCandidate,
-} from '../types'
+import type { DeveloperIdentityStatus, GitEmailDiscovery } from '../types'
 
 /**
  * Git 身份状态的展示元数据。
@@ -36,9 +32,27 @@ export function describeGitIdentityError(message: string): string {
     return '你的开发人员身份被标记为冲突或已停用，需要管理员先处理。'
   }
   if (message.includes('DEVELOPER_DISPLAY_NAME_REQUIRED')) return '请填写与需求一致的开发人员姓名。'
+  if (message.includes('DEVELOPER_DISPLAY_NAME_TOO_LONG')) return '用户名不能超过 32 个字符。'
+  if (message.includes('DEVELOPER_DISPLAY_NAME_INVALID')) return '用户名不能包含控制字符。'
+  if (message.includes('DEVELOPER_EMPLOYEE_CODE_INVALID')) return '员工号不能超过 32 个字符，也不能包含控制字符。'
+  if (message.includes('USER_PROFILE_NOT_FOUND')) return '找不到你的账号资料，请重新登录后再试。'
   if (message.includes('IDENTITY_EMAIL_INVALID')) return '邮箱格式不正确。'
   if (message.includes('REVISION_CONFLICT')) return '记录已被其他地方更新，请刷新页面后重试。'
   if (message.includes('GIT_IDENTITY_NOT_FOUND')) return '这条记录不存在或不属于你。'
+  // V1.13 表格里的编辑 / 删除
+  if (message.includes('GIT_IDENTITY_IN_USE')) {
+    return '这条邮箱已经被历史分析引用，删除会切断那些结论的追溯链。请改用「停用」。'
+  }
+  if (message.includes('GIT_IDENTITY_DISABLED')) {
+    return '这条记录已停用，不能再编辑。需要重新使用请新增一条。'
+  }
+  if (message.includes('GIT_IDENTITY_WOULD_MATCH_NOTHING')) {
+    return '这条记录没有邮箱，清空别名和 GitLab 用户名后就匹配不到任何提交了。请至少保留一项。'
+  }
+  if (message.includes('GIT_IDENTITY_TOO_MANY_ALIASES')) return '作者别名最多 10 个。'
+  if (message.includes('GIT_IDENTITY_ALIAS_INVALID')) {
+    return '作者别名不能超过 64 个字符，也不能包含控制字符。'
+  }
   if (message.includes('DEVELOPER_IDENTITY_NOT_FOUND')) return '你还没有配置过 Git 身份。'
   if (message.includes('AUTH_REQUIRED')) return '登录状态已失效，请重新登录。'
   // V1.13 反查链路
@@ -79,7 +93,8 @@ export function describeGitIdentityError(message: string): string {
 export const GIT_EMAIL_DISCOVERY_CLAIM_TIMEOUT_MS = 180_000
 
 export type GitEmailDiscoveryPhase =
-  | { kind: 'IDLE' }
+  // IDLE 也带 hint（空串）：让整个联合类型都有这个字段，调用方不必先做类型收窄。
+  | { kind: 'IDLE'; hint: string }
   | { kind: 'WAITING_WORKER'; hint: string }
   | { kind: 'RUNNING'; hint: string }
   | { kind: 'NO_WORKER'; hint: string }
@@ -98,7 +113,7 @@ export function describeGitEmailDiscoveryPhase(
     | 'partial' | 'error_code' | 'error_message' | 'gitlab_username' | 'lookback_days'> | null,
   elapsedMs: number,
 ): GitEmailDiscoveryPhase {
-  if (discovery === null) return { kind: 'IDLE' }
+  if (discovery === null) return { kind: 'IDLE', hint: '' }
   if (discovery.status === 'FAILED') {
     return {
       kind: 'FAILED',
@@ -131,24 +146,4 @@ export function describeGitEmailDiscoveryPhase(
   return { kind: 'WAITING_WORKER', hint: '已排队，等待本地 Worker 领取…' }
 }
 
-/** 候选行右侧那句"12 条提交 · tmanage-backend · 最近 2026-09-18"。 */
-export function describeGitEmailCandidate(candidate: GitEmailDiscoveryCandidate): string {
-  const repositories = Object.entries(candidate.repositories)
-    .sort((left, right) => right[1] - left[1])
-    .map(([name, count]) => `${name} ${count} 条`)
-  const parts = [`${candidate.commit_count} 条提交`]
-  if (repositories.length > 0) parts.push(repositories.join('、'))
-  if (candidate.last_committed_at !== null) {
-    parts.push(`最近 ${new Date(candidate.last_committed_at).toLocaleDateString()}`)
-  }
-  if (candidate.author_names.length > 0) parts.push(`作者名：${candidate.author_names.join('、')}`)
-  return parts.join(' · ')
-}
 
-/** 把逗号/分号/换行分隔的别名输入规范成数组；空项丢弃。 */
-export function parseAuthorNameAliases(input: string | undefined | null): string[] {
-  return (input ?? '')
-    .split(/[，,、;；\n]/)
-    .map((value) => value.trim())
-    .filter(Boolean)
-}

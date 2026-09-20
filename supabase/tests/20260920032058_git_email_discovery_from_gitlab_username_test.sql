@@ -142,11 +142,13 @@ begin
      from public.git_identity_email_candidate
      where discovery_id=v_discovery and masked_email='y***@kingdee.com'),
     'candidate stores the pepper HMAC and masked email');
+  -- V1.13 调整（20260920050223）：候选行为了在页面上展示原文，会存 email_plain。
+  -- 边界收在这里：只有这张临时表存明文，且必须是规范化后的小写形式。
   perform pg_temp.assert(
-    (select count(*) from public.git_identity_email_candidate candidate
-     where candidate.discovery_id=v_discovery
-       and to_jsonb(candidate)::text ilike '%'||v_normalized||'%')=0,
-    'raw candidate email is never persisted');
+    (select email_plain=v_normalized
+     from public.git_identity_email_candidate
+     where discovery_id=v_discovery and masked_email='y***@kingdee.com'),
+    'the short-lived candidate row keeps the normalized plaintext for display');
 
   ----------------------------------------------------------------------------
   -- 4. 本人看到的是脱敏候选，且没有指纹
@@ -165,9 +167,10 @@ begin
     and (v_view->'candidates'->0->>'commit_count')::integer=12
     and v_view->'candidates'->0->'author_names' ? '薛宇轩',
     'candidates are ordered by commit count and carry the real author names');
-  perform pg_temp.assert(v_view::text not ilike '%'||v_expected||'%'
-    and v_view::text not ilike '%'||v_normalized||'%',
-    'neither fingerprint nor raw email reaches the browser');
+  perform pg_temp.assert(v_view::text not ilike '%'||v_expected||'%',
+    'the fingerprint never reaches the browser');
+  perform pg_temp.assert(v_view->'candidates'->0->>'email'=v_normalized,
+    'the requester does see the plaintext of their own candidate');
   v_candidate:=(v_view->'candidates'->0->>'candidate_id')::uuid;
   v_second_candidate:=(v_view->'candidates'->1->>'candidate_id')::uuid;
 
@@ -189,6 +192,11 @@ begin
        and author_name_aliases @> array['薛宇轩']
      from public.developer_git_identity where id=v_git),
     'the saved row reuses the candidate fingerprint and GitLab identity');
+  -- 这一条是整个设计的底线：明文可以出现在临时候选里，但绝不进正式身份表。
+  perform pg_temp.assert(
+    (select to_jsonb(git)::text not ilike '%'||v_normalized||'%'
+     from public.developer_git_identity git where git.id=v_git),
+    'the identity row still holds no plaintext email');
 
   ----------------------------------------------------------------------------
   -- 6. 门禁：别人的候选、过期的查询都不能用来伪造已验证身份
@@ -222,12 +230,12 @@ begin
   ----------------------------------------------------------------------------
   -- 7. 手输邮箱只能得到 UNVERIFIED
   ----------------------------------------------------------------------------
+  -- V1.13 起这个函数只剩 service_role 能调（见 20260920045313），所以这里不切角色；
+  -- 这一段守的是"手输只能落 UNVERIFIED"这条语义，权限面由那个迁移自己的测试覆盖。
   perform set_config('request.jwt.claims',json_build_object(
     'sub',v_owner::text,'role','authenticated')::text,true);
-  set local role authenticated;
   v_result:=public.upsert_my_git_identity_from_email(
     null,'薛宇轩','E-V113','typed.by.hand@example.invalid',array[]::text[],null,null,null);
-  reset role;
   perform pg_temp.assert(v_result->>'verification_status'='UNVERIFIED',
     'a typed email is stored as UNVERIFIED because it carries no evidence');
   perform pg_temp.assert(exists(

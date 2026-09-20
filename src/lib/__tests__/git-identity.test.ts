@@ -1,12 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   GIT_IDENTITY_STATUS_META,
-  describeGitEmailCandidate,
   describeGitEmailDiscoveryPhase,
   describeGitIdentityError,
-  parseAuthorNameAliases,
 } from '../git-identity'
-import type { GitEmailDiscovery, GitEmailDiscoveryCandidate } from '../../types'
+import type { GitEmailDiscovery } from '../../types'
 
 describe('describeGitIdentityError', () => {
   it('把数据库的稳定错误码翻成人话', () => {
@@ -28,6 +26,22 @@ describe('describeGitIdentityError', () => {
     expect(describeGitIdentityError('network error')).toBe('network error')
   })
 
+  it('编辑/删除这两个操作的拒绝理由要说清下一步怎么做', () => {
+    // 这几条不是"出错了"，而是产品规则，所以文案必须给出替代动作。
+    expect(describeGitIdentityError('GIT_IDENTITY_IN_USE')).toContain('停用')
+    expect(describeGitIdentityError('GIT_IDENTITY_DISABLED')).toContain('新增')
+    expect(describeGitIdentityError('GIT_IDENTITY_WOULD_MATCH_NOTHING')).toContain('至少保留一项')
+    expect(describeGitIdentityError('GIT_IDENTITY_TOO_MANY_ALIASES')).toContain('10')
+    expect(describeGitIdentityError('GIT_IDENTITY_ALIAS_INVALID')).toContain('64')
+  })
+
+  it('基本资料里那次保存的校验失败也有对应说法', () => {
+    expect(describeGitIdentityError('DEVELOPER_DISPLAY_NAME_TOO_LONG')).toContain('32')
+    expect(describeGitIdentityError('DEVELOPER_DISPLAY_NAME_INVALID')).toContain('控制字符')
+    expect(describeGitIdentityError('DEVELOPER_EMPLOYEE_CODE_INVALID')).toContain('员工号')
+    expect(describeGitIdentityError('USER_PROFILE_NOT_FOUND')).toContain('重新登录')
+  })
+
   it('V1.13 反查链路的错误码也有对应说法', () => {
     expect(describeGitIdentityError('GITLAB_USER_NOT_FOUND')).toContain('Path')
     expect(describeGitIdentityError('GITLAB_API_TOKEN_MISSING')).toContain('GITLAB_API_TOKEN')
@@ -37,22 +51,6 @@ describe('describeGitIdentityError', () => {
   })
 })
 
-describe('parseAuthorNameAliases', () => {
-  it('支持中英文逗号、分号和换行，丢掉空项', () => {
-    expect(parseAuthorNameAliases('Zhang San，zhangsan; ZS\n 张三 、')).toEqual([
-      'Zhang San',
-      'zhangsan',
-      'ZS',
-      '张三',
-    ])
-  })
-
-  it('空输入得到空数组，而不是 [""]', () => {
-    expect(parseAuthorNameAliases('')).toEqual([])
-    expect(parseAuthorNameAliases(undefined)).toEqual([])
-    expect(parseAuthorNameAliases('  ,  ;  ')).toEqual([])
-  })
-})
 
 describe('GIT_IDENTITY_STATUS_META', () => {
   it('只覆盖数据库定义的四个状态', () => {
@@ -137,30 +135,3 @@ describe('describeGitEmailDiscoveryPhase', () => {
   })
 })
 
-describe('describeGitEmailCandidate', () => {
-  const candidate = (overrides: Partial<GitEmailDiscoveryCandidate> = {}): GitEmailDiscoveryCandidate => ({
-    candidate_id: 'c1',
-    masked_email: 'y***@kingdee.com',
-    email_domain: 'kingdee.com',
-    author_names: ['薛宇轩'],
-    commit_count: 12,
-    last_committed_at: '2026-09-18T10:00:00+08:00',
-    repositories: { 'tmanage-backend': 9, 'kdmanage-backend': 3 },
-    merge_request_refs: ['tmanage-backend!3725'],
-    already_bound: false,
-    ...overrides,
-  })
-
-  it('按提交数从多到少列仓库，并带上最近提交日期和作者名', () => {
-    const text = describeGitEmailCandidate(candidate())
-    expect(text).toContain('12 条提交')
-    expect(text.indexOf('tmanage-backend 9 条')).toBeLessThan(text.indexOf('kdmanage-backend 3 条'))
-    expect(text).toContain('作者名：薛宇轩')
-  })
-
-  it('缺少时间或作者名时不显示空字段', () => {
-    const text = describeGitEmailCandidate(candidate({ last_committed_at: null, author_names: [] }))
-    expect(text).not.toContain('最近')
-    expect(text).not.toContain('作者名')
-  })
-})

@@ -11,6 +11,10 @@ begin
 end;
 $$;
 
+-- V1.13 起 upsert_my_git_identity_from_email 已收回 authenticated 的执行权（见
+-- 20260920045313_git_email_manual_entry_revoked.sql）。这份测试继续守住它的**业务语义**
+-- （只写 UNVERIFIED、越权拒绝、乐观锁、停用保留历史），所以调用时不再切到 authenticated 角色；
+-- auth.uid() 仍由 request.jwt.claims 决定，越权断言照旧有效。权限面由那个迁移自己的测试覆盖。
 do $test$
 declare
   v_owner uuid:='02275400-1000-4000-a000-000000000001';
@@ -60,7 +64,6 @@ declare
   perform set_config('request.jwt.claims',json_build_object(
     'sub',v_owner::text,'role','authenticated'
   )::text,true);
-  set local role authenticated;
   v_result:=public.upsert_my_git_identity_from_email(
     null,'自助人员甲','E-V112-A',v_email,array['Self Owner'],'self-owner','9001'
   );
@@ -109,6 +112,7 @@ declare
   )::text,true);
   set local role authenticated;
   v_view:=public.get_my_git_identity();
+  reset role;
   perform pg_temp.assert(v_view->>'developer_id' is null
     and jsonb_array_length(v_view->'identities')=0,
     'a different account sees an empty own identity');
@@ -150,7 +154,6 @@ declare
   perform set_config('request.jwt.claims',json_build_object(
     'sub',v_owner::text,'role','authenticated'
   )::text,true);
-  set local role authenticated;
   v_result:=public.upsert_my_git_identity_from_email(
     v_git,'自助人员甲','E-V112-A','Second.Mail@Example.Invalid',
     array['Self Owner','selfowner'],'self-owner','9001',v_revision
@@ -205,7 +208,6 @@ declare
   perform set_config('request.jwt.claims',json_build_object(
     'sub',v_other::text,'role','authenticated'
   )::text,true);
-  set local role authenticated;
   v_result:=public.upsert_my_git_identity_from_email(
     null,'预置人员丙','E-V112-C','preset.claim@example.invalid'
   );
@@ -227,10 +229,11 @@ declare
   ----------------------------------------------------------------------------
   perform pg_temp.assert(
     has_function_privilege('authenticated','public.get_my_git_identity()','EXECUTE')
-    and has_function_privilege('authenticated',
-      'public.upsert_my_git_identity_from_email(uuid,text,text,text,text[],text,text,integer)','EXECUTE')
-    and has_function_privilege('authenticated','public.disable_my_git_identity(uuid,integer)','EXECUTE'),
-    'authenticated may call the three self-service RPCs');
+    and has_function_privilege('authenticated','public.disable_my_git_identity(uuid,integer)','EXECUTE')
+    -- V1.13：手输邮箱这条路已经收回，成员只能走 GitLab 反查的候选。
+    and not has_function_privilege('authenticated',
+      'public.upsert_my_git_identity_from_email(uuid,text,text,text,text[],text,text,integer)','EXECUTE'),
+    'members may read and disable their own identity, but can no longer self-declare an email');
   perform pg_temp.assert(
     not has_function_privilege('anon','public.get_my_git_identity()','EXECUTE')
     and not has_function_privilege('anon',
