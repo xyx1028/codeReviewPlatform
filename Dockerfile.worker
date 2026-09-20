@@ -1,6 +1,6 @@
 # Worker image for the AI automation MVP. (Plan §17.1, §17.2)
 # Runs as a non-root user; no ports are exposed (outbound-only worker).
-FROM node:24-bookworm-slim
+FROM kcr.kingdee.com/ai-2030/node:24-bookworm-slim-amd64
 
 # git + ripgrep are required by the read-only code tools; ca-certificates for TLS.
 # procps provides `ps`, which acp-process-supervisor.ts uses as
