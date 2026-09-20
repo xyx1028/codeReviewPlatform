@@ -8,3 +8,18 @@ docker pull "$IMAGE_REF" \
   && bash scripts/worker-drain-restart.sh --timeout 7200 \
   && docker compose -p codereviewplatform -f docker-compose.worker.yml ps \
   && docker compose -p codereviewplatform -f docker-compose.worker.yml logs --tail 80
+
+
+
+
+强制
+cd ~/apps/codeReviewPlatform
+
+IMAGE_REF='mirrors.kingdee.com/kingdee/lingee/patch/kwork-code-review:release_202609202021162'
+
+docker pull "$IMAGE_REF" \
+  && test "$(docker image inspect "$IMAGE_REF" --format '{{.Os}}/{{.Architecture}}')" = 'linux/amd64' \
+  && docker tag "$IMAGE_REF" codereviewplatform-worker:latest \
+  && docker compose -p codereviewplatform \
+       -f docker-compose.worker.yml \
+       up -d --no-build --force-recreate --scale worker=4
