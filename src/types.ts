@@ -1217,6 +1217,8 @@ export interface DeveloperGitIdentityRecord {
   employee_code: string | null
   status: DeveloperIdentityStatus
   revision: number
+  /** 该开发人员身份是否已由本人账号在个人中心认领维护。 */
+  auth_bound?: boolean
   git_identity_id: string
   provider: 'gitlab' | 'git'
   masked_email: string | null
@@ -1240,5 +1242,91 @@ export interface SaveDeveloperGitIdentityInput {
   gitlabUserId?: string | null
   developerStatus: DeveloperIdentityStatus
   verificationStatus: DeveloperIdentityStatus
+  expectedRevision?: number | null
+}
+
+/** 个人中心自助维护的一条 Git 邮箱。明文邮箱不出现在任何返回值里，只有脱敏形式。 */
+export interface MyGitIdentityRecord {
+  git_identity_id: string
+  provider: 'gitlab' | 'git'
+  masked_email: string | null
+  email_domain: string | null
+  author_name_aliases: string[]
+  gitlab_username: string | null
+  gitlab_user_id: string | null
+  verification_status: DeveloperIdentityStatus
+  git_revision: number
+  valid_until: string | null
+  updated_at: string
+}
+
+/** 当前账号自己的开发人员身份；从未配置过时 developer_id 为 null，identities 为空。 */
+export interface MyGitIdentityProfile {
+  developer_id: string | null
+  display_name: string | null
+  employee_code: string | null
+  status: DeveloperIdentityStatus | null
+  revision: number | null
+  identities: MyGitIdentityRecord[]
+}
+
+export interface SaveMyGitIdentityInput {
+  gitIdentityId?: string | null
+  displayName: string
+  employeeCode?: string | null
+  email: string
+  authorNameAliases: string[]
+  gitlabUsername?: string | null
+  gitlabUserId?: string | null
+  expectedRevision?: number | null
+}
+
+export type GitEmailDiscoveryStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
+
+/** 从本人 MR 里反查出来的一个提交邮箱候选。浏览器只拿到脱敏邮箱，没有指纹。 */
+export interface GitEmailDiscoveryCandidate {
+  candidate_id: string
+  masked_email: string
+  email_domain: string
+  author_names: string[]
+  commit_count: number
+  last_committed_at: string | null
+  /** { 仓库名: 提交数 } */
+  repositories: Record<string, number>
+  merge_request_refs: string[]
+  /** 已经绑定在某个人名下（可能是你自己，也可能是别人）。 */
+  already_bound: boolean
+}
+
+export interface GitEmailDiscovery {
+  discovery_id: string
+  gitlab_username: string
+  gitlab_user_id: string | null
+  gitlab_display_name: string | null
+  status: GitEmailDiscoveryStatus
+  attempt: number
+  lookback_days: number
+  merge_request_count: number
+  candidate_count: number
+  /** 有仓库没查到或结果被截断：界面必须照实说"可能不全"。 */
+  partial: boolean
+  error_code: string | null
+  error_message: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  /** 已经被某个 Worker 领取。一直为 false 说明没有可用 Worker。 */
+  claimed: boolean
+  candidates: GitEmailDiscoveryCandidate[]
+}
+
+export interface SaveMyGitIdentityFromCandidateInput {
+  candidateId: string
+  displayName: string
+  employeeCode?: string | null
+  authorNameAliases?: string[] | null
+  gitlabUsername?: string | null
+  gitlabUserId?: string | null
+  gitIdentityId?: string | null
   expectedRevision?: number | null
 }

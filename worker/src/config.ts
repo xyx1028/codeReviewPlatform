@@ -25,6 +25,8 @@ export interface WorkerConfig {
   workerStoryConcurrency: number
   /** 独立模型连接测试队列租约，不占用故事任务槽位。 */
   modelConnectivityTestLeaseSeconds: number
+  /** V1.13：Git 提交邮箱反查任务的租约秒数。 */
+  gitEmailDiscoveryLeaseSeconds: number
   /**
    * 模型请求的 Mac 宿主机代理。
    *
@@ -256,6 +258,14 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     600,
   )
 
+  const gitEmailDiscoveryLeaseSeconds = intInRange(
+    env,
+    'GIT_EMAIL_DISCOVERY_LEASE_SECONDS',
+    90,
+    45,
+    600,
+  )
+
   const rawProxyUrl = optStr(env, 'MODEL_CONNECTIVITY_PROXY_URL')
   const proxyUsername = optStr(env, 'MODEL_CONNECTIVITY_PROXY_USERNAME')
   const proxyPassword = optStr(env, 'MODEL_CONNECTIVITY_PROXY_PASSWORD')
@@ -300,6 +310,7 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     heartbeatIntervalMs,
     workerStoryConcurrency,
     modelConnectivityTestLeaseSeconds,
+    gitEmailDiscoveryLeaseSeconds,
     modelConnectivityProxy,
     agentAttemptsRoot: optStr(env, 'AGENT_ATTEMPTS_ROOT', '/workspace/agent-attempts')!,
     skillCacheRoot: optStr(env, 'SKILL_CACHE_ROOT', '/workspace/skill-cache')!,

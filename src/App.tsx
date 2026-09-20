@@ -579,10 +579,8 @@ function Shell({ session }: { session: Session }) {
             ? '/harness-policy'
             : location.pathname.startsWith('/attribution-rules')
               ? '/attribution-rules'
-              : location.pathname.startsWith('/git-identities')
-                ? '/git-identities'
-                : location.pathname.startsWith('/skills')
-                  ? '/skills'
+              : location.pathname.startsWith('/skills')
+                ? '/skills'
               : location.pathname.startsWith('/models')
               ? '/models'
               : location.pathname.startsWith('/model-operation-log')
@@ -606,9 +604,9 @@ function Shell({ session }: { session: Session }) {
     ...(isAdmin ? [{ key: '/workers', label: <Link to="/workers">调度中心</Link> }] : []),
     ...(isAdmin ? [{ key: '/harness-policy', label: <Link to="/harness-policy">默认能力策略</Link> }] : []),
     ...(isAdmin ? [{ key: '/attribution-rules', label: <Link to="/attribution-rules">归属规则</Link> }] : []),
-    ...(isAdmin ? [{ key: '/git-identities', label: <Link to="/git-identities">Git 身份</Link> }] : []),
     ...(isAdmin ? [{ key: '/skills', label: <Link to="/skills">技能</Link> }] : []),
     ...(isAdmin ? [{ key: '/models', label: <Link to="/models">模型管理</Link> }] : []),
+    // Git 身份由每个人在「个人中心」自助维护；这里只保留管理员的全员总览与冲突处置。
     ...(isAdmin ? [{ key: '/users', label: <Link to="/users">用户管理</Link> }] : []),
   ]
 
@@ -663,10 +661,19 @@ function Shell({ session }: { session: Session }) {
             <Route path="/workers" element={<WorkerManagementPage isAdmin={isAdmin} />} />
             <Route path="/harness-policy" element={<HarnessPolicyPage isAdmin={isAdmin} />} />
             <Route path="/attribution-rules" element={<AttributionRuleManagementPage isAdmin={isAdmin} api={attributionRulesApi} />} />
-            <Route path="/git-identities" element={<GitIdentityManagementPage isAdmin={isAdmin} />} />
+            {/* 旧入口保留成跳转：每个人自己的 Git 身份现在在个人中心维护。 */}
+            <Route path="/git-identities" element={<Navigate to="/profile" replace />} />
             <Route path="/skills" element={<SkillManagementPage isAdmin={isAdmin} />} />
             <Route path="/models" element={<ModelConfigPage isAdmin={isAdmin} />} />
-            <Route path="/users" element={<AdminUsersPage isAdmin={isAdmin} />} />
+            <Route
+              path="/users"
+              element={(
+                <Space direction="vertical" size={24} style={{ width: '100%' }}>
+                  <AdminUsersPage isAdmin={isAdmin} />
+                  {isAdmin ? <GitIdentityManagementPage isAdmin={isAdmin} /> : null}
+                </Space>
+              )}
+            />
             <Route path="/batches/:batchId/*" element={<BatchPage canManageBatch={canManageBatch} />} />
             <Route path="*" element={<Navigate to="/batches" replace />} />
           </Routes>

@@ -34,7 +34,13 @@ import {
   WorkerAlreadyRunningError,
 } from './coordination/instance-lock.js'
 import { SupabaseDbClient } from './db/client.js'
-import { JobsDb, type ModelConnectivityTestClaim, type StoryTask } from './db/jobs.js'
+import {
+  JobsDb,
+  type GitEmailDiscoveryClaim,
+  type ModelConnectivityTestClaim,
+  type StoryTask,
+} from './db/jobs.js'
+import { GitLabReadonlyClient, GitLabReadonlyError } from './git/gitlab-readonly-client.js'
 import {
   prepareRepositoryAtSnapshot,
   type PreparedRepository,
@@ -561,6 +567,88 @@ export async function runModelConnectivityTest(
 }
 
 /**
+ * V1.13：执行一次"用 GitLab 用户名反查提交邮箱"。
+ *
+ * 只有本地 Worker 能做这件事：`git.kingdee.com` 在内网，Supabase 云端访问不到。
+ * 明文邮箱在这里出现（GitLab 响应里就有），但不写日志、不落盘，只通过
+ * complete RPC 交给数据库算 HMAC —— 与既有身份匹配链路同一条边界。
+ */
+export async function runGitEmailDiscovery(
+  config: WorkerConfig,
+  jobsDb: JobsDb,
+  claim: GitEmailDiscoveryClaim,
+  logger: Logger,
+  signal: AbortSignal,
+  clientOverride?: Pick<GitLabReadonlyClient, 'discoverAuthorCommitEmails'>,
+): Promise<void> {
+  const log = logger.child({ git_email_discovery_id: claim.id })
+  const lease = new Heartbeat({
+    taskId: claim.id,
+    workerId: config.workerId,
+    intervalMs: Math.min(config.heartbeatIntervalMs, 15000),
+    send: (discoveryId, workerId) => jobsDb.heartbeatGitEmailDiscovery({
+      discoveryId,
+      workerId,
+      claimToken: claim.claim_token,
+      leaseSeconds: config.gitEmailDiscoveryLeaseSeconds,
+    }),
+    onLeaseLost: () => undefined,
+    logger: log,
+  })
+  lease.start()
+  try {
+    const client = clientOverride ?? new GitLabReadonlyClient({
+      baseUrl: config.gitlabBaseUrl,
+      apiToken: config.gitlabApiToken,
+    })
+    const result = await client.discoverAuthorCommitEmails({
+      gitlabUsername: claim.gitlab_username,
+      lookbackDays: claim.lookback_days,
+    })
+    await jobsDb.completeGitEmailDiscovery({
+      discoveryId: claim.id,
+      workerId: config.workerId,
+      claimToken: claim.claim_token,
+      gitlabUserId: result.gitlabUserId,
+      gitlabDisplayName: result.gitlabDisplayName,
+      mergeRequestCount: result.mergeRequestCount,
+      partial: result.partial,
+      candidates: result.candidates,
+    })
+    // 只记数量与是否截断；候选邮箱本身（即使脱敏）不进日志。
+    log.info('git_email_discovery_succeeded', {
+      event: 'git_email_discovery_succeeded',
+      merge_request_count: result.mergeRequestCount,
+      candidate_count: result.candidates.length,
+      partial: result.partial,
+    })
+  } catch (error) {
+    if (signal.aborted) {
+      await jobsDb.releaseGitEmailDiscoveryClaim({
+        discoveryId: claim.id,
+        workerId: config.workerId,
+        claimToken: claim.claim_token,
+      }).catch(() => false)
+      return
+    }
+    const code = error instanceof GitLabReadonlyError ? error.code : 'GIT_EMAIL_DISCOVERY_FAILED'
+    await jobsDb.failGitEmailDiscovery({
+      discoveryId: claim.id,
+      workerId: config.workerId,
+      claimToken: claim.claim_token,
+      code,
+      message: '查找提交邮箱失败',
+    }).catch(() => false)
+    log.warn('git_email_discovery_failed', {
+      event: 'git_email_discovery_failed',
+      error_code: code,
+    })
+  } finally {
+    lease.stop()
+  }
+}
+
+/**
  * Start the polling worker.
  *
  * `overrides` 只服务测试：drain 的正确性必须能在没有真实 Supabase 的情况下断言，
@@ -695,6 +783,7 @@ export function startWorker(
   const pool = new SlotPool(config.workerStoryConcurrency)
   const inFlight = new Set<Promise<void>>()
   let modelTestLoopPromise: Promise<void> | null = null
+  let gitEmailDiscoveryLoopPromise: Promise<void> | null = null
   let resolveRanOnce: () => void
   const ranOnce = new Promise<void>((resolve) => {
     resolveRanOnce = resolve
@@ -996,8 +1085,55 @@ export function startWorker(
     }
   }
 
+  /**
+   * V1.13：Git 提交邮箱反查循环。
+   *
+   * 与模型连接测试并排、互不阻塞：它们都是"用户在页面上点一下、等几秒"的交互式任务，
+   * 绝不能排在评审任务后面等几十分钟。drain 期间同样停止领取。
+   */
+  const gitEmailDiscoveryLoop = async (): Promise<void> => {
+    while (!stopped) {
+      try {
+        if (draining()) {
+          await sleep(config.pollIntervalMs)
+          continue
+        }
+        const claim = await jobsDb.claimNextGitEmailDiscovery(
+          config.workerId,
+          config.gitEmailDiscoveryLeaseSeconds,
+        )
+        if (!claim) {
+          await sleep(config.pollIntervalMs)
+          continue
+        }
+        if (stopped) {
+          await jobsDb.releaseGitEmailDiscoveryClaim({
+            discoveryId: claim.id,
+            workerId: config.workerId,
+            claimToken: claim.claim_token,
+          })
+          break
+        }
+        await runGitEmailDiscovery(
+          config,
+          jobsDb,
+          claim,
+          logger,
+          shutdownController.signal,
+        )
+      } catch (error) {
+        logger.error('git_email_discovery_loop_error', {
+          event: 'git_email_discovery_loop_error',
+          error_message: redactError(error),
+        })
+        await sleep(config.pollIntervalMs)
+      }
+    }
+  }
+
   void loop()
   modelTestLoopPromise = modelTestLoop()
+  gitEmailDiscoveryLoopPromise = gitEmailDiscoveryLoop()
 
   return {
     stop(): Promise<void> {
@@ -1008,6 +1144,7 @@ export function startWorker(
       stopPromise = Promise.allSettled([
         ...inFlight,
         ...(modelTestLoopPromise ? [modelTestLoopPromise] : []),
+        ...(gitEmailDiscoveryLoopPromise ? [gitEmailDiscoveryLoopPromise] : []),
       ]).then(() => undefined)
       return stopPromise
     },

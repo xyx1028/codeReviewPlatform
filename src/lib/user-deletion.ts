@@ -59,6 +59,8 @@ const NULLIFY_LABELS: Record<string, string> = {
   review_skill: '技能（作者将置空）',
   review_skill_version: '技能版本（发布人将置空）',
   review_skill_upload: '技能上传记录（上传人将置空）',
+  developer_identity: 'Git 身份（将退回未认领，历史分析不受影响）',
+  analysis_scope_decision_audit: '归属决策审计（操作人将置空，记录本身保留）',
 }
 
 /** 把 `{key: count}` 转成 `[{label, count}]`，只保留 count > 0 的项。 */

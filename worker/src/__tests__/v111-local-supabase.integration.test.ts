@@ -161,6 +161,7 @@ function workerConfig(root: string): WorkerConfig {
     heartbeatIntervalMs: 30_000,
     workerStoryConcurrency: 1,
     modelConnectivityTestLeaseSeconds: 90,
+    gitEmailDiscoveryLeaseSeconds: 90,
     modelConnectivityProxy: null,
     agentAttemptsRoot: join(root, 'attempts'),
     skillCacheRoot: join(root, 'skills'),

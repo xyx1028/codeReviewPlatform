@@ -106,8 +106,8 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <div>
-        <Title level={4} style={{ marginBottom: 4 }}>Git 身份</Title>
-        <Text type="secondary">用于把需求中的开发人员与 Git author email 对齐。邮箱只在数据库函数内计算 HMAC，页面、业务表和日志均不保存明文。</Text>
+        <Title level={4} style={{ marginBottom: 4 }}>Git 身份总览（全部成员）</Title>
+        <Text type="secondary">成员在「个人中心 → Git 身份」自己维护；这里用于代录未登录的人、排查漏配和处理重名冲突。邮箱只在数据库函数内计算 HMAC，页面、业务表和日志均不保存明文。</Text>
       </div>
       <Alert
         type="info"
@@ -125,6 +125,7 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
           scroll={{ x: 1050 }}
           columns={[
             { title: '开发人员', dataIndex: 'display_name', fixed: 'left', width: 150 },
+            { title: '维护方式', dataIndex: 'auth_bound', width: 110, render: (value: boolean | undefined) => <Tag color={value ? 'blue' : undefined}>{value ? '本人维护' : '管理员代录'}</Tag> },
             { title: '员工号', dataIndex: 'employee_code', width: 110, render: (value) => value ?? '—' },
             { title: 'Git 邮箱', dataIndex: 'masked_email', width: 190, render: (value) => value ?? '未配置' },
             { title: '作者别名', dataIndex: 'author_name_aliases', width: 190, render: (values: string[]) => values.length ? values.join('、') : '—' },

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { parseStructuredStoryIds } from '../analysis/story-commit-attribution.js'
 import {
   REPOSITORIES,
+  REPOSITORY_NAMES,
   assertRepositoryName,
   normalizeGitLabBaseUrl,
   type RepositoryName,
@@ -51,6 +52,31 @@ export interface CollectRepositoryMergeRequestsInput {
   storyCodes: readonly string[]
 }
 
+/** V1.13：从某个人自己提的 MR 里反查出来的一个提交邮箱候选（明文只存在于 Worker 内存）。 */
+export interface DiscoveredCommitEmail {
+  email: string
+  author_names: string[]
+  commit_count: number
+  last_committed_at: string | null
+  repositories: Record<string, number>
+  merge_request_refs: string[]
+}
+
+export interface DiscoverAuthorCommitEmailsInput {
+  gitlabUsername: string
+  lookbackDays: number
+  maxMergeRequests?: number
+}
+
+export interface DiscoverAuthorCommitEmailsResult {
+  gitlabUserId: string
+  gitlabDisplayName: string | null
+  mergeRequestCount: number
+  /** 有仓库读失败、MR 或候选被截断时为 true —— 界面必须照实说"结果可能不全"。 */
+  partial: boolean
+  candidates: DiscoveredCommitEmail[]
+}
+
 export interface GitLabReadonlyClientOptions {
   baseUrl: string
   apiToken: string | null
@@ -93,6 +119,9 @@ const DEFAULT_MAX_PAGES = 20
 const DEFAULT_PER_PAGE = 100
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 const MAX_MERGE_REQUESTS = 2_000
+const MAX_DISCOVERED_EMAILS = 50
+const GITLAB_USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,48}$/
+const EMAIL_SHAPE_PATTERN = /^[^@\s]{1,64}@[^@\s]{1,255}$/
 
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0
@@ -335,6 +364,179 @@ export class GitLabReadonlyClient {
       metadata_hash: '',
       collected_at: collectedAt,
       commits: [],
+    }
+  }
+
+  /**
+   * 按 GitLab 用户名反查"这个人自己提的 MR 里，提交作者用的是哪些邮箱"。
+   *
+   * 为什么走 MR 而不是全仓 git log：`git log` 拿到的是**所有人**的提交，还要克隆几百兆；
+   * 而 `author_id` 过滤出来的 MR 天然只属于这个人，一次 API 往返就能定位到他的提交。
+   *
+   * 注意边界：MR 是他提的，不代表 MR 里每条提交都是他写的（cherry-pick、代提）。所以这里
+   * 返回的是**候选**，最终由本人点选；数据库侧还有"同一邮箱不能被两个人绑定"的唯一约束，
+   * 以及把真实作者名一并展示出来供人肉核对。这个方法不做任何"这一定是你"的断言。
+   */
+  async discoverAuthorCommitEmails(
+    input: DiscoverAuthorCommitEmailsInput,
+  ): Promise<DiscoverAuthorCommitEmailsResult> {
+    if (this.apiToken === null) {
+      throw new GitLabReadonlyError('GITLAB_API_TOKEN_MISSING', 'GitLab API token is not configured')
+    }
+    const username = input.gitlabUsername.trim()
+    if (!GITLAB_USERNAME_PATTERN.test(username)) {
+      throw new GitLabReadonlyError('GITLAB_USERNAME_INVALID', 'GitLab username is invalid')
+    }
+    const lookbackDays = Math.min(Math.max(Math.trunc(input.lookbackDays), 30), 730)
+    const maxMergeRequests = Math.min(Math.max(Math.trunc(input.maxMergeRequests ?? 40), 1), 100)
+
+    const users = await this.paginate('/api/v4/users', { username })
+    const user = users.find((raw) => {
+      if (raw === null || typeof raw !== 'object') return false
+      const candidate = (raw as Record<string, unknown>).username
+      return typeof candidate === 'string' && candidate.toLowerCase() === username.toLowerCase()
+    }) as Record<string, unknown> | undefined
+    if (user === undefined) {
+      throw new GitLabReadonlyError('GITLAB_USER_NOT_FOUND', 'GitLab user not found')
+    }
+    const userId = Number(user.id)
+    if (!Number.isSafeInteger(userId) || userId <= 0) {
+      throw new GitLabReadonlyError('MR_METADATA_INVALID_RESPONSE', 'GitLab user id is invalid')
+    }
+    const displayName = optionalString(user.name, 'user.name', 255)
+
+    const updatedAfter = new Date(
+      this.now().getTime() - lookbackDays * 24 * 60 * 60 * 1000,
+    ).toISOString()
+
+    interface AuthoredMergeRequest {
+      repository: RepositoryName
+      iid: number
+      updatedAt: string
+    }
+    const authored: AuthoredMergeRequest[] = []
+    let partial = false
+
+    for (const repository of REPOSITORY_NAMES) {
+      try {
+        const rows = await this.paginate(
+          `/api/v4/projects/${encodeURIComponent(projectPath(repository))}/merge_requests`,
+          {
+            author_id: String(userId),
+            scope: 'all',
+            state: 'all',
+            updated_after: updatedAfter,
+            order_by: 'updated_at',
+            sort: 'desc',
+          },
+        )
+        for (const raw of rows) {
+          if (raw === null || typeof raw !== 'object') continue
+          const row = raw as Record<string, unknown>
+          const iid = Number(row.iid)
+          if (!Number.isSafeInteger(iid) || iid <= 0) continue
+          authored.push({
+            repository,
+            iid,
+            updatedAt: typeof row.updated_at === 'string' ? row.updated_at : '',
+          })
+        }
+      } catch {
+        // 单个仓库读不到（没权限、超时）不该让整次查找失败：其余仓库仍然有价值，
+        // 只是结果标成 partial，界面上明确写"部分仓库没查到"。
+        partial = true
+      }
+    }
+
+    authored.sort((left, right) => compareText(right.updatedAt, left.updatedAt))
+    const selected = authored.slice(0, maxMergeRequests)
+    if (authored.length > selected.length) partial = true
+
+    interface Aggregate {
+      email: string
+      authorNames: Set<string>
+      shas: Set<string>
+      lastCommittedAt: string | null
+      repositories: Map<RepositoryName, Set<string>>
+      mergeRequestRefs: Set<string>
+    }
+    const byEmail = new Map<string, Aggregate>()
+
+    for (const mergeRequest of selected) {
+      let commits: unknown[]
+      try {
+        commits = await this.paginate(
+          `/api/v4/projects/${encodeURIComponent(projectPath(mergeRequest.repository))}`
+          + `/merge_requests/${mergeRequest.iid}/commits`,
+        )
+      } catch {
+        partial = true
+        continue
+      }
+      for (const raw of commits) {
+        if (raw === null || typeof raw !== 'object') continue
+        const commit = raw as Record<string, unknown>
+        const email = typeof commit.author_email === 'string'
+          ? commit.author_email.trim().toLowerCase()
+          : ''
+        if (email === '' || email.length > 320 || !EMAIL_SHAPE_PATTERN.test(email)) continue
+        const commitSha = sha(commit.id ?? commit.sha, 'commit sha') ?? ''
+        if (commitSha === '') continue
+        const committedAt = typeof commit.committed_date === 'string' ? commit.committed_date : null
+
+        let aggregate = byEmail.get(email)
+        if (aggregate === undefined) {
+          aggregate = {
+            email,
+            authorNames: new Set<string>(),
+            shas: new Set<string>(),
+            lastCommittedAt: null,
+            repositories: new Map<RepositoryName, Set<string>>(),
+            mergeRequestRefs: new Set<string>(),
+          }
+          byEmail.set(email, aggregate)
+        }
+        const authorName = typeof commit.author_name === 'string' ? commit.author_name.trim() : ''
+        if (authorName !== '' && aggregate.authorNames.size < 10) {
+          aggregate.authorNames.add(authorName.slice(0, 64))
+        }
+        aggregate.shas.add(commitSha)
+        if (committedAt !== null
+          && (aggregate.lastCommittedAt === null || committedAt > aggregate.lastCommittedAt)) {
+          aggregate.lastCommittedAt = committedAt
+        }
+        const perRepo = aggregate.repositories.get(mergeRequest.repository) ?? new Set<string>()
+        perRepo.add(commitSha)
+        aggregate.repositories.set(mergeRequest.repository, perRepo)
+        if (aggregate.mergeRequestRefs.size < 5) {
+          aggregate.mergeRequestRefs.add(`${mergeRequest.repository}!${mergeRequest.iid}`)
+        }
+      }
+    }
+
+    const candidates: DiscoveredCommitEmail[] = [...byEmail.values()]
+      .map((aggregate) => ({
+        email: aggregate.email,
+        author_names: [...aggregate.authorNames].sort(compareText),
+        commit_count: aggregate.shas.size,
+        last_committed_at: aggregate.lastCommittedAt,
+        repositories: Object.fromEntries(
+          [...aggregate.repositories.entries()]
+            .map(([repository, shas]) => [repository, shas.size] as const)
+            .sort((left, right) => compareText(left[0], right[0])),
+        ),
+        merge_request_refs: [...aggregate.mergeRequestRefs].sort(compareText),
+      }))
+      .sort((left, right) => right.commit_count - left.commit_count || compareText(left.email, right.email))
+    // 数据库侧一次最多接收 50 条候选；超出的都是尾部低频邮箱，截断并标 partial。
+    if (candidates.length > MAX_DISCOVERED_EMAILS) partial = true
+
+    return {
+      gitlabUserId: String(userId),
+      gitlabDisplayName: displayName,
+      mergeRequestCount: selected.length,
+      partial,
+      candidates: candidates.slice(0, MAX_DISCOVERED_EMAILS),
     }
   }
 

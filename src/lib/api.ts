@@ -40,7 +40,12 @@ import type {
   BatchWorkspace,
   DefaultBranch,
   DeveloperGitIdentityRecord,
+  DeveloperIdentityStatus,
   SaveDeveloperGitIdentityInput,
+  GitEmailDiscovery,
+  MyGitIdentityProfile,
+  SaveMyGitIdentityFromCandidateInput,
+  SaveMyGitIdentityInput,
   HumanReview,
   HumanReviewResult,
   ImportFileRecord,
@@ -1081,6 +1086,118 @@ export async function adminSaveDeveloperGitIdentity(
     p_expected_revision: input.expectedRevision ?? null,
   })
   return unwrap<{ developer_id: string; git_identity_id: string; masked_email: string }>({ data, error })
+}
+
+// ---------------------------------------------------------------------------
+// V1.12 Git 身份自助维护（个人中心）
+// ---------------------------------------------------------------------------
+
+/** 只返回调用者自己的身份；数据库侧以 auth.uid() 为边界，前端拿不到别人的记录。 */
+export async function getMyGitIdentity(): Promise<MyGitIdentityProfile> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('get_my_git_identity')
+  return unwrap<MyGitIdentityProfile>({ data, error })
+}
+
+export async function saveMyGitIdentity(
+  input: SaveMyGitIdentityInput,
+): Promise<{
+  developer_id: string
+  git_identity_id: string
+  git_revision: number
+  masked_email: string
+  claimed_existing_developer: boolean
+}> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('upsert_my_git_identity_from_email', {
+    p_git_identity_id: input.gitIdentityId ?? null,
+    p_display_name: input.displayName,
+    p_employee_code: input.employeeCode ?? null,
+    p_email: input.email,
+    p_author_name_aliases: input.authorNameAliases,
+    p_gitlab_username: input.gitlabUsername ?? null,
+    p_gitlab_user_id: input.gitlabUserId ?? null,
+    p_expected_revision: input.expectedRevision ?? null,
+  })
+  return unwrap<{
+    developer_id: string
+    git_identity_id: string
+    git_revision: number
+    masked_email: string
+    claimed_existing_developer: boolean
+  }>({ data, error })
+}
+
+/** 移除是停用而不是删除：已冻结的 Job 身份快照以 restrict 引用历史行。 */
+export async function disableMyGitIdentity(
+  gitIdentityId: string,
+  expectedRevision?: number | null,
+): Promise<{ git_identity_id: string; verification_status: DeveloperIdentityStatus }> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('disable_my_git_identity', {
+    p_git_identity_id: gitIdentityId,
+    p_expected_revision: expectedRevision ?? null,
+  })
+  return unwrap<{ git_identity_id: string; verification_status: DeveloperIdentityStatus }>({ data, error })
+}
+
+// ---------------------------------------------------------------------------
+// V1.13 用 GitLab 用户名反查提交邮箱（本地 Worker 执行，前端轮询）
+// ---------------------------------------------------------------------------
+
+export async function enqueueMyGitEmailDiscovery(
+  gitlabUsername: string,
+  lookbackDays = 365,
+): Promise<string> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('enqueue_my_git_email_discovery', {
+    p_gitlab_username: gitlabUsername,
+    p_lookback_days: lookbackDays,
+  })
+  return unwrap<string>({ data, error })
+}
+
+export async function getMyGitEmailDiscovery(discoveryId: string): Promise<GitEmailDiscovery> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('get_my_git_email_discovery', {
+    p_discovery_id: discoveryId,
+  })
+  return unwrap<GitEmailDiscovery>({ data, error })
+}
+
+/**
+ * 按候选保存。提交的是 candidate_id 而不是邮箱：指纹取自候选行，
+ * 所以前端没有任何办法伪造一个"已验证"的 Git 身份。
+ */
+export async function saveMyGitIdentityFromCandidate(
+  input: SaveMyGitIdentityFromCandidateInput,
+): Promise<{
+  developer_id: string
+  git_identity_id: string
+  git_revision: number
+  masked_email: string
+  verification_status: DeveloperIdentityStatus
+  claimed_existing_developer: boolean
+}> {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('upsert_my_git_identity_from_candidate', {
+    p_candidate_id: input.candidateId,
+    p_display_name: input.displayName,
+    p_employee_code: input.employeeCode ?? null,
+    p_author_name_aliases: input.authorNameAliases ?? null,
+    p_gitlab_username: input.gitlabUsername ?? null,
+    p_gitlab_user_id: input.gitlabUserId ?? null,
+    p_git_identity_id: input.gitIdentityId ?? null,
+    p_expected_revision: input.expectedRevision ?? null,
+  })
+  return unwrap<{
+    developer_id: string
+    git_identity_id: string
+    git_revision: number
+    masked_email: string
+    verification_status: DeveloperIdentityStatus
+    claimed_existing_developer: boolean
+  }>({ data, error })
 }
 
 type V111JsonObject = Record<string, unknown>

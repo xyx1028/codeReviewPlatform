@@ -5,6 +5,7 @@
 
 import type { BranchName, RepositoryName } from '../git/repositories.js'
 import type {
+  DiscoveredCommitEmail,
   MergeRequestEnrichmentStatus,
   RepositoryMergeRequestWire,
 } from '../git/gitlab-readonly-client.js'
@@ -227,11 +228,23 @@ export interface ModelConnectivityTestClaim {
   claim_token: string
 }
 
+/**
+ * V1.13：一条"用 GitLab 用户名反查提交邮箱"的任务。
+ *
+ * 注意这里**没有请求人**：Worker 不需要知道是谁在查，数据库也不给它。
+ */
+export interface GitEmailDiscoveryClaim {
+  id: string
+  gitlab_username: string
+  lookback_days: number
+  attempt: number
+  claim_token: string
+}
+
 export interface PreparationClaim {
   job: JobContext
   model: ModelSnapshot
 }
-
 export interface FinalizationClaim {
   job: JobContext
   model: ModelSnapshot
@@ -824,6 +837,98 @@ export class JobsDb {
   }): Promise<boolean> {
     return this.db.rpc<boolean>('release_model_connectivity_test_claim', {
       p_test_id: input.testId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+    })
+  }
+
+  // -------------------------------------------------------------------------
+  // V1.13 Git 提交邮箱反查队列
+  // -------------------------------------------------------------------------
+
+  async claimNextGitEmailDiscovery(
+    workerId: string,
+    leaseSeconds: number,
+  ): Promise<GitEmailDiscoveryClaim | null> {
+    const data = await this.db.rpc<unknown>('claim_next_git_email_discovery', {
+      p_worker_id: workerId,
+      p_lease_seconds: leaseSeconds,
+    })
+    const row = unwrapMaybeObject<Record<string, unknown>>(data)
+    if (!row?.id) return null
+    const claimToken = row.claim_token
+    const username = row.gitlab_username
+    if (typeof claimToken !== 'string' || claimToken.length === 0) {
+      throw new Error('claim_next_git_email_discovery returned no claim token')
+    }
+    if (typeof username !== 'string' || username.length === 0) {
+      throw new Error('claim_next_git_email_discovery returned no gitlab username')
+    }
+    return {
+      id: String(row.id),
+      gitlab_username: username,
+      lookback_days: Number(row.lookback_days ?? 365),
+      attempt: Number(row.attempt ?? 1),
+      claim_token: claimToken,
+    }
+  }
+
+  heartbeatGitEmailDiscovery(input: {
+    discoveryId: string; workerId: string; claimToken: string; leaseSeconds: number
+  }): Promise<boolean> {
+    return this.db.rpc<boolean>('heartbeat_git_email_discovery', {
+      p_discovery_id: input.discoveryId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_lease_seconds: input.leaseSeconds,
+    })
+  }
+
+  /**
+   * 回填候选。`candidates[].email` 是明文 —— 数据库在函数内部算 HMAC 后只落指纹与脱敏值。
+   * 这与既有的 match_analysis_git_identities 是同一条既定边界：pepper 只在库里。
+   */
+  async completeGitEmailDiscovery(input: {
+    discoveryId: string
+    workerId: string
+    claimToken: string
+    gitlabUserId: string | null
+    gitlabDisplayName: string | null
+    mergeRequestCount: number
+    partial: boolean
+    candidates: readonly DiscoveredCommitEmail[]
+  }): Promise<{ candidateCount: number }> {
+    const data = await this.db.rpc<unknown>('complete_git_email_discovery', {
+      p_discovery_id: input.discoveryId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_gitlab_user_id: input.gitlabUserId,
+      p_gitlab_display_name: input.gitlabDisplayName,
+      p_merge_request_count: input.mergeRequestCount,
+      p_partial: input.partial,
+      p_candidates: input.candidates,
+    })
+    const row = unwrapMaybeObject<Record<string, unknown>>(data)
+    return { candidateCount: Number(row?.candidate_count ?? 0) }
+  }
+
+  failGitEmailDiscovery(input: {
+    discoveryId: string; workerId: string; claimToken: string; code: string; message: string
+  }): Promise<boolean> {
+    return this.db.rpc<boolean>('fail_git_email_discovery', {
+      p_discovery_id: input.discoveryId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_error_code: input.code,
+      p_error_message: input.message,
+    })
+  }
+
+  releaseGitEmailDiscoveryClaim(input: {
+    discoveryId: string; workerId: string; claimToken: string
+  }): Promise<boolean> {
+    return this.db.rpc<boolean>('release_git_email_discovery_claim', {
+      p_discovery_id: input.discoveryId,
       p_worker_id: input.workerId,
       p_claim_token: input.claimToken,
     })

@@ -23,6 +23,7 @@ const config: WorkerConfig = {
   heartbeatIntervalMs: 30000,
   workerStoryConcurrency: 2,
   modelConnectivityTestLeaseSeconds: 90,
+  gitEmailDiscoveryLeaseSeconds: 90,
   modelConnectivityProxy: null,
   agentAttemptsRoot: '/tmp/agent-attempts',
   skillCacheRoot: '/tmp/skill-cache',

@@ -112,6 +112,18 @@ describe('buildUserDeletionView', () => {
     expect(view.nullify).toEqual([{ label: '技能（作者将置空）', count: 2 }])
   })
 
+  it('V1.12：Git 身份与归属审计的置空项有中文标签', () => {
+    const view = buildUserDeletionView(
+      impact({
+        nullify_counts: { developer_identity: 1, analysis_scope_decision_audit: 3 },
+      }),
+    )
+    expect(view.nullify).toEqual([
+      { label: 'Git 身份（将退回未认领，历史分析不受影响）', count: 1 },
+      { label: '归属决策审计（操作人将置空，记录本身保留）', count: 3 },
+    ])
+  })
+
   it('缺字段时不炸（旧后端 / 部分返回）', () => {
     const view = buildUserDeletionView({
       can_delete: true,
