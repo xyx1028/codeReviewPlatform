@@ -1,0 +1,2 @@
+FROM kcr.kingdee.com/ai-2030/node:24.21.0-alpine3.23
+RUN node --version
