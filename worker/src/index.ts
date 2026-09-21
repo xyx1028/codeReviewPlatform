@@ -637,12 +637,14 @@ export async function runGitEmailDiscovery(
       mergeRequestCount: result.mergeRequestCount,
       partial: result.partial,
       candidates: result.candidates,
+      excludedCandidateCount: result.excludedCandidateCount,
     })
     // 只记数量与是否截断；候选邮箱本身（即使脱敏）不进日志。
     log.info('git_email_discovery_succeeded', {
       event: 'git_email_discovery_succeeded',
       merge_request_count: result.mergeRequestCount,
       candidate_count: result.candidates.length,
+      excluded_candidate_count: result.excludedCandidateCount,
       partial: result.partial,
     })
   } catch (error) {

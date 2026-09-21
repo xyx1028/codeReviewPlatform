@@ -31,6 +31,7 @@ import {
   updateMyIdentityProfile,
 } from '../lib/api'
 import {
+  GIT_EMAIL_MATCH_REASON_META,
   GIT_IDENTITY_STATUS_META,
   describeGitEmailDiscoveryPhase,
   describeGitIdentityError,
@@ -509,13 +510,24 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
                 }}
                 style={{ display: 'flex', flexDirection: 'column', gap: 12, width: '100%' }}
               >
-                {candidates.map((candidate) => (
-                  <Radio key={candidate.candidate_id} value={candidate.candidate_id} disabled={candidate.already_bound}>
-                    {/* 明文只存在于本人自己的临时候选行；正式身份表里只有 HMAC 与脱敏值。 */}
-                    <Text strong>{candidate.email ?? candidate.masked_email}</Text>
-                    {candidate.already_bound ? <Tag style={{ marginLeft: 8 }}>已被绑定</Tag> : null}
-                  </Radio>
-                ))}
+                {candidates.map((candidate) => {
+                  const reason = candidate.match_reason === null
+                    ? null
+                    : GIT_EMAIL_MATCH_REASON_META[candidate.match_reason] ?? null
+                  return (
+                    <Radio key={candidate.candidate_id} value={candidate.candidate_id} disabled={candidate.already_bound}>
+                      {/* 明文只存在于本人自己的临时候选行；正式身份表里只有 HMAC 与脱敏值。 */}
+                      <Text strong>{candidate.email ?? candidate.masked_email}</Text>
+                      {/* 依据来自后端判定，前端只翻译：让人能自己核对凭什么说这是他的邮箱。 */}
+                      {reason === null ? null : (
+                        <Tooltip title={reason.hint}>
+                          <Tag color={reason.color} style={{ marginLeft: 8 }}>{reason.label}</Tag>
+                        </Tooltip>
+                      )}
+                      {candidate.already_bound ? <Tag style={{ marginLeft: 8 }}>已被绑定</Tag> : null}
+                    </Radio>
+                  )
+                })}
               </Radio.Group>
             </Form.Item>
           ) : null}
@@ -539,8 +551,9 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
 
           {phase.kind === 'DONE_EMPTY' ? (
             <Text type="secondary">
-              查不到通常是因为你还没在这四个仓库提过合并申请。平台不提供手动填写 ——
-              没有 GitLab 提交作为证据的邮箱在归属分析里不会被采用。请联系管理员代录。
+              查不到通常有两种原因：你还没在这四个仓库提过合并申请；或者你提的都是把
+              feature_sit 合进 release 这类集成合并申请 —— 里面是别人的提交，平台不会把它们算成你的。
+              平台不提供手动填写 —— 没有 GitLab 提交作为证据的邮箱在归属分析里不会被采用。请联系管理员代录。
             </Text>
           ) : null}
         </Form>

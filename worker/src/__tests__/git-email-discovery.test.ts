@@ -52,6 +52,11 @@ function mrCommitsKey(project: string, iid: number): string {
   return `/api/v4/projects/${encodeURIComponent(project)}/merge_requests/${iid}/commits?`
 }
 
+/** 邮箱归属反查（V1.13.1）：`GET /users?search=<邮箱>`。 */
+function emailOwnerKey(email: string): string {
+  return `/api/v4/users?search=${email}`
+}
+
 describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
   it('用用户名换 id，再从他自己的 MR 里聚合出提交邮箱候选', async () => {
     const { impl, calls } = stubFetch({
@@ -110,6 +115,12 @@ describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
           },
         ],
       },
+      // 归属反查：GitLab 说这个邮箱就是 1001 自己的
+      [emailOwnerKey('yuxuan.xue@kingdee.com')]: {
+        body: [{ id: 1001, username: 'yuxuan_xue' }],
+      },
+      // 私人邮箱在 GitLab 上查不到 → 落到较弱的判据
+      [emailOwnerKey('17751361028@163.com')]: { body: [] },
     })
     const client = new GitLabReadonlyClient({
       baseUrl: BASE,
@@ -135,6 +146,7 @@ describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
         last_committed_at: '2026-09-19T11:00:00+08:00',
         repositories: { 'kdmanage-backend': 1, 'tmanage-backend': 2 },
         merge_request_refs: ['kdmanage-backend!88', 'tmanage-backend!3725'],
+        match_reason: 'GITLAB_EMAIL_MATCH',
       },
       {
         email: '17751361028@163.com',
@@ -143,11 +155,112 @@ describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
         last_committed_at: '2026-09-11T09:00:00+08:00',
         repositories: { 'tmanage-backend': 1 },
         merge_request_refs: ['tmanage-backend!3611'],
+        // 作者名 xyx 与用户名对不上、邮箱也不在 GitLab 上，但它是他自己那个 MR 的唯一作者
+        match_reason: 'SOLE_AUTHOR_IN_OWN_MERGE_REQUEST',
       },
     ])
+    expect(result.excludedCandidateCount).toBe(0)
     // 四个白名单仓库各问一次 MR 列表，且只问白名单
     expect(calls.filter((call) => call.includes('/merge_requests?')).length).toBe(4)
     expect(calls.some((call) => call.includes('not-in-whitelist'))).toBe(false)
+  })
+
+  it('审核人提的集成 MR 里别人的提交邮箱必须被剔除（jin_gu 场景）', async () => {
+    const { impl } = stubFetch({
+      '/api/v4/users?username=jin_gu': {
+        body: [{ id: 2956, username: 'jin_gu', name: 'jin_gu' }],
+      },
+      [mrListKey('kwork/manage/kdmanage-backend', '2956')]: {
+        body: [
+          // 集成 MR：源分支是共享分支，里面是全组人的提交
+          { iid: 1796, updated_at: '2026-09-19T02:00:00Z', source_branch: 'feature_sit', target_branch: 'release' },
+          // 他自己的功能 MR
+          { iid: 1794, updated_at: '2026-09-18T02:00:00Z', source_branch: 'feature_sit_gujin', target_branch: 'feature_sit' },
+        ],
+      },
+      [mrListKey('kwork/manage/kdmanage-frontend', '2956')]: { body: [] },
+      [mrListKey('kwork/manage/tmanage-backend', '2956')]: { body: [] },
+      [mrListKey('kwork/manage/tmanage-frontend', '2956')]: { body: [] },
+      [mrCommitsKey('kwork/manage/kdmanage-backend', 1796)]: {
+        body: [
+          // 别人的提交占绝大多数：过滤前它会排在第一个候选
+          ...Array.from({ length: 5 }, (_value, index) => ({
+            id: `${index}`.repeat(40),
+            author_email: 'hook_wang@kingdee.com',
+            author_name: 'hook_wang',
+            committed_date: '2026-09-17T02:00:00Z',
+          })),
+          {
+            id: 'a'.repeat(40),
+            author_email: 'jin_gu@kingdee.com',
+            author_name: 'jin_gu',
+            committed_date: '2026-09-18T02:00:00Z',
+          },
+          // 既查不到 GitLab 账号、作者名也对不上：只出现在集成 MR 里 → 无依据，剔除
+          {
+            id: 'b'.repeat(40),
+            author_email: '1455571451@qq.com',
+            author_name: 'junjie_xiang',
+            committed_date: '2026-09-16T02:00:00Z',
+          },
+        ],
+      },
+      [mrCommitsKey('kwork/manage/kdmanage-backend', 1794)]: {
+        body: [{
+          id: 'c'.repeat(40),
+          author_email: 'jin_gu@kingdee.com',
+          author_name: 'jin_gu',
+          committed_date: '2026-09-18T03:00:00Z',
+        }],
+      },
+      [emailOwnerKey('jin_gu@kingdee.com')]: { body: [{ id: 2956, username: 'jin_gu' }] },
+      [emailOwnerKey('hook_wang@kingdee.com')]: { body: [{ id: 2960, username: 'hook_wang' }] },
+      [emailOwnerKey('1455571451@qq.com')]: { body: [] },
+    })
+    const client = new GitLabReadonlyClient({
+      baseUrl: BASE, apiToken: 'test-token', fetchImpl: impl, now: () => NOW,
+    })
+    const result = await client.discoverAuthorCommitEmails({
+      gitlabUsername: 'jin_gu', lookbackDays: 365,
+    })
+
+    expect(result.candidates.map((candidate) => candidate.email)).toEqual(['jin_gu@kingdee.com'])
+    expect(result.candidates[0]?.match_reason).toBe('GITLAB_EMAIL_MATCH')
+    expect(result.candidates[0]?.commit_count).toBe(2)
+    expect(result.excludedCandidateCount).toBe(2)
+    expect(result.partial).toBe(false)
+  })
+
+  it('归属反查失败时不剔除也不放行别人的邮箱，只标 partial', async () => {
+    const { impl } = stubFetch({
+      '/api/v4/users?username=jin_gu': {
+        body: [{ id: 2956, username: 'jin_gu', name: 'jin_gu' }],
+      },
+      [mrListKey('kwork/manage/kdmanage-backend', '2956')]: {
+        body: [{ iid: 1796, updated_at: '2026-09-19T02:00:00Z', source_branch: 'feature_sit' }],
+      },
+      [mrListKey('kwork/manage/kdmanage-frontend', '2956')]: { body: [] },
+      [mrListKey('kwork/manage/tmanage-backend', '2956')]: { body: [] },
+      [mrListKey('kwork/manage/tmanage-frontend', '2956')]: { body: [] },
+      [mrCommitsKey('kwork/manage/kdmanage-backend', 1796)]: {
+        body: [
+          { id: 'a'.repeat(40), author_email: 'jin_gu@kingdee.com', author_name: 'jin_gu' },
+          { id: 'b'.repeat(40), author_email: 'hook_wang@kingdee.com', author_name: 'hook_wang' },
+        ],
+      },
+      // 两个 search 都没有路由 → 404 → 归属查不到
+    })
+    const client = new GitLabReadonlyClient({
+      baseUrl: BASE, apiToken: 'test-token', fetchImpl: impl, now: () => NOW,
+    })
+    const result = await client.discoverAuthorCommitEmails({
+      gitlabUsername: 'jin_gu', lookbackDays: 365,
+    })
+    // 查不到归属时只剩作者名判据：本人的留下，别人的照样进不来
+    expect(result.candidates.map((candidate) => candidate.email)).toEqual(['jin_gu@kingdee.com'])
+    expect(result.candidates[0]?.match_reason).toBe('AUTHOR_NAME_MATCH')
+    expect(result.excludedCandidateCount).toBe(1)
+    expect(result.partial).toBe(true)
   })
 
   it('大小写不同的用户名可以匹配，但必须是精确用户名而不是模糊命中', async () => {
@@ -220,6 +333,7 @@ describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
           committed_date: '2026-09-19T11:00:00+08:00',
         }],
       },
+      [emailOwnerKey('yuxuan.xue@kingdee.com')]: { body: [] },
     })
     const client = new GitLabReadonlyClient({
       baseUrl: BASE, apiToken: 'test-token', fetchImpl: impl, now: () => NOW,
@@ -252,6 +366,7 @@ describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
     routes[mrCommitsKey('kwork/manage/tmanage-backend', 4)] = {
       body: [{ id: '4'.repeat(40), author_email: 'newest@kingdee.com', committed_date: '2026-09-13T02:00:00Z' }],
     }
+    routes[emailOwnerKey('newest@kingdee.com')] = { body: [] }
     const { impl, calls } = stubFetch(routes)
     const client = new GitLabReadonlyClient({
       baseUrl: BASE, apiToken: 'test-token', fetchImpl: impl, now: () => NOW,
@@ -268,6 +383,7 @@ describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
       last_committed_at: '2026-09-14T02:00:00Z',
       repositories: { 'tmanage-backend': 2 },
       merge_request_refs: ['tmanage-backend!4', 'tmanage-backend!5'],
+      match_reason: 'SOLE_AUTHOR_IN_OWN_MERGE_REQUEST',
     }])
     expect(calls.filter((call) => call.includes('/commits?'))).toEqual([
       mrCommitsKey('kwork/manage/tmanage-backend', 5),

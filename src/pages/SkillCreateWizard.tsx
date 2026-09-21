@@ -192,6 +192,7 @@ export function SkillCreateWizard({
       }
       open={open}
       width={960}
+      centered
       className="skill-create-modal"
       onCancel={() => {
         if (step === 1 && skillId !== null) {

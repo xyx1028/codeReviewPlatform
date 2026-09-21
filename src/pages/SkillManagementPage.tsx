@@ -261,6 +261,18 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
     onError: (error: Error) => message.error(error.message),
   })
 
+  // 直接发布草稿里已通过校验、待发布的 upload —— 不必重新上传一遍 ZIP。
+  // 走的是同一个 publish action，只是 upload_id 来自 latest_upload 而不是本次会话的上传。
+  const publishDraftMutation = useMutation({
+    mutationFn: (uploadId: string) =>
+      adminPublishSkillVersion({ uploadId, acknowledgeScripts: true }),
+    onSuccess: (result) => {
+      message.success(`已发布 ${formatSkillVersion(result.version)}`)
+      invalidate()
+    },
+    onError: (error: Error) => message.error(error.message),
+  })
+
   const deleteMutation = useMutation({
     mutationFn: (skillId: string) => adminDeleteReviewSkill(skillId),
     onSuccess: (result) => {
@@ -427,6 +439,31 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
       fixed: 'right' as const,
       render: (_unused: unknown, row: ReviewSkillListItem) => (
         <Space size={4}>
+          {row.status === 'DRAFT' &&
+          row.latest_upload !== null &&
+          row.latest_upload.status === 'VALIDATED' ? (
+            <Button
+              size="small"
+              type="link"
+              className="table-action-link"
+              loading={publishDraftMutation.isPending}
+              onClick={() => {
+                const upload = row.latest_upload
+                if (upload === null) return
+                modal.confirm({
+                  title: `发布 ${row.name}？`,
+                  content: upload.contains_scripts
+                    ? '该技能包已通过校验，将发布为可用版本。注意：它包含 scripts/ 脚本文件，' +
+                      '拥有 bash 的 Agent 可以显式运行这些脚本。确认发布？'
+                    : '该技能包已通过校验，将发布为可用版本。发布后不可替换 ZIP，只能创建下一版本。',
+                  okText: '发布',
+                  onOk: () => publishDraftMutation.mutateAsync(upload.id),
+                })
+              }}
+            >
+              发布
+            </Button>
+          ) : null}
           <Button
             size="small"
             type="link"
@@ -610,6 +647,7 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
         open={detailSkill !== null}
         width={960}
         className="skill-detail-modal"
+        centered
         style={SKILL_MODAL_STYLE}
         styles={SKILL_MODAL_STYLES}
         footer={null}
@@ -691,6 +729,7 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
         open={publishSkill !== null}
         width={960}
         className="skill-publish-modal"
+        centered
         style={SKILL_MODAL_STYLE}
         styles={SKILL_MODAL_STYLES}
         onCancel={() => {
@@ -814,6 +853,7 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
         open={historySkillId !== null}
         width={960}
         className="skill-history-modal"
+        centered
         style={SKILL_MODAL_STYLE}
         styles={SKILL_MODAL_STYLES}
         footer={null}

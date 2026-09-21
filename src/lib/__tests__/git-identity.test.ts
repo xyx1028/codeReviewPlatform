@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  GIT_EMAIL_MATCH_REASON_META,
   GIT_IDENTITY_STATUS_META,
   describeGitEmailDiscoveryPhase,
   describeGitIdentityError,
@@ -135,6 +136,61 @@ describe('describeGitEmailDiscoveryPhase', () => {
     )
     expect(phase.kind).toBe('FAILED')
     expect(phase.hint).toContain('GitLab 上找不到这个用户名')
+  })
+
+  it('剔除了别人的邮箱时把数量说出来（V1.13.1）', () => {
+    const phase = describeGitEmailDiscoveryPhase(
+      discovery({
+        status: 'SUCCEEDED',
+        candidate_count: 1,
+        merge_request_count: 40,
+        excluded_candidate_count: 13,
+        gitlab_username: 'jin_gu',
+      }),
+      5000,
+    )
+    expect(phase.kind).toBe('DONE')
+    expect(phase.hint).toContain('1 个候选邮箱')
+    expect(phase.hint).toContain('已剔除 13 个不属于 jin_gu 的提交邮箱')
+  })
+
+  it('读到了 MR 但全被剔除时，不再笼统说"没提过合并申请"', () => {
+    const phase = describeGitEmailDiscoveryPhase(
+      discovery({
+        status: 'SUCCEEDED',
+        candidate_count: 0,
+        merge_request_count: 12,
+        excluded_candidate_count: 9,
+        gitlab_username: 'jin_gu',
+      }),
+      5000,
+    )
+    expect(phase.kind).toBe('DONE_EMPTY')
+    expect(phase.hint).toContain('12 个合并申请')
+    expect(phase.hint).toContain('都不属于这个 GitLab 用户')
+    expect(phase.hint).not.toContain('没有找到 jin_gu 提的合并申请')
+  })
+
+  it('旧数据没有剔除数时不编造这句话', () => {
+    const phase = describeGitEmailDiscoveryPhase(
+      discovery({ status: 'SUCCEEDED', candidate_count: 2, merge_request_count: 7 }), 5000,
+    )
+    expect(phase.hint).not.toContain('已剔除')
+  })
+})
+
+describe('GIT_EMAIL_MATCH_REASON_META', () => {
+  it('四个依据与 Worker/数据库的取值一一对应，每个都有可核对的说明', () => {
+    expect(Object.keys(GIT_EMAIL_MATCH_REASON_META).sort()).toEqual([
+      'AUTHOR_NAME_MATCH',
+      'EMAIL_LOCAL_MATCH',
+      'GITLAB_EMAIL_MATCH',
+      'SOLE_AUTHOR_IN_OWN_MERGE_REQUEST',
+    ])
+    for (const meta of Object.values(GIT_EMAIL_MATCH_REASON_META)) {
+      expect(meta.label.length).toBeGreaterThan(0)
+      expect(meta.hint.length).toBeGreaterThan(0)
+    }
   })
 })
 

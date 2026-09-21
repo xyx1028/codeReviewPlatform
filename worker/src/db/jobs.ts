@@ -897,6 +897,8 @@ export class JobsDb {
     mergeRequestCount: number
     partial: boolean
     candidates: readonly DiscoveredCommitEmail[]
+    /** 读到了但归属于别人的邮箱个数（集成 MR 里别人的提交）。 */
+    excludedCandidateCount: number
   }): Promise<{ candidateCount: number }> {
     const data = await this.db.rpc<unknown>('complete_git_email_discovery', {
       p_discovery_id: input.discoveryId,
@@ -907,6 +909,7 @@ export class JobsDb {
       p_merge_request_count: input.mergeRequestCount,
       p_partial: input.partial,
       p_candidates: input.candidates,
+      p_excluded_candidate_count: input.excludedCandidateCount,
     })
     const row = unwrapMaybeObject<Record<string, unknown>>(data)
     return { candidateCount: Number(row?.candidate_count ?? 0) }

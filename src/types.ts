@@ -1272,6 +1272,16 @@ export interface MyGitIdentityProfile {
 
 export type GitEmailDiscoveryStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
 
+/**
+ * 一个候选邮箱被判定为"属于这个 GitLab 用户"的依据。
+ * null 只会出现在 V1.13.1 之前的 Worker 写下的旧候选行上。
+ */
+export type GitEmailCandidateMatchReason =
+  | 'GITLAB_EMAIL_MATCH'
+  | 'AUTHOR_NAME_MATCH'
+  | 'EMAIL_LOCAL_MATCH'
+  | 'SOLE_AUTHOR_IN_OWN_MERGE_REQUEST'
+
 /** 从本人 MR 里反查出来的一个提交邮箱候选。浏览器拿得到自己的明文邮箱，但拿不到指纹。 */
 export interface GitEmailDiscoveryCandidate {
   candidate_id: string
@@ -1287,6 +1297,8 @@ export interface GitEmailDiscoveryCandidate {
   merge_request_refs: string[]
   /** 已经绑定在某个人名下（可能是你自己，也可能是别人）。 */
   already_bound: boolean
+  /** 它为什么被认为是这个 GitLab 用户的邮箱。 */
+  match_reason: GitEmailCandidateMatchReason | null
 }
 
 export interface GitEmailDiscovery {
@@ -1299,6 +1311,11 @@ export interface GitEmailDiscovery {
   lookback_days: number
   merge_request_count: number
   candidate_count: number
+  /**
+   * 读到了但归属于别人的提交邮箱个数：他自己提的集成 MR（feature_sit -> release 之类）
+   * 里带着全组人的提交，这些邮箱不是他的，界面照实显示剔除了多少。
+   */
+  excluded_candidate_count: number
   /** 有仓库没查到或结果被截断：界面必须照实说"可能不全"。 */
   partial: boolean
   error_code: string | null

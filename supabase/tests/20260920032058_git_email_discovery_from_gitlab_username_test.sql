@@ -285,7 +285,7 @@ begin
     not has_function_privilege('anon','public.enqueue_my_git_email_discovery(text,integer)','EXECUTE')
     and not has_function_privilege('anon','public.get_my_git_email_discovery(uuid)','EXECUTE')
     and not has_function_privilege('authenticated',
-      'public.complete_git_email_discovery(uuid,text,uuid,text,text,integer,boolean,jsonb)','EXECUTE'),
+      'public.complete_git_email_discovery(uuid,text,uuid,text,text,integer,boolean,jsonb,integer)','EXECUTE'),
     'anon is locked out and the worker callbacks stay service-role only');
   perform pg_temp.assert(
     (select count(*) from pg_class where relname in

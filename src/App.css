@@ -2306,12 +2306,15 @@ a.dashboard-distribution-item:focus-visible {
   padding-left: 18px;
 }
 
-/* 技能管理弹窗统一为固定画布：标题和操作区固定，内容在主体区域内滚动。 */
+/* 技能管理弹窗统一为固定画布：标题和操作区固定，内容在主体区域内滚动。
+   注意：antd 6 里 .ant-modal 是对话框根，居中/定位可能让固定 height 失效，导致内容
+   把弹框撑出视口、footer（下一步/发布按钮）被推到屏幕外。因此这里用 max-height 让弹框
+   随内容自适应但不超过视口，真正的滚动兜底放在下面的 .ant-modal-body 上；垂直居中交给
+   Modal 的 centered（.ant-modal-wrap 的 flex 居中），不要用固定 top，否则内容多时会偏上。 */
 .skill-create-modal .ant-modal,
 .skill-detail-modal .ant-modal,
 .skill-publish-modal .ant-modal,
 .skill-history-modal .ant-modal {
-  height: 660px !important;
   max-height: calc(100vh - 80px) !important;
 }
 
@@ -2322,8 +2325,7 @@ a.dashboard-distribution-item:focus-visible {
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
-  height: 100% !important;
-  max-height: 100%;
+  max-height: calc(100vh - 80px);
   overflow: hidden;
   border: 1px solid #dbeafe;
   border-radius: 18px;
@@ -2356,6 +2358,9 @@ a.dashboard-distribution-item:focus-visible {
 .skill-history-modal .ant-modal-body {
   flex: 1 1 auto;
   min-height: 0;
+  /* 兜底：即使外层高度链未生效，body 也绝不超过视口，超出即在自身滚动，
+     从而 footer（下一步/发布）始终留在屏幕内。约 200px 留给 header + footer + steps。 */
+  max-height: calc(100vh - 200px);
   padding: 20px 28px;
   overflow: auto;
   overscroll-behavior: contain;

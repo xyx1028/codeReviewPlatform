@@ -52,6 +52,18 @@ export interface CollectRepositoryMergeRequestsInput {
   storyCodes: readonly string[]
 }
 
+/**
+ * V1.13.1：一个候选邮箱被判定为"属于这个 GitLab 用户"的依据，按强度从高到低。
+ *
+ * 只有可核对的事实能当依据：GitLab 账号归属、提交里的作者名、邮箱前缀，以及
+ * "在他自己提的非集成 MR 里是唯一作者"。没有依据的邮箱一律不进候选。
+ */
+export type DiscoveredEmailMatchReason =
+  | 'GITLAB_EMAIL_MATCH'
+  | 'AUTHOR_NAME_MATCH'
+  | 'EMAIL_LOCAL_MATCH'
+  | 'SOLE_AUTHOR_IN_OWN_MERGE_REQUEST'
+
 /** V1.13：从某个人自己提的 MR 里反查出来的一个提交邮箱候选（明文只存在于 Worker 内存）。 */
 export interface DiscoveredCommitEmail {
   email: string
@@ -60,6 +72,7 @@ export interface DiscoveredCommitEmail {
   last_committed_at: string | null
   repositories: Record<string, number>
   merge_request_refs: string[]
+  match_reason: DiscoveredEmailMatchReason
 }
 
 export interface DiscoverAuthorCommitEmailsInput {
@@ -75,6 +88,11 @@ export interface DiscoverAuthorCommitEmailsResult {
   /** 有仓库读失败、MR 或候选被截断时为 true —— 界面必须照实说"结果可能不全"。 */
   partial: boolean
   candidates: DiscoveredCommitEmail[]
+  /**
+   * 读到了但**不属于这个 GitLab 用户**的邮箱个数（集成 MR 里别人的提交）。
+   * 界面照实显示这个数字，别让人以为平台只读到了一个邮箱。
+   */
+  excludedCandidateCount: number
 }
 
 export interface GitLabReadonlyClientOptions {
@@ -122,6 +140,24 @@ const MAX_MERGE_REQUESTS = 2_000
 const MAX_DISCOVERED_EMAILS = 50
 const GITLAB_USERNAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,48}$/
 const EMAIL_SHAPE_PATTERN = /^[^@\s]{1,64}@[^@\s]{1,255}$/
+/**
+ * 源分支是这些长期共享分支的 MR 是**集成 MR**：它携带的提交属于全组人，
+ * 不能因为"是本人提的 MR"就把里面的邮箱当成本人的。
+ */
+const SHARED_BRANCHES: ReadonlySet<string> = new Set([
+  'feature_dev',
+  'feature_sit',
+  'release',
+  'master',
+  'main',
+  'develop',
+])
+
+/** 归一化身份文本：`Jin Gu` / `jin.gu` / `jin_gu` 都变成 `jingu`；中文按原样保留。 */
+function normalizeIdentityText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '')
+}
+
 
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0
@@ -199,6 +235,8 @@ export class GitLabReadonlyClient {
   private readonly perPage: number
   private readonly fetchImpl: typeof fetch
   private readonly now: () => Date
+  /** 邮箱 → GitLab 账号归属的一次性缓存（同一次反查里同一个邮箱只查一次）。 */
+  private readonly emailOwnerCache = new Map<string, { userId: number | null; failed: boolean }>()
 
   constructor(options: GitLabReadonlyClientOptions) {
     this.baseUrl = normalizeGitLabBaseUrl(options.baseUrl)
@@ -413,6 +451,8 @@ export class GitLabReadonlyClient {
       repository: RepositoryName
       iid: number
       updatedAt: string
+      /** 源分支是共享分支 → 这是集成 MR，里面的提交属于全组人。 */
+      integration: boolean
     }
     const authored: AuthoredMergeRequest[] = []
     let partial = false
@@ -435,10 +475,12 @@ export class GitLabReadonlyClient {
           const row = raw as Record<string, unknown>
           const iid = Number(row.iid)
           if (!Number.isSafeInteger(iid) || iid <= 0) continue
+          const sourceBranch = typeof row.source_branch === 'string' ? row.source_branch.trim() : ''
           authored.push({
             repository,
             iid,
             updatedAt: typeof row.updated_at === 'string' ? row.updated_at : '',
+            integration: SHARED_BRANCHES.has(sourceBranch),
           })
         }
       } catch {
@@ -459,6 +501,8 @@ export class GitLabReadonlyClient {
       lastCommittedAt: string | null
       repositories: Map<RepositoryName, Set<string>>
       mergeRequestRefs: Set<string>
+      /** 在本人提的某个**非集成** MR 里是唯一的作者邮箱。 */
+      soleAuthorInOwnMergeRequest: boolean
     }
     const byEmail = new Map<string, Aggregate>()
 
@@ -473,6 +517,7 @@ export class GitLabReadonlyClient {
         partial = true
         continue
       }
+      const emailsInMergeRequest = new Set<string>()
       for (const raw of commits) {
         if (raw === null || typeof raw !== 'object') continue
         const commit = raw as Record<string, unknown>
@@ -493,9 +538,11 @@ export class GitLabReadonlyClient {
             lastCommittedAt: null,
             repositories: new Map<RepositoryName, Set<string>>(),
             mergeRequestRefs: new Set<string>(),
+            soleAuthorInOwnMergeRequest: false,
           }
           byEmail.set(email, aggregate)
         }
+        emailsInMergeRequest.add(email)
         const authorName = typeof commit.author_name === 'string' ? commit.author_name.trim() : ''
         if (authorName !== '' && aggregate.authorNames.size < 10) {
           aggregate.authorNames.add(authorName.slice(0, 64))
@@ -512,10 +559,54 @@ export class GitLabReadonlyClient {
           aggregate.mergeRequestRefs.add(`${mergeRequest.repository}!${mergeRequest.iid}`)
         }
       }
+      // 自己提的非集成 MR 里如果全部提交只有一个作者邮箱，那个邮箱几乎必然是他自己的 ——
+      // 这是"作者名和用户名对不上、邮箱又不在 GitLab 上"的人唯一的兜底证据。
+      if (emailsInMergeRequest.size === 1 && !mergeRequest.integration) {
+        byEmail.get([...emailsInMergeRequest][0])!.soleAuthorInOwnMergeRequest = true
+      }
     }
 
-    const candidates: DiscoveredCommitEmail[] = [...byEmail.values()]
-      .map((aggregate) => ({
+    // 归属判定：集成 MR（feature_sit -> release 之类）里带着全组人的提交，
+    // "这个 MR 是他提的"不等于"这些提交是他写的"。所以逐个邮箱要求可核对的依据。
+    const identityTokens = new Set(
+      [username, displayName ?? '']
+        .map((value) => normalizeIdentityText(value))
+        .filter((value) => value !== ''),
+    )
+    const ranked = [...byEmail.values()].sort(
+      (left, right) => right.shas.size - left.shas.size || compareText(left.email, right.email),
+    )
+    const candidates: DiscoveredCommitEmail[] = []
+    let excludedCandidateCount = 0
+
+    for (const aggregate of ranked) {
+      if (candidates.length >= MAX_DISCOVERED_EMAILS) {
+        // 数据库侧一次最多接收 50 条候选；超出的都是尾部低频邮箱，截断并标 partial。
+        partial = true
+        break
+      }
+      const owner = await this.resolveEmailOwner(aggregate.email)
+      if (owner.failed) partial = true
+      let reason: DiscoveredEmailMatchReason | null = null
+      if (owner.userId !== null && owner.userId === userId) {
+        reason = 'GITLAB_EMAIL_MATCH'
+      } else if (owner.userId !== null) {
+        // GitLab 自己说这个邮箱属于另一个账号 —— 这是最硬的反证，其余判据不再看。
+        reason = null
+      } else if ([...aggregate.authorNames].some(
+        (name) => identityTokens.has(normalizeIdentityText(name)),
+      )) {
+        reason = 'AUTHOR_NAME_MATCH'
+      } else if (identityTokens.has(normalizeIdentityText(aggregate.email.split('@')[0] ?? ''))) {
+        reason = 'EMAIL_LOCAL_MATCH'
+      } else if (aggregate.soleAuthorInOwnMergeRequest) {
+        reason = 'SOLE_AUTHOR_IN_OWN_MERGE_REQUEST'
+      }
+      if (reason === null) {
+        excludedCandidateCount += 1
+        continue
+      }
+      candidates.push({
         email: aggregate.email,
         author_names: [...aggregate.authorNames].sort(compareText),
         commit_count: aggregate.shas.size,
@@ -526,18 +617,53 @@ export class GitLabReadonlyClient {
             .sort((left, right) => compareText(left[0], right[0])),
         ),
         merge_request_refs: [...aggregate.mergeRequestRefs].sort(compareText),
-      }))
-      .sort((left, right) => right.commit_count - left.commit_count || compareText(left.email, right.email))
-    // 数据库侧一次最多接收 50 条候选；超出的都是尾部低频邮箱，截断并标 partial。
-    if (candidates.length > MAX_DISCOVERED_EMAILS) partial = true
+        match_reason: reason,
+      })
+    }
 
     return {
       gitlabUserId: String(userId),
       gitlabDisplayName: displayName,
       mergeRequestCount: selected.length,
       partial,
-      candidates: candidates.slice(0, MAX_DISCOVERED_EMAILS),
+      candidates,
+      excludedCandidateCount,
     }
+  }
+
+  /**
+   * 用 GitLab 自己的账号库判断一个提交邮箱归谁。
+   *
+   * `GET /users?search=<邮箱>` 是子串搜索，可能命中同名的人，所以只在
+   * "某个返回账号的用户名等于邮箱前缀"或"只返回一个账号"时才承认这条归属；
+   * 否则当作查不到（`userId=null`），交给作者名等较弱的判据。
+   * 请求失败时也只是查不到 —— 不能因为一次超时就把别人的邮箱放进候选，也不能
+   * 因此把本人的邮箱剔掉，所以调用方会把 `failed` 反映成 `partial`。
+   */
+  private async resolveEmailOwner(
+    email: string,
+  ): Promise<{ userId: number | null; failed: boolean }> {
+    const cached = this.emailOwnerCache.get(email)
+    if (cached !== undefined) return cached
+    const localPart = normalizeIdentityText(email.split('@')[0] ?? '')
+    let resolved: { userId: number | null; failed: boolean }
+    try {
+      const rows = await this.paginate('/api/v4/users', { search: email })
+      const users = rows
+        .filter((raw): raw is Record<string, unknown> => raw !== null && typeof raw === 'object')
+        .map((raw) => ({
+          id: Number(raw.id),
+          username: typeof raw.username === 'string' ? raw.username : '',
+        }))
+        .filter((user) => Number.isSafeInteger(user.id) && user.id > 0)
+      const exact = users.find((user) => normalizeIdentityText(user.username) === localPart)
+      const single = users.length === 1 ? users[0] : undefined
+      resolved = { userId: (exact ?? single)?.id ?? null, failed: false }
+    } catch {
+      resolved = { userId: null, failed: true }
+    }
+    this.emailOwnerCache.set(email, resolved)
+    return resolved
   }
 
   private async paginate(path: string, query: Record<string, string> = {}): Promise<unknown[]> {

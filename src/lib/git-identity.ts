@@ -1,4 +1,4 @@
-import type { DeveloperIdentityStatus, GitEmailDiscovery } from '../types'
+import type { DeveloperIdentityStatus, GitEmailCandidateMatchReason, GitEmailDiscovery } from '../types'
 
 /**
  * Git 身份状态的展示元数据。
@@ -10,6 +10,37 @@ export const GIT_IDENTITY_STATUS_META: Record<DeveloperIdentityStatus, { label: 
   UNVERIFIED: { label: '待确认', color: 'orange' },
   CONFLICT: { label: '冲突', color: 'red' },
   DISABLED: { label: '已停用' },
+}
+
+/**
+ * 候选邮箱的归属依据。
+ *
+ * 显示它是为了让人能自己核对"凭什么说这是我的邮箱"，而不是让平台单方面宣布结果。
+ * 依据由 Worker 判定并落库；这里只翻译，不重新推断。
+ */
+export const GIT_EMAIL_MATCH_REASON_META: Record<
+  GitEmailCandidateMatchReason,
+  { label: string; hint: string; color?: string }
+> = {
+  GITLAB_EMAIL_MATCH: {
+    label: 'GitLab 账号邮箱',
+    hint: 'GitLab 上这个邮箱就属于该账号。',
+    color: 'green',
+  },
+  AUTHOR_NAME_MATCH: {
+    label: '提交作者名一致',
+    hint: '提交里的 git config user.name 与该 GitLab 用户名/显示名一致。',
+    color: 'blue',
+  },
+  EMAIL_LOCAL_MATCH: {
+    label: '邮箱前缀一致',
+    hint: '邮箱 @ 前面的部分与该 GitLab 用户名/显示名一致。',
+    color: 'blue',
+  },
+  SOLE_AUTHOR_IN_OWN_MERGE_REQUEST: {
+    label: '本人合并申请的唯一作者',
+    hint: '在他自己提的非集成合并申请里，全部提交只有这一个作者邮箱。',
+  },
 }
 
 /**
@@ -111,7 +142,8 @@ export type GitEmailDiscoveryPhase =
  */
 export function describeGitEmailDiscoveryPhase(
   discovery: Pick<GitEmailDiscovery, 'status' | 'claimed' | 'candidate_count' | 'merge_request_count'
-    | 'partial' | 'error_code' | 'error_message' | 'gitlab_username' | 'lookback_days'> | null,
+    | 'partial' | 'error_code' | 'error_message' | 'gitlab_username' | 'lookback_days'>
+    & Partial<Pick<GitEmailDiscovery, 'excluded_candidate_count'>> | null,
   elapsedMs: number,
 ): GitEmailDiscoveryPhase {
   if (discovery === null) return { kind: 'IDLE', hint: '' }
@@ -123,7 +155,20 @@ export function describeGitEmailDiscoveryPhase(
   }
   if (discovery.status === 'SUCCEEDED') {
     const partialHint = discovery.partial ? '；部分仓库或较早的记录没能全部读到，结果可能不全' : ''
+    const excluded = discovery.excluded_candidate_count ?? 0
+    // 剔除数必须说出来：否则"我明明是 100 个 MR 的审核人，怎么只有一个邮箱"没人能自己想明白。
+    const excludedHint = excluded > 0
+      ? `；已剔除 ${excluded} 个不属于 ${discovery.gitlab_username} 的提交邮箱`
+        + '（你提的集成合并申请里带着别人的提交）'
+      : ''
     if (discovery.candidate_count === 0) {
+      if (discovery.merge_request_count > 0) {
+        return {
+          kind: 'DONE_EMPTY',
+          hint: `读了 ${discovery.gitlab_username} 提的 ${discovery.merge_request_count} 个合并申请，`
+            + `但里面的提交都不属于这个 GitLab 用户${excludedHint}${partialHint}。`,
+        }
+      }
       return {
         kind: 'DONE_EMPTY',
         hint: `在四个仓库近 ${discovery.lookback_days} 天里没有找到 ${discovery.gitlab_username} 提的合并申请`
@@ -132,7 +177,8 @@ export function describeGitEmailDiscoveryPhase(
     }
     return {
       kind: 'DONE',
-      hint: `从 ${discovery.merge_request_count} 个合并申请里找到 ${discovery.candidate_count} 个候选邮箱${partialHint}。`,
+      hint: `从 ${discovery.merge_request_count} 个合并申请里找到 ${discovery.candidate_count} 个候选邮箱`
+        + `${excludedHint}${partialHint}。`,
     }
   }
   if (discovery.status === 'RUNNING' || discovery.claimed) {

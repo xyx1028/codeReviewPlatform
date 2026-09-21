@@ -15,7 +15,7 @@ docker pull "$IMAGE_REF" \
 强制
 cd ~/apps/codeReviewPlatform
 
-IMAGE_REF='mirrors.kingdee.com/kingdee/lingee/patch/kwork-code-review:release_202609202021162'
+IMAGE_REF='mirrors.kingdee.com/kingdee/lingee/patch/kwork-code-review:release_202609210937465'
 
 docker pull "$IMAGE_REF" \
   && test "$(docker image inspect "$IMAGE_REF" --format '{{.Os}}/{{.Architecture}}')" = 'linux/amd64' \
