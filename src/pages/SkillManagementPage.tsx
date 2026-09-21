@@ -19,7 +19,7 @@ import {
   Upload,
 } from 'antd'
 import type { UploadFile } from 'antd/es/upload/interface'
-import { useMemo, useState } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   adminCreateSkillDownloadUrl,
@@ -77,6 +77,31 @@ const SKILL_MODAL_STYLES = {
   },
 } as const
 
+// 详情弹窗内容分两段：顶部信息区固定，文件列表区独立滚动。
+// 这样切换文件列表页码时，技能元信息与「待发布/当前版本」状态块不会跟着滚动或移动。
+const SKILL_DETAIL_BODY_STYLE = {
+  height: '100%',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 16,
+  minHeight: 0,
+  overflow: 'hidden',
+} as const
+
+const SKILL_DETAIL_HEADER_STYLE = {
+  flex: '0 0 auto',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 16,
+} as const
+
+const SKILL_DETAIL_SCROLL_STYLE = {
+  flex: '1 1 auto',
+  minHeight: 0,
+  // 表格用 scroll.y 自己内部滚动，这里不再叠加一层滚动条（否则最右侧会多出一条外层滚动条）。
+  overflow: 'hidden',
+} as const
+
 export function formatBytes(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined) return '—'
   if (bytes < 1024) return `${bytes} B`
@@ -123,53 +148,79 @@ function CapacityBar({
 
 /** 服务端解析出来的文件树。展示 hash / MIME / 角色 / 大小，不展示任何文件正文。 */
 export function BundleFileTree({ files }: { files: SkillBundleFile[] }) {
+  const paginated = files.length > 10
+  const wrapperRef = useRef<HTMLDivElement>(null)
+  // 表体滚动高度。设了 scroll.y 后 antd 会把表头钉在顶部、表体内部滚动，分页行留在表格下方
+  // （不进滚动区）。表格内部这一条是唯一的滚动条，外层文件列表区不再单独出滚动条。
+  const [scrollY, setScrollY] = useState<number | undefined>(undefined)
+
+  useLayoutEffect(() => {
+    const el = wrapperRef.current
+    if (el === null) return
+    const compute = () => {
+      const headerH = (el.querySelector('.ant-table-thead') as HTMLElement | null)?.offsetHeight ?? 39
+      const pagEl = el.querySelector('.ant-table-pagination') as HTMLElement | null
+      // 分页行留在滚动区之外，把它的高度（含 16px 外边距）从可用空间里扣掉，让它正好贴在底部。
+      const pagH = pagEl === null ? 0 : pagEl.offsetHeight + 16
+      const available = el.clientHeight - headerH - pagH
+      setScrollY(available > 120 ? available : 120)
+    }
+    compute()
+    const ro = new ResizeObserver(compute)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [files.length])
+
   return (
-    <Table<SkillBundleFile>
-      dataSource={files}
-      rowKey="path"
-      size="small"
-      pagination={
-        files.length > 10
-          ? {
-              size: 'small',
-              defaultPageSize: 10,
-              showSizeChanger: true,
-              pageSizeOptions: [10, 20, 50],
-              showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 个文件`,
-            }
-          : false
-      }
-      columns={[
-        { title: '路径', dataIndex: 'path', ellipsis: true },
-        {
-          title: '角色',
-          dataIndex: 'role',
-          width: 110,
-          render: (role: SkillFileRole) => (
-            <Tag color={role === 'SCRIPT' ? 'red' : role === 'ENTRY' ? 'blue' : 'default'}>
-              {ROLE_LABELS[role]}
-            </Tag>
-          ),
-        },
-        { title: 'MIME', dataIndex: 'mediaType', width: 150 },
-        {
-          title: '大小',
-          dataIndex: 'sizeBytes',
-          width: 100,
-          render: (value: number) => formatBytes(value),
-        },
-        {
-          title: 'SHA-256',
-          dataIndex: 'sha256',
-          width: 160,
-          render: (value: string) => (
-            <Tooltip title={value}>
-              <Text code>{value.replace('sha256:', '').slice(0, 12)}…</Text>
-            </Tooltip>
-          ),
-        },
-      ]}
-    />
+    <div ref={wrapperRef} style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <Table<SkillBundleFile>
+        dataSource={files}
+        rowKey="path"
+        size="small"
+        scroll={{ y: scrollY }}
+        pagination={
+          paginated
+            ? {
+                size: 'small',
+                defaultPageSize: 10,
+                showSizeChanger: true,
+                pageSizeOptions: [10, 20, 50],
+                showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 个文件`,
+              }
+            : false
+        }
+        columns={[
+          { title: '路径', dataIndex: 'path', ellipsis: true },
+          {
+            title: '角色',
+            dataIndex: 'role',
+            width: 110,
+            render: (role: SkillFileRole) => (
+              <Tag color={role === 'SCRIPT' ? 'red' : role === 'ENTRY' ? 'blue' : 'default'}>
+                {ROLE_LABELS[role]}
+              </Tag>
+            ),
+          },
+          { title: 'MIME', dataIndex: 'mediaType', width: 150 },
+          {
+            title: '大小',
+            dataIndex: 'sizeBytes',
+            width: 100,
+            render: (value: number) => formatBytes(value),
+          },
+          {
+            title: 'SHA-256',
+            dataIndex: 'sha256',
+            width: 160,
+            render: (value: string) => (
+              <Tooltip title={value}>
+                <Text code>{value.replace('sha256:', '').slice(0, 12)}…</Text>
+              </Tooltip>
+            ),
+          },
+        ]}
+      />
+    </div>
   )
 }
 
@@ -657,70 +708,80 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
         {detailQuery.isLoading ? (
           <Text type="secondary">加载中…</Text>
         ) : detailSkill === null ? null : (
-          <Space direction="vertical" size="middle" className="full-width">
-            <Descriptions size="small" column={3} bordered>
-              <Descriptions.Item label="技能编码">
-                <Text code>{detailSkill.name}</Text>
-              </Descriptions.Item>
-              <Descriptions.Item label="显示名称">{detailSkill.display_name}</Descriptions.Item>
-              <Descriptions.Item label="状态">
-                <Tag color={STATUS_LABELS[detailSkill.status].color}>
-                  {STATUS_LABELS[detailSkill.status].text}
-                </Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="当前版本">
-                {detailSkill.current_version === null ? '—' : formatSkillVersion(detailSkill.current_version)}
-              </Descriptions.Item>
-              <Descriptions.Item label="文件数">{detailSkill.file_count ?? '—'}</Descriptions.Item>
-              <Descriptions.Item label="文件大小">
-                {formatBytes(detailSkill.archive_size_bytes)}
-              </Descriptions.Item>
-            </Descriptions>
+          <div style={SKILL_DETAIL_BODY_STYLE}>
+            {/* 顶部信息区固定：技能元信息 + 待发布/当前版本状态。切换文件列表页码时它不参与滚动、不移动。 */}
+            <div style={SKILL_DETAIL_HEADER_STYLE}>
+              <Descriptions size="small" column={3} bordered>
+                <Descriptions.Item label="技能编码">
+                  <Text code>{detailSkill.name}</Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="显示名称">{detailSkill.display_name}</Descriptions.Item>
+                <Descriptions.Item label="状态">
+                  <Tag color={STATUS_LABELS[detailSkill.status].color}>
+                    {STATUS_LABELS[detailSkill.status].text}
+                  </Tag>
+                </Descriptions.Item>
+                <Descriptions.Item label="当前版本">
+                  {detailSkill.current_version === null ? '—' : formatSkillVersion(detailSkill.current_version)}
+                </Descriptions.Item>
+                <Descriptions.Item label="文件数">{detailSkill.file_count ?? '—'}</Descriptions.Item>
+                <Descriptions.Item label="文件大小">
+                  {formatBytes(detailSkill.archive_size_bytes)}
+                </Descriptions.Item>
+              </Descriptions>
 
-            {detailSkill.latest_upload !== null ? (
-              <>
-                <Text strong>待发布的技能包</Text>
-                <Descriptions size="small" column={3} bordered>
-                  <Descriptions.Item label="状态">{detailSkill.latest_upload.status}</Descriptions.Item>
-                  <Descriptions.Item label="文件数">
-                    {detailSkill.latest_upload.file_count ?? '—'}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="文件大小">
-                    {formatBytes(detailSkill.latest_upload.archive_size_bytes)}
-                  </Descriptions.Item>
-                </Descriptions>
-                {detailSkill.latest_upload.error_code !== null ? (
-                  <Alert
-                    type="error"
-                    showIcon
-                    message="校验未通过"
-                    description={detailSkill.latest_upload.error_message}
-                  />
-                ) : null}
-                {detailSkill.latest_upload.bundle_manifest !== null ? (
+              {detailSkill.latest_upload !== null ? (
+                <>
+                  <Text strong>待发布的技能包</Text>
+                  <Descriptions size="small" column={3} bordered>
+                    <Descriptions.Item label="状态">{detailSkill.latest_upload.status}</Descriptions.Item>
+                    <Descriptions.Item label="文件数">
+                      {detailSkill.latest_upload.file_count ?? '—'}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="文件大小">
+                      {formatBytes(detailSkill.latest_upload.archive_size_bytes)}
+                    </Descriptions.Item>
+                  </Descriptions>
+                  {detailSkill.latest_upload.error_code !== null ? (
+                    <Alert
+                      type="error"
+                      showIcon
+                      message="校验未通过"
+                      description={detailSkill.latest_upload.error_message}
+                    />
+                  ) : null}
+                </>
+              ) : detailQuery.data?.versions[0] !== undefined ? (
+                <>
+                  <Text strong>当前版本文件</Text>
+                  <Descriptions size="small" column={3} bordered>
+                    <Descriptions.Item label="版本">
+                      {formatSkillVersion(detailQuery.data.versions[0].version)}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="文件数">
+                      {detailQuery.data.versions[0].file_count}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="文件大小">
+                      {formatBytes(detailQuery.data.versions[0].archive_size_bytes)}
+                    </Descriptions.Item>
+                  </Descriptions>
+                </>
+              ) : null}
+            </div>
+
+            {/* 文件列表区独立滚动：只有它随页码切换，顶部信息区保持不动。 */}
+            <div style={SKILL_DETAIL_SCROLL_STYLE}>
+              {detailSkill.latest_upload !== null ? (
+                detailSkill.latest_upload.bundle_manifest !== null ? (
                   <BundleFileTree files={detailSkill.latest_upload.bundle_manifest.files} />
-                ) : null}
-              </>
-            ) : detailQuery.data?.versions[0] !== undefined ? (
-              <>
-                <Text strong>当前版本文件</Text>
-                <Descriptions size="small" column={3} bordered>
-                  <Descriptions.Item label="版本">
-                    {formatSkillVersion(detailQuery.data.versions[0].version)}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="文件数">
-                    {detailQuery.data.versions[0].file_count}
-                  </Descriptions.Item>
-                  <Descriptions.Item label="文件大小">
-                    {formatBytes(detailQuery.data.versions[0].archive_size_bytes)}
-                  </Descriptions.Item>
-                </Descriptions>
+                ) : null
+              ) : detailQuery.data?.versions[0] !== undefined ? (
                 <BundleFileTree files={detailQuery.data.versions[0].bundle_manifest.files} />
-              </>
-            ) : (
-              <Empty description="暂未上传技能包" />
-            )}
-          </Space>
+              ) : (
+                <Empty description="暂未上传技能包" />
+              )}
+            </div>
+          </div>
         )}
       </Modal>
 
