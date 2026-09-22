@@ -8,6 +8,7 @@
  */
 
 import { spawn, type SpawnOptions } from 'node:child_process'
+import { StringDecoder } from 'node:string_decoder'
 
 export interface RunResult {
   stdout: string
@@ -70,6 +71,11 @@ export function runCommand(
     let killed = false
     let outLen = 0
     let errLen = 0
+    // Chunk boundaries fall on arbitrary bytes. Decoding each Buffer on its own
+    // would turn a multi-byte UTF-8 sequence split across two chunks into U+FFFD,
+    // which silently corrupts non-ASCII file paths and commit messages.
+    const outDecoder = new StringDecoder('utf8')
+    const errDecoder = new StringDecoder('utf8')
 
     const timer = setTimeout(() => {
       killed = true
@@ -78,11 +84,13 @@ export function runCommand(
 
     child.stdout?.on('data', (d: Buffer) => {
       outLen += d.length
-      if (outLen <= maxBuffer) stdout += d.toString('utf8')
+      const text = outDecoder.write(d)
+      if (outLen <= maxBuffer) stdout += text
     })
     child.stderr?.on('data', (d: Buffer) => {
       errLen += d.length
-      if (errLen <= maxBuffer) stderr += d.toString('utf8')
+      const text = errDecoder.write(d)
+      if (errLen <= maxBuffer) stderr += text
     })
     child.on('error', (err) => {
       clearTimeout(timer)
@@ -90,6 +98,8 @@ export function runCommand(
     })
     child.on('close', (code) => {
       clearTimeout(timer)
+      if (outLen <= maxBuffer) stdout += outDecoder.end()
+      if (errLen <= maxBuffer) stderr += errDecoder.end()
       if (killed) {
         reject(new SpawnError(`command timed out after ${timeoutMs}ms`, -1, stderr))
         return

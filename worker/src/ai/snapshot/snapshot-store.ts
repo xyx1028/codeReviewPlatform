@@ -382,6 +382,10 @@ export class SnapshotStore {
     const diff = await runCommand(
       'git',
       [
+        // core.quotepath=false keeps non-ASCII paths readable in the patch headers.
+        // Otherwise the agent reads `"a/docs/ERP\347\247\237....md"` and copies that
+        // escaped form into evidence, which no longer matches the numstat path.
+        '-c', 'core.quotepath=false',
         'show', '--format=', '--no-ext-diff', '--no-textconv', '--unified=3', '--no-renames',
         commitSha, '--', ...selectedFiles.map((file) => file.path),
       ],

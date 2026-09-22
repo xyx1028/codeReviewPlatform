@@ -113,6 +113,18 @@ export const analysisErrorCodeMeta: Record<string, AnalysisErrorMeta> = {
     suggestion: '恢复代码缓存或 GitLab 连接后，按原 Commit 重试。',
     retryable: true,
   },
+  COMMIT_MANIFEST_INVALID: {
+    title: '提交清单校验失败',
+    reason: 'Worker 从 Git 读出的提交/文件清单不满足规范化要求（最常见是文件路径被 Git 转义或含不安全字符）。',
+    suggestion: '展开技术详情看被拒绝的具体路径；若为非 ASCII 文件名，需升级到修复了路径读取的 Worker 后重试。',
+    retryable: false,
+  },
+  COMMIT_MANIFEST_INCOMPLETE: {
+    title: '提交历史枚举不完整',
+    reason: '在允许的加深范围内没能取到完整的评审区间历史，平台拒绝冻结部分清单。',
+    suggestion: '检查仓库可达性与 Worker 的 deepen 上限，必要时提高上限后创建新任务。',
+    retryable: true,
+  },
   MODEL_AUTH_FAILED: {
     title: '模型密钥无效',
     reason: '模型服务拒绝了当前 API Key。',

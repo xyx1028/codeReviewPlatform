@@ -127,11 +127,16 @@ function parseRevertedSha(subject: string, body: string): string | null {
   return /\b(?:reverts? commit|revert(?:ed)?)[ :]+([0-9a-f]{40})\b/i.exec(body)?.[1]?.toLowerCase() ?? null
 }
 
+// `--numstat` without `-z` C-quotes any path that is not plain ASCII
+// ("docs/ERP\347\247\237...md"). Those backslashes are rejected later by the
+// canonical manifest path check and by analysis_commit_file's CHECK constraint,
+// so the whole job fails on a legitimately named file. `-z` emits raw UTF-8
+// bytes with NUL field terminators; records are `additions\tdeletions\tpath\0`.
 function parseNumstat(output: string): CommitManifestFile[] {
   const files: CommitManifestFile[] = []
-  for (const line of output.split(/\r?\n/)) {
-    if (line.trim() === '') continue
-    const [rawAdditions, rawDeletions, ...pathParts] = line.split('\t')
+  for (const record of output.split('\0')) {
+    if (record === '') continue
+    const [rawAdditions, rawDeletions, ...pathParts] = record.split('\t')
     const path = pathParts.join('\t')
     if (!rawAdditions || !rawDeletions || path === '') continue
     const binary = rawAdditions === '-' || rawDeletions === '-'
@@ -289,7 +294,7 @@ async function readCommit(historyPath: string, sha: string, topologyIndex: numbe
   const body = bodyParts.join(PARSE_SEPARATOR)
   const { stdout: numstat } = await runCommand(
     'git',
-    ['diff-tree', '--root', '--no-commit-id', '--numstat', '-r', '--no-renames', sha],
+    ['diff-tree', '--root', '--no-commit-id', '--numstat', '-r', '--no-renames', '-z', sha],
     { cwd: historyPath, timeoutMs: 30_000 },
   )
   const parentShas = parents ? parents.split(' ').filter(Boolean) : []
