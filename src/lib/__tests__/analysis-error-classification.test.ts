@@ -40,6 +40,40 @@ describe('resolveAnalysisError transport truncation', () => {
     expect(r.meta.retryable).toBe(true)
   })
 
+  it('classifies the openai SDK "Connection error." as a connect-stage failure', () => {
+    // 2026-09-22 线上：HOST_PROXY 模型的 21 次请求（1 + 20 retry）全部在毫秒级失败、
+    // input_tokens=0，Mac 代理日志里一条请求都没有 —— 请求没离开 Worker。
+    const r = resolveAnalysisError('-32603', 'Internal error: turn failed: Connection error.')
+    expect(r.code).toBe('MODEL_CONNECT_FAILED')
+    expect(r.meta.retryable).toBe(true)
+    expect(r.originalCode).toBe('-32603')
+  })
+
+  it('classifies raw socket-level connect errors as connect-stage failures', () => {
+    for (const message of [
+      'turn failed: connect ECONNREFUSED 192.168.65.254:17890',
+      'turn failed: getaddrinfo ENOTFOUND host.docker.internal',
+    ]) {
+      const r = resolveAnalysisError('-32603', message)
+      expect(r.code).toBe('MODEL_CONNECT_FAILED')
+      expect(r.meta.retryable).toBe(true)
+    }
+  })
+
+  it('keeps mid-stream drops separate from connect failures', () => {
+    // ECONNRESET 是流已经建立后被切断，处置与"连不上"不同，不能合并成一类。
+    const r = resolveAnalysisError('-32603', 'turn failed: ECONNRESET')
+    expect(r.code).toBe('MODEL_STREAM_TRUNCATED')
+  })
+
+  it('keeps the host-proxy 502 case separate from connect failures', () => {
+    const r = resolveAnalysisError(
+      '-32603',
+      'Internal error: turn failed: 502 model endpoint unreachable from this Mac',
+    )
+    expect(r.code).toBe('MODEL_ENDPOINT_UNREACHABLE')
+  })
+
   it('does not hijack a known platform error code embedded in the message', () => {
     // 已登记错误码优先，传输兜底不应抢占（这里消息含 MODEL_RATE_LIMITED）。
     const r = resolveAnalysisError('MODEL_RATE_LIMITED', 'MODEL_RATE_LIMITED: too many requests')

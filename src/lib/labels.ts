@@ -161,6 +161,12 @@ export const analysisErrorCodeMeta: Record<string, AnalysisErrorMeta> = {
     suggestion: '确认 VPN 和模型服务恢复后，可按原 Commit 重试。',
     retryable: true,
   },
+  MODEL_CONNECT_FAILED: {
+    title: '模型请求连不上通道',
+    reason: '模型请求在建立连接阶段就失败了，请求根本没有离开 Worker（典型表现是连续重试都在毫秒级失败、token 用量为 0）。内网模型最常见的原因是运行 Worker 的那台机器连不到 MODEL_CONNECTIVITY_PROXY_URL 指向的本机代理。',
+    suggestion: '在实际运行 Worker 的机器上确认代理可连（内网模型必须能连到 host 代理，host.docker.internal 只在 Docker Desktop 上有效），再用模型管理页的连接测试确认通过后重试。',
+    retryable: true,
+  },
   MODEL_STREAM_TRUNCATED: {
     title: '模型响应流被中断',
     reason: '模型的流式响应在正常结束前连接被切断（常见于经代理访问的长响应，属传输层瞬时故障）。',
@@ -460,6 +466,21 @@ export function resolveAnalysisError(
       code: 'MODEL_STREAM_TRUNCATED',
       originalCode,
       meta: analysisErrorCodeMeta.MODEL_STREAM_TRUNCATED!,
+    }
+  }
+  // 连接建立阶段就失败：`@earendil-works/pi-ai` 用的 openai SDK 把任何 fetch 层失败
+  // （ECONNREFUSED / ENOTFOUND / EAI_AGAIN 等）统一抛成 `APIConnectionError`，message
+  // 就是固定的 `Connection error.`，冒泡到平台只剩 `-32603`。这与上面的流中断不是同一
+  // 件事：请求根本没有到达模型端点（token 用量为 0），所以处置是查 Worker 那台机器到
+  // 代理/端点的网络，而不是调并发或超时。
+  const connectFailure =
+    /\bconnection error\b/i.test(message) ||
+    /\b(?:ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EPROTO|ERR_PROXY_CONNECTION_FAILED)\b/i.test(message)
+  if (connectFailure && (originalCode === null || analysisErrorCodeMeta[originalCode] === undefined)) {
+    return {
+      code: 'MODEL_CONNECT_FAILED',
+      originalCode,
+      meta: analysisErrorCodeMeta.MODEL_CONNECT_FAILED!,
     }
   }
   const embeddedCode = Object.keys(analysisErrorCodeMeta).find((code) =>
