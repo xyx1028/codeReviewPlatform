@@ -12,6 +12,7 @@ import {
   Row,
   Select,
   Space,
+  Steps,
   Table,
   Tag,
   Tooltip,
@@ -303,7 +304,7 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
       })
     },
     onSuccess: (result) => {
-      message.success(`已发布 ${formatSkillVersion(result.version)}`)
+      message.success(`已更新至 ${formatSkillVersion(result.version)}`)
       setPublishSkill(null)
       setValidation(null)
       setUploadedBundleName(null)
@@ -525,7 +526,7 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
               setUploadedBundleName(null)
             }}
           >
-            上传新版本
+            更新版本
           </Button>
           <Button
             size="small"
@@ -786,7 +787,19 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
       </Modal>
 
       <Modal
-        title={publishSkill === null ? '发布新版本' : `发布新版本：${publishSkill.name}`}
+        title={
+          publishSkill === null ? (
+            '更新版本'
+          ) : (
+            <div className="skill-create-modal__title">
+              <span>更新版本：{publishSkill.display_name}</span>
+              <Text type="secondary">
+                当前 {publishSkill.current_version === null ? '暂无已发布版本' : formatSkillVersion(publishSkill.current_version)}
+                {' → '}提交后 {formatSkillVersion((publishSkill.current_version ?? 0) + 1)}
+              </Text>
+            </div>
+          )
+        }
         open={publishSkill !== null}
         width={960}
         className="skill-publish-modal"
@@ -799,57 +812,114 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
           setUploadedBundleName(null)
         }}
         onOk={() => publishMutation.mutate()}
-        okText="发布"
+        okText="发布更新"
         okButtonProps={{ disabled: validation === null }}
         confirmLoading={publishMutation.isPending}
         destroyOnHidden
       >
-        <Space direction="vertical" size="middle" className="full-width">
-          <Upload.Dragger
-            className={`skill-upload-dragger${validation !== null ? ' skill-upload-dragger--imported' : ''}`}
-            accept=".zip"
-            maxCount={1}
-            multiple={false}
-            fileList={[] as UploadFile[]}
-            beforeUpload={(file) => {
-              if (publishSkill !== null) {
-                setValidation(null)
-                setUploadedBundleName(null)
-                uploadMutation.mutate({ skillId: publishSkill.id, file: file as unknown as File })
-              }
-              // 交给我们自己的上传链路（signed upload URL），不让 antd 发请求。
-              return false
-            }}
-            disabled={uploadMutation.isPending}
-          >
-            {validation === null ? (
-              <>
-                <p className="skill-upload-dragger__title">点击或拖拽上传 ZIP 技能包</p>
-                <p className="ant-upload-hint skill-upload-dragger__hint">系统自动校验，校验通过后即可发布。</p>
-              </>
-            ) : (
-              <>
-                <span className="skill-upload-dragger__status-icon" aria-hidden="true">
-                  ✓
-                </span>
-                <p className="skill-upload-dragger__title">技能包已上传</p>
-                <p className="skill-upload-dragger__file-name" title={uploadedBundleName ?? undefined}>
-                  {uploadedBundleName ?? 'ZIP 技能包'}
-                </p>
-                <p className="skill-upload-dragger__hint">
-                  {validation.file_count} 个文件 · 点击或拖拽 ZIP 以替换
-                </p>
-              </>
-            )}
-          </Upload.Dragger>
+        {publishSkill === null ? null : (
+          <Space direction="vertical" size="middle" className="full-width">
+            <Steps
+              className="skill-create-modal__steps"
+              current={validation === null ? 0 : 1}
+              size="small"
+              items={[{ title: '基本信息' }, { title: '内容检测' }, { title: '发布更新' }]}
+            />
 
-          {uploadMutation.isPending ? <Progress percent={100} status="active" showInfo={false} /> : null}
+            <Alert
+              type="info"
+              showIcon
+              message="以新 ZIP 中 SKILL.md 的 frontmatter 为准"
+              description="技能编码不可修改；描述和使用场景会在服务端校验后从新版本技能包中重新解析。"
+            />
 
-          {uploadMutation.isError ? (
-            <Alert type="error" showIcon message="校验未通过" description={uploadMutation.error.message} />
-          ) : null}
+            <div className="skill-update-modal__upload-section">
+              <Text strong>上传更新包</Text>
+              <Upload.Dragger
+                className={`skill-upload-dragger${validation !== null || publishSkill.current_version_id !== null ? ' skill-upload-dragger--imported' : ''}`}
+                accept=".zip"
+                maxCount={1}
+                multiple={false}
+                fileList={[] as UploadFile[]}
+                beforeUpload={(file) => {
+                  setValidation(null)
+                  setUploadedBundleName(null)
+                  uploadMutation.reset()
+                  uploadMutation.mutate({ skillId: publishSkill.id, file: file as unknown as File })
+                  // 交给受控 signed-upload 链路，不让 antd 直接发请求。
+                  return false
+                }}
+                disabled={uploadMutation.isPending}
+              >
+                {validation === null ? (
+                  publishSkill.current_version_id === null ? (
+                    <>
+                      <p className="ant-upload-drag-icon" aria-hidden="true">⬆</p>
+                      <p className="skill-upload-dragger__title">点击或拖拽上传 ZIP 更新包</p>
+                      <p className="ant-upload-hint skill-upload-dragger__hint">
+                        根目录需直接包含 <Text code>SKILL.md</Text>
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <span className="skill-upload-dragger__status-icon" aria-hidden="true">
+                        ✓
+                      </span>
+                      <p className="skill-upload-dragger__title">当前已发布 ZIP</p>
+                      <p className="skill-upload-dragger__file-name">
+                        {formatSkillVersion(publishSkill.current_version ?? 1)} · {publishSkill.file_count ?? '—'} 个文件 ·{' '}
+                        {formatBytes(publishSkill.archive_size_bytes)}
+                      </p>
+                      <p className="skill-upload-dragger__hint">点击或拖拽新的 ZIP 更新包以替换</p>
+                    </>
+                  )
+                ) : (
+                  <>
+                    <span className="skill-upload-dragger__status-icon" aria-hidden="true">
+                      ✓
+                    </span>
+                    <p className="skill-upload-dragger__title">待发布更新包已通过校验</p>
+                    <p className="skill-upload-dragger__file-name" title={uploadedBundleName ?? undefined}>
+                      {uploadedBundleName ?? 'ZIP 技能包'}
+                    </p>
+                    <p className="skill-upload-dragger__hint">
+                      {validation.file_count} 个文件 · 点击或拖拽 ZIP 以替换
+                    </p>
+                  </>
+                )}
+              </Upload.Dragger>
+            </div>
 
-          {validation !== null ? (
+            <Descriptions title="当前技能信息" size="small" column={2} bordered>
+              <Descriptions.Item label="技能编码">
+                <Text code>{publishSkill.name}</Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="显示名称">{publishSkill.display_name}</Descriptions.Item>
+              <Descriptions.Item label="当前版本">
+                {publishSkill.current_version === null ? '暂无已发布版本' : formatSkillVersion(publishSkill.current_version)}
+              </Descriptions.Item>
+              <Descriptions.Item label="即将发布">
+                {formatSkillVersion((publishSkill.current_version ?? 0) + 1)}
+              </Descriptions.Item>
+              <Descriptions.Item label="当前文件数">{publishSkill.file_count ?? '—'}</Descriptions.Item>
+              <Descriptions.Item label="当前 ZIP 大小">
+                {formatBytes(publishSkill.archive_size_bytes)}
+              </Descriptions.Item>
+              <Descriptions.Item label="技能描述" span={2}>
+                {publishSkill.description ?? <Text type="secondary">当前版本未提供描述</Text>}
+              </Descriptions.Item>
+              <Descriptions.Item label="使用场景" span={2}>
+                {publishSkill.when_to_use ?? <Text type="secondary">未提供</Text>}
+              </Descriptions.Item>
+            </Descriptions>
+
+            {uploadMutation.isPending ? <Progress percent={100} status="active" showInfo={false} /> : null}
+
+            {uploadMutation.isError ? (
+              <Alert type="error" showIcon message="校验未通过" description={uploadMutation.error.message} />
+            ) : null}
+
+            {validation !== null ? (
             <>
               <Descriptions size="small" column={3} bordered>
                 <Descriptions.Item label="文件数">{validation.file_count}</Descriptions.Item>
@@ -906,7 +976,8 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
             </Descriptions>
           ) : null}
 
-        </Space>
+          </Space>
+        )}
       </Modal>
 
       <Modal

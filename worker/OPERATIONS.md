@@ -1588,7 +1588,7 @@ psql -v ON_ERROR_STOP=1 -f supabase/tests/20260917130000_model_network_access_mo
 ```
 
 端到端（本地库 + 本地 Worker 容器 + 真实 launchd 代理）三个场景的实测结果见
-`需求开发评审一致性平台/V1.7-内网模型连接/…-最终执行方案.md` 第 10 节。
+`../代码评审平台需求文档/V1.7-内网模型连接/…-最终执行方案.md` 第 10 节。
 
 ## 18.7 `502 model endpoint unreachable from this Mac`
 

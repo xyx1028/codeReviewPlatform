@@ -2452,6 +2452,29 @@ a.dashboard-distribution-item:focus-visible {
   width: 100%;
 }
 
+/* 更新版本页不与右侧详情等高：上传只需是紧凑的选择入口。 */
+.skill-update-modal__upload-section {
+  display: grid;
+  gap: 8px;
+}
+
+.skill-publish-modal .skill-upload-dragger .ant-upload-drag {
+  min-height: 112px;
+  padding: 12px 16px;
+}
+
+.skill-publish-modal .skill-upload-dragger .ant-upload-drag-icon {
+  margin-bottom: 6px;
+  font-size: 24px;
+}
+
+.skill-publish-modal .skill-upload-dragger__status-icon {
+  width: 24px;
+  height: 24px;
+  margin-bottom: 4px;
+  font-size: 14px;
+}
+
 .skill-upload-dragger .ant-upload-drag {
   display: flex;
   min-height: 164px;
