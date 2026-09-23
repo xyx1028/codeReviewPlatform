@@ -1221,6 +1221,8 @@ export interface DeveloperGitIdentityRecord {
   auth_bound?: boolean
   git_identity_id: string
   provider: 'gitlab' | 'git'
+  /** 明文邮箱，仅用于显示与编辑回显；归属匹配一律用数据库里的 HMAC 指纹。改造前建的历史行为 null。 */
+  author_email: string | null
   masked_email: string | null
   email_domain: string | null
   author_name_aliases: string[]
@@ -1245,10 +1247,12 @@ export interface SaveDeveloperGitIdentityInput {
   expectedRevision?: number | null
 }
 
-/** 个人中心自助维护的一条 Git 邮箱。明文邮箱不出现在任何返回值里，只有脱敏形式。 */
+/** 个人中心自助维护的一条 Git 邮箱。 */
 export interface MyGitIdentityRecord {
   git_identity_id: string
   provider: 'gitlab' | 'git'
+  /** 明文邮箱；改造前建的历史行可能为 null，此时只有掩码。 */
+  author_email: string | null
   masked_email: string | null
   email_domain: string | null
   author_name_aliases: string[]
@@ -1285,7 +1289,7 @@ export type GitEmailCandidateMatchReason =
 /** 从本人 MR 里反查出来的一个提交邮箱候选。浏览器拿得到自己的明文邮箱，但拿不到指纹。 */
 export interface GitEmailDiscoveryCandidate {
   candidate_id: string
-  /** 明文邮箱，仅本人可见；只存在于临时候选行，不会进入正式身份表。 */
+  /** 明文邮箱，仅本人可见；被认领后会一并写入正式身份行的 author_email。 */
   email: string | null
   masked_email: string
   email_domain: string

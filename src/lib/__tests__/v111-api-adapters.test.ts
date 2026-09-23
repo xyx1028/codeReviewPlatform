@@ -377,23 +377,41 @@ describe('V1.11 分析任务入队', () => {
 describe('V1.11 Git 身份管理 API', () => {
   beforeEach(() => rpcMock.mockReset())
 
-  it('读取脱敏身份列表', async () => {
+  it('读取身份列表：明文与掩码同时可用', async () => {
     rpcMock.mockResolvedValue({ data: [{
       developer_id: 'developer-1', display_name: '开发人员', employee_code: 'E-1',
       status: 'VERIFIED', revision: 1, git_identity_id: 'git-1', provider: 'gitlab',
+      author_email: 'developer@example.com',
       masked_email: 'd***@example.com', email_domain: 'example.com', author_name_aliases: [],
       gitlab_username: null, gitlab_user_id: null, verification_status: 'VERIFIED',
       git_revision: 1, updated_at: '2026-09-19T00:00:00Z',
     }], error: null })
 
     const rows = await adminListDeveloperGitIdentities()
+    expect(rows[0]?.author_email).toBe('developer@example.com')
     expect(rows[0]?.masked_email).toBe('d***@example.com')
     expect(rpcMock).toHaveBeenCalledWith('admin_list_developer_git_identities')
+  })
+
+  it('历史行没有明文时 author_email 为 null，界面据此回落到掩码', async () => {
+    rpcMock.mockResolvedValue({ data: [{
+      developer_id: 'developer-2', display_name: '老记录', employee_code: null,
+      status: 'VERIFIED', revision: 1, git_identity_id: 'git-2', provider: 'gitlab',
+      author_email: null,
+      masked_email: 'o***@example.com', email_domain: 'example.com', author_name_aliases: [],
+      gitlab_username: null, gitlab_user_id: null, verification_status: 'VERIFIED',
+      git_revision: 1, updated_at: '2026-09-19T00:00:00Z',
+    }], error: null })
+
+    const rows = await adminListDeveloperGitIdentities()
+    expect(rows[0]?.author_email).toBeNull()
+    expect(rows[0]?.masked_email).toBe('o***@example.com')
   })
 
   it('只把原始邮箱交给数据库HMAC包装RPC，不由浏览器计算或提交fingerprint', async () => {
     rpcMock.mockResolvedValue({ data: {
       developer_id: 'developer-1', git_identity_id: 'git-1', masked_email: 'd***@example.com',
+      author_email: 'developer@example.com',
     }, error: null })
 
     await adminSaveDeveloperGitIdentity({

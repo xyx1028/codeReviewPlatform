@@ -75,7 +75,7 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
     form.setFieldsValue({
       displayName: record.display_name,
       employeeCode: record.employee_code ?? undefined,
-      email: '',
+      email: record.author_email ?? '',
       aliases: record.author_name_aliases.join('，'),
       gitlabUsername: record.gitlab_username ?? undefined,
     })
@@ -100,7 +100,7 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
         type="info"
         showIcon
         title="上线前必须先配置 Vault secret：analysis_identity_pepper"
-        description="缺少时保存会明确返回 IDENTITY_PEPPER_MISSING；已有结构化 Story-Id 的分析仍可运行。成员在「个人中心 → Git 身份」自己维护的记录会标「本人维护」，这里代录的标「管理员代录」。邮箱只在数据库函数内计算 HMAC，页面、业务表和日志均不保存明文。"
+        description="缺少时保存会明确返回 IDENTITY_PEPPER_MISSING；已有结构化 Story-Id 的分析仍可运行。成员在「个人中心 → Git 身份」自己维护的记录会标「本人维护」，这里代录的标「管理员代录」。归属匹配用的是数据库内计算的 HMAC 指纹；邮箱明文同时保存一份，仅用于这里的显示与编辑回显（内部平台，公司邮箱本身是公开的）。"
       />
       {identities.isError ? <Alert type="error" showIcon title="读取 Git 身份失败" description={identities.error instanceof Error ? identities.error.message : '未知错误'} /> : null}
       <Card extra={<Button type="primary" onClick={beginCreate}>新增 Git 身份</Button>}>
@@ -114,7 +114,15 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
             { title: '开发人员', dataIndex: 'display_name', fixed: 'left', width: 150 },
             { title: '维护方式', dataIndex: 'auth_bound', width: 110, render: (value: boolean | undefined) => <Tag color={value ? 'blue' : undefined}>{value ? '本人维护' : '管理员代录'}</Tag> },
             { title: '员工号', dataIndex: 'employee_code', width: 110, render: (value) => value ?? '—' },
-            { title: 'Git 邮箱', dataIndex: 'masked_email', width: 190, render: (value) => value ?? '未配置' },
+            {
+              title: 'Git 邮箱',
+              dataIndex: 'author_email',
+              width: 230,
+              // 明文优先。历史行（改造前建的、且反查候选里也查不到）没有明文，回落到掩码，
+              // 并说明一次重新保存就能补上，而不是让人以为数据坏了。
+              render: (value: string | null | undefined, record) =>
+                value ?? (record.masked_email ? `${record.masked_email}（旧记录，保存一次即补全）` : '未配置'),
+            },
             { title: '作者别名', dataIndex: 'author_name_aliases', width: 190, render: (values: string[]) => values.length ? values.join('、') : '—' },
             { title: 'GitLab 用户名', dataIndex: 'gitlab_username', width: 150, render: (value) => value ?? '—' },
             { title: '身份状态', dataIndex: 'verification_status', width: 110, render: (value: DeveloperIdentityStatus) => <Tag color={value === 'VERIFIED' ? 'green' : value === 'CONFLICT' ? 'red' : value === 'DISABLED' ? 'default' : 'orange'}>{statusOptions.find((item) => item.value === value)?.label ?? value}</Tag> },
@@ -141,8 +149,8 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
             name="email"
             label="Git author email"
             extra={
-              editing !== null && !addingEmail
-                ? `当前邮箱：${editing.masked_email ?? '未配置'}（数据库不存明文，无法回显，请重新完整输入一遍才能保存）`
+              editing !== null && !addingEmail && editing.author_email === null
+                ? `这是改造前建的记录，库里没有明文（原掩码 ${editing.masked_email ?? '未配置'}）。完整输入一次即可补全。`
                 : '填写开发人员本机 Git 提交使用的邮箱。'
             }
             rules={[{ required: true, type: 'email', message: '请输入有效邮箱' }]}

@@ -1106,7 +1106,7 @@ export async function adminListDeveloperGitIdentities(): Promise<DeveloperGitIde
 
 export async function adminSaveDeveloperGitIdentity(
   input: SaveDeveloperGitIdentityInput,
-): Promise<{ developer_id: string; git_identity_id: string; masked_email: string }> {
+): Promise<{ developer_id: string; git_identity_id: string; masked_email: string; author_email: string }> {
   const client = requireSupabase()
   const { data, error } = await client.rpc('admin_upsert_developer_git_identity_from_email', {
     p_developer_id: input.developerId ?? null,
@@ -1121,7 +1121,7 @@ export async function adminSaveDeveloperGitIdentity(
     p_verification_status: input.verificationStatus,
     p_expected_revision: input.expectedRevision ?? null,
   })
-  return unwrap<{ developer_id: string; git_identity_id: string; masked_email: string }>({ data, error })
+  return unwrap<{ developer_id: string; git_identity_id: string; masked_email: string; author_email: string }>({ data, error })
 }
 
 // ---------------------------------------------------------------------------

@@ -292,7 +292,12 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
           locale={{ emptyText: '暂无 Git 邮箱' }}
           scroll={{ x: 760 }}
           columns={[
-            { title: 'Git 邮箱', dataIndex: 'masked_email', width: 180, render: (value: string | null) => value ?? '未配置' },
+            {
+              title: 'Git 邮箱',
+              dataIndex: 'author_email',
+              width: 220,
+              render: (value: string | null, record) => value ?? record.masked_email ?? '未配置',
+            },
             {
               title: '作者别名',
               dataIndex: 'author_name_aliases',
@@ -376,7 +381,7 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
             type="info"
             showIcon
             style={{ marginBottom: 16 }}
-            title={`Git 邮箱：${editing?.masked_email ?? '未配置'}（不可修改）`}
+            title={`Git 邮箱：${editing?.author_email ?? editing?.masked_email ?? '未配置'}（不可修改）`}
             description="邮箱只能由平台从 GitLab 提交里反查确认，身份表里存的是它的 HMAC；要换邮箱请新增一条再停用这条。"
           />
           <Form.Item
