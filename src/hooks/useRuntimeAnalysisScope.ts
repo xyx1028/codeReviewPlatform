@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 
 export type RuntimeScopeStatus = 'PREPARING' | 'READY' | 'DEGRADED' | 'FAILED' | 'LEGACY'
 export type RuntimeScopeMode =
@@ -113,14 +113,49 @@ const summaryUnavailable = (): never => {
   throw new Error('分析范围数据库 API 尚未接入')
 }
 
+/** 提交明细每页条数的可选值。上界 100 是 `get_analysis_story_scope_commits` 的服务端夹取值。 */
+export const RUNTIME_SCOPE_PAGE_SIZES = [10, 20, 50, 100] as const
+export const RUNTIME_SCOPE_DEFAULT_PAGE_SIZE = 10
+
+/**
+ * 页码 → 服务端 cursor。
+ *
+ * `get_analysis_story_scope_commits` 的 `p_cursor` 是十进制字符串形式的 offset
+ * （服务端 `p_cursor ~ '^[0-9]+$'` 后转 integer），所以跳页只是一次换算，不需要先把
+ * 前面几页都拉下来。第 1 页传 null 而不是 `'0'`，让"首页"在 queryKey 和服务端日志里
+ * 都是同一种形态。
+ */
+export function runtimeScopeCommitCursor(page: number, pageSize: number): string | null {
+  const offset = Math.max(0, (Math.max(1, Math.trunc(page)) - 1) * pageSize)
+  return offset === 0 ? null : String(offset)
+}
+
+/**
+ * 分页器交互的归一化。
+ *
+ * 改每页条数时必须回到第 1 页：留在原页码上等于跳到一个与用户预期无关的位置（把每页 10
+ * 的第 8 页换成每页 100，第 8 页已经越过总数）。
+ */
+export function nextRuntimeScopePagination(
+  current: { page: number; pageSize: number },
+  next: { page: number; pageSize: number },
+): { page: number; pageSize: number } {
+  if (next.pageSize !== current.pageSize) return { page: 1, pageSize: next.pageSize }
+  return { page: Math.max(1, Math.trunc(next.page)), pageSize: current.pageSize }
+}
+
 export function useRuntimeAnalysisScope({
   taskId,
   view,
   api,
+  page = 1,
+  pageSize = RUNTIME_SCOPE_DEFAULT_PAGE_SIZE,
 }: {
   taskId: string | null
   view: RuntimeScopeCommitView
   api: RuntimeAnalysisScopeApi | null
+  page?: number
+  pageSize?: number
 }) {
   const summaryQuery = useQuery({
     queryKey: ['runtime-analysis-scope-summary', taskId],
@@ -131,25 +166,29 @@ export function useRuntimeAnalysisScope({
     staleTime: 5_000,
   })
   const generation = summaryQuery.data?.generation ?? null
-  const commitsQuery = useInfiniteQuery({
-    queryKey: ['runtime-analysis-scope-commits', taskId, generation, view],
+  // 一页一次 RPC，而不是"无限加载 + 前端切片"：`total` 也由服务端给，分页器总数不是前端估的。
+  const cursor = runtimeScopeCommitCursor(page, pageSize)
+  const commitsQuery = useQuery({
+    queryKey: ['runtime-analysis-scope-commits', taskId, generation, view, cursor, pageSize],
     enabled: taskId !== null && generation !== null && api !== null,
-    initialPageParam: null as string | null,
-    queryFn: ({ pageParam }) => {
+    queryFn: () => {
       if (taskId === null || generation === null || api === null) return Promise.reject(summaryUnavailable())
-      return api.listCommits({ taskId, generation, view, cursor: pageParam, limit: 20 })
+      return api.listCommits({ taskId, generation, view, cursor, limit: pageSize })
     },
-    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
+    // 翻页时保留上一页内容，避免表格在请求往返期间闪成空态。
+    placeholderData: keepPreviousData,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
   })
-  const pages = commitsQuery.data?.pages ?? []
-  const commits = generation === null ? [] : mergeRuntimeScopeCommitPages(pages, generation)
+  const currentPage = commitsQuery.data
+  const commits = generation === null || currentPage === undefined
+    ? []
+    : mergeRuntimeScopeCommitPages([currentPage], generation)
   return {
     apiAvailable: api !== null,
     summaryQuery,
     commitsQuery,
     commits,
-    totalCommits: commitsQuery.data?.pages[0]?.total ?? 0,
+    totalCommits: currentPage?.total ?? 0,
   }
 }

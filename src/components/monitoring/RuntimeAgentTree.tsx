@@ -5,7 +5,6 @@ import {
   agentProviderLabels,
   agentRoleLabels,
   agentRunStatusMeta,
-  modelRequestKindLabels,
   runtimeActivityLabel,
   runtimeErrorCodeLabel,
 } from '../../lib/labels'
@@ -75,27 +74,6 @@ function AgentNode({ agent, now }: { agent: RuntimeAgentSnapshot; now: number })
           </>
         )}
       </div>
-
-      {agent.open_correlations.length === 0 ? null : (
-        <div className="runtime-agent-node__calls">
-          <span className="runtime-agent-node__calls-title">未闭合调用</span>
-          <div className="runtime-agent-node__call-list">
-            {agent.open_correlations.map((open) => (
-              <div className="runtime-agent-node__call" key={open.correlation_id}>
-                <Tag color={open.scope === 'MODEL' ? 'purple' : 'blue'}>
-                  {open.scope === 'MODEL' ? '模型请求' : '工具调用'}
-                </Tag>
-                <Text code>
-                  {open.tool_name ??
-                    modelRequestKindLabels[open.model_request_kind ?? 'other'] ??
-                    open.event_type}
-                </Text>
-                <Text type="secondary">已持续 {formatElapsed(open.started_at, now)}</Text>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       {agent.error_code === null ? null : (
         <div className="runtime-agent-node__error">{runtimeErrorCodeLabel(agent.error_code)}</div>
@@ -248,12 +226,6 @@ export function RuntimeAgentTree({
           )}
         </div>
 
-        <div className="runtime-scope-note">
-          <Tag bordered={false}>范围说明</Tag>
-          <Text type="secondary">
-            Harness Job 实例树尚未接入；job_* 调用仍会出现在下方时间线中。
-          </Text>
-        </div>
       </div>
     </Card>
   )

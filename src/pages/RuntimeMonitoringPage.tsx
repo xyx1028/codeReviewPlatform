@@ -10,11 +10,10 @@ import {
   Statistic,
   Typography,
 } from 'antd'
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   adminListActiveAnalysisBatches,
   adminListAnalysisWorkers,
-  getAnalysisRuntimeTaskEvents,
   requestJobCancel,
   runtimeAnalysisScopeApi,
 } from '../lib/api'
@@ -23,18 +22,13 @@ import { RuntimeBatchList } from '../components/monitoring/RuntimeBatchList'
 import { RuntimeTaskList } from '../components/monitoring/RuntimeTaskList'
 import { RuntimeAgentTree } from '../components/monitoring/RuntimeAgentTree'
 import { RuntimeAnalysisScopeCard } from '../components/monitoring/RuntimeAnalysisScopeCard'
-import { RuntimeActivityTimeline } from '../components/monitoring/RuntimeActivityTimeline'
 import { RuntimeFreshnessBadge } from '../components/monitoring/RuntimeFreshnessBadge'
 import { formatAge } from '../lib/runtime-format'
-import { agentRoleLabels } from '../lib/labels'
-import { buildRuntimeTaskEventPage } from '../lib/runtime-timeline'
 import type { ActiveAnalysisBatch } from '../types'
 
 const { Title, Text } = Typography
 
 const MOBILE_BREAKPOINT = 768
-const DESKTOP_HISTORY_PAGE_SIZE = 60
-const MOBILE_HISTORY_PAGE_SIZE = 30
 
 function useIsMobile(): boolean {
   const [isMobile, setIsMobile] = useState(
@@ -75,10 +69,6 @@ export function RuntimeMonitoringPage({ isAdmin }: { isAdmin: boolean }) {
    * 会触发一轮多余渲染。Attempt 不存在时 RuntimeAgentTree 会自动落到最新一次。
    */
   const [attemptByTask, setAttemptByTask] = useState<Record<string, number>>({})
-  const [historyPageSelection, setHistoryPageSelection] = useState<{
-    taskId: string | null
-    index: number
-  }>({ taskId: null, index: 0 })
 
   const batchesQuery = useQuery({
     queryKey: ['runtime-active-batches'],
@@ -162,81 +152,6 @@ export function RuntimeMonitoringPage({ isAdmin }: { isAdmin: boolean }) {
     console.tasks[0] ??
     null
 
-  const historyPageSize = isMobile ? MOBILE_HISTORY_PAGE_SIZE : DESKTOP_HISTORY_PAGE_SIZE
-  const taskHistoryQuery = useInfiniteQuery({
-    queryKey: ['runtime-task-event-history', selectedTask?.task_id ?? null, historyPageSize],
-    enabled: isAdmin && selectedTask !== null,
-    initialPageParam: null as number | null,
-    queryFn: ({ pageParam }) => {
-      if (selectedTask === null) throw new Error('请先选择需求任务')
-      return getAnalysisRuntimeTaskEvents(selectedTask.task_id, pageParam, historyPageSize)
-    },
-    getNextPageParam: (lastPage) =>
-      lastPage.cursor.has_more
-        ? (lastPage.cursor.next_before_event_id ?? undefined)
-        : undefined,
-    staleTime: 5000,
-    refetchOnWindowFocus: false,
-  })
-
-  const historyPages = taskHistoryQuery.data?.pages ?? []
-  const requestedHistoryPageIndex =
-    historyPageSelection.taskId === selectedTask?.task_id ? historyPageSelection.index : 0
-  const historyPageIndex = Math.min(
-    requestedHistoryPageIndex,
-    Math.max(historyPages.length - 1, 0),
-  )
-  const historyPage = historyPages[historyPageIndex] ?? null
-  const timelineEvents = useMemo(
-    () =>
-      buildRuntimeTaskEventPage(
-        historyPage?.events ?? [],
-        console.events,
-        selectedTask?.task_id ?? null,
-        historyPageIndex === 0,
-      ),
-    [historyPage, console.events, selectedTask?.task_id, historyPageIndex],
-  )
-  const taskAnchorCount = timelineEvents.filter((event) => event.scope === 'TASK').length
-  const liveAttemptUuids = new Set((historyPage?.events ?? []).map((event) => event.event_uuid))
-  const liveAttemptDelta = historyPageIndex === 0
-    ? console.events.filter(
-        (event) =>
-          event.task_id === selectedTask?.task_id &&
-          event.scope !== 'TASK' &&
-          !liveAttemptUuids.has(event.event_uuid),
-      ).length
-    : 0
-  const historyAttemptTotal = Math.max(
-    (historyPage?.total_events ?? 0) + liveAttemptDelta,
-    historyPage?.events.length ?? 0,
-  )
-  const historyTotal = historyAttemptTotal + taskAnchorCount
-  const historyPageCount = Math.max(Math.ceil(historyAttemptTotal / historyPageSize), 1)
-  const historyHasNewer = historyPageIndex > 0
-  const historyHasOlder =
-    historyPageIndex + 1 < historyPages.length || taskHistoryQuery.hasNextPage === true
-
-  const showNewerHistory = () => {
-    if (selectedTask === null || historyPageIndex === 0) return
-    setHistoryPageSelection({ taskId: selectedTask.task_id, index: historyPageIndex - 1 })
-  }
-
-  const showOlderHistory = () => {
-    if (selectedTask === null || !historyHasOlder || taskHistoryQuery.isFetchingNextPage) return
-    const nextIndex = historyPageIndex + 1
-    if (nextIndex < historyPages.length) {
-      setHistoryPageSelection({ taskId: selectedTask.task_id, index: nextIndex })
-      return
-    }
-    const taskId = selectedTask.task_id
-    void taskHistoryQuery.fetchNextPage().then((result) => {
-      if (result.data?.pages[nextIndex] !== undefined) {
-        setHistoryPageSelection({ taskId, index: nextIndex })
-      }
-    })
-  }
-
   const cursorServerTime = console.cursor?.server_time ?? serverTime
   const now = Date.parse(cursorServerTime)
 
@@ -251,21 +166,6 @@ export function RuntimeMonitoringPage({ isAdmin }: { isAdmin: boolean }) {
     }
     return selectedTask.attempts[selectedTask.attempts.length - 1]!.agent_attempt
   }, [selectedTask, attemptByTask])
-
-  const selectedAttemptSnapshot = useMemo(
-    () =>
-      selectedTask?.attempts.find(
-        (attempt) => attempt.agent_attempt === selectedAttemptNumber,
-      ) ?? null,
-    [selectedTask, selectedAttemptNumber],
-  )
-
-  const agentOptions = useMemo(() => {
-    return (selectedAttemptSnapshot?.agents ?? []).map((agent) => ({
-      value: agent.agent_node_id,
-      label: `${agentRoleLabels[agent.agent_role] ?? agent.agent_role} · ${agent.agent_id.slice(0, 8)}`,
-    }))
-  }, [selectedAttemptSnapshot])
 
   const workers = workersQuery.data?.workers ?? []
   const onlineWorkers = workers.length
@@ -421,40 +321,6 @@ export function RuntimeMonitoringPage({ isAdmin }: { isAdmin: boolean }) {
               setAttemptByTask((previous) => ({ ...previous, [selectedTask.task_id]: attempt }))
             }}
             now={now}
-          />
-
-          {taskHistoryQuery.isError ? (
-            <Alert
-              type="warning"
-              showIcon
-              title="读取需求历史失败"
-              description={
-                taskHistoryQuery.error instanceof Error
-                  ? taskHistoryQuery.error.message
-                  : '无法读取更早的 Attempt 事件'
-              }
-            />
-          ) : null}
-
-          <RuntimeActivityTimeline
-            events={timelineEvents}
-            serverTime={cursorServerTime}
-            agentOptions={agentOptions}
-            attempts={selectedTask?.attempts ?? []}
-            taskId={selectedTask?.task_id ?? null}
-            taskLabel={
-              selectedTask === null
-                ? null
-                : `${selectedTask.story_code} · ${selectedTask.story_name}`
-            }
-            historyPage={historyPageIndex + 1}
-            historyPageCount={historyPageCount}
-            historyTotal={historyTotal}
-            historyHasNewer={historyHasNewer}
-            historyHasOlder={historyHasOlder}
-            historyLoading={taskHistoryQuery.isLoading || taskHistoryQuery.isFetchingNextPage}
-            onHistoryNewer={showNewerHistory}
-            onHistoryOlder={showOlderHistory}
           />
         </section>
       </div>

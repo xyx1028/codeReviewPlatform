@@ -1,6 +1,9 @@
 import { useState } from 'react'
-import { Alert, Button, Card, Col, Descriptions, Empty, Row, Space, Statistic, Table, Tabs, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Card, Col, Descriptions, Empty, Row, Space, Statistic, Table, Tabs, Tag, Tooltip, Typography } from 'antd'
 import {
+  nextRuntimeScopePagination,
+  RUNTIME_SCOPE_DEFAULT_PAGE_SIZE,
+  RUNTIME_SCOPE_PAGE_SIZES,
   useRuntimeAnalysisScope,
   type RuntimeAnalysisScopeApi,
   type RuntimeAnalysisScopeCommit,
@@ -29,6 +32,52 @@ const STATUS_LABELS: Record<RuntimeScopeStatus, { label: string; color: string }
   LEGACY: { label: '旧任务', color: 'default' },
 }
 const LEVEL_COLORS: Record<RuntimeScopeLevel, string> = { PRIMARY: 'blue', RELATED: 'purple', GLOBAL: 'orange' }
+const SCOPE_LEVEL_LABELS: Record<RuntimeScopeLevel, string> = {
+  PRIMARY: '主范围',
+  RELATED: '关联范围',
+  GLOBAL: '全仓范围',
+}
+const RANGE_SOURCE_LABELS: Record<string, string> = {
+  PREVIOUS_SUCCESSFUL_JOB: '沿用上次成功任务',
+  TIME_DERIVED: '按时间窗推算',
+  RELEASE_MANIFEST: '发布清单',
+  UNAVAILABLE: '不可用',
+}
+const ENUMERATION_STATUS_LABELS: Record<string, string> = {
+  PENDING: '待处理',
+  COMPLETE: '完整',
+  SHALLOW_INCOMPLETE: '浅克隆不完整',
+  RANGE_TOO_LARGE: '范围过大',
+  BASELINE_REQUIRED: '需要基线',
+  FAILED: '失败',
+}
+const RELATION_STATUS_LABELS: Record<string, string> = {
+  AUTO_SELECTED: '自动选中',
+  AI_RELATED: 'AI 判定相关',
+  AI_UNRELATED: 'AI 判定不相关',
+  AI_UNCERTAIN: 'AI 不确定',
+  EXCLUDED: '已排除',
+}
+// 归因规则可由管理员在「归因规则」页自定义 reason_code，这里只翻译系统预置的规则；
+// 未命中的自定义代码原样展示，不猜测含义——鼠标悬停可以看到原始代码。
+const REASON_CODE_LABELS: Record<string, string> = {
+  EXPLICIT_STORY_ID: '提交说明明确标注需求号',
+  EXPLICIT_MR_STORY_ID: '合并请求明确标注需求号',
+  SAME_EXPLICIT_MR: '同一明确合并请求内的提交',
+  STORY_CODE_WITH_SUPPORT: '标题/分支命中需求号且有辅助线索',
+  OWNER_WINDOW_MODULE: '开发人员 + 时间窗 + 模块重合',
+  UNSTRUCTURED_STORY_MENTION: '正文提及需求号',
+  OTHER_STORY_EXPLICIT: '明确属于其它需求',
+  REVERT_OF_RELATED_COMMIT: '回滚了关联提交',
+  BOT_OR_GENERATED: '机器人或生成文件',
+  IDENTITY_AMBIGUOUS: '开发人员身份冲突',
+  RANGE_INCOMPLETE: '范围不完整降级',
+  NO_CANDIDATE: '无候选降级',
+  RULE_CONFLICT: '规则冲突降级',
+}
+function translatedLabel(map: Record<string, string>, value: string): string {
+  return map[value] ?? value
+}
 
 function shortHash(value: string | null): string {
   return value === null ? '—' : value.replace(/^sha256:/, '').slice(0, 12)
@@ -46,8 +95,19 @@ export function RuntimeAnalysisScopeCard({
   api?: RuntimeAnalysisScopeApi | null
 }) {
   const [view, setView] = useState<RuntimeScopeCommitView>('SELECTED')
-  const scope = useRuntimeAnalysisScope({ taskId, view, api })
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState<number>(RUNTIME_SCOPE_DEFAULT_PAGE_SIZE)
+  const scope = useRuntimeAnalysisScope({ taskId, view, api, page, pageSize })
   const summary = scope.summaryQuery.data
+  // 换任务、换分类、换代次都必须回到第 1 页：否则会停在一个新分类里根本不存在的页码上，
+  // 服务端按 offset 返回空数组，界面看起来像"没有提交"。
+  const generation = summary?.generation ?? null
+  const resetKey = `${taskId ?? ''}|${view}|${String(generation ?? '')}`
+  const [lastResetKey, setLastResetKey] = useState(resetKey)
+  if (resetKey !== lastResetKey) {
+    setLastResetKey(resetKey)
+    if (page !== 1) setPage(1)
+  }
 
   if (taskId === null) return <Card size="small" title="分析范围"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请先选择需求任务" /></Card>
   if (!scope.apiAvailable) {
@@ -68,19 +128,19 @@ export function RuntimeAnalysisScopeCard({
   const repositoryColumns = [
     { title: '仓库', dataIndex: 'repository_name', key: 'repository_name' },
     { title: 'base → head', key: 'sha', render: (_: unknown, row: RuntimeRepositoryScope) => <Text code>{row.base_sha?.slice(0, 8) ?? '—'} → {row.head_sha.slice(0, 8)}</Text> },
-    { title: '来源', dataIndex: 'range_source', key: 'range_source' },
+    { title: '来源', dataIndex: 'range_source', key: 'range_source', render: (value: string) => <Tooltip title={value}>{translatedLabel(RANGE_SOURCE_LABELS, value)}</Tooltip> },
     { title: 'Commit 数', dataIndex: 'commit_count', key: 'commit_count', render: (value: number | null) => value ?? '—' },
-    { title: '完整性', dataIndex: 'enumeration_status', key: 'enumeration_status', render: (value: string) => <Tag color={value === 'COMPLETE' ? 'green' : 'orange'}>{value}</Tag> },
+    { title: '完整性', dataIndex: 'enumeration_status', key: 'enumeration_status', render: (value: string) => <Tooltip title={value}><Tag color={value === 'COMPLETE' ? 'green' : 'orange'}>{translatedLabel(ENUMERATION_STATUS_LABELS, value)}</Tag></Tooltip> },
     { title: '解析时间', dataIndex: 'resolved_at', key: 'resolved_at', render: (value: string, row: RuntimeRepositoryScope) => <Tooltip title={utcRange(row)}>{new Date(value).toLocaleString()}</Tooltip> },
   ]
   const commitColumns = [
-    { title: '状态', key: 'status', width: 145, render: (_: unknown, row: RuntimeAnalysisScopeCommit) => <Space size={4}><Tag>{row.relation_status}</Tag>{row.effective_status === 'REVERTED' ? <Tag color="orange">已回滚</Tag> : null}</Space> },
+    { title: '状态', key: 'status', width: 145, render: (_: unknown, row: RuntimeAnalysisScopeCommit) => <Space size={4}><Tooltip title={row.relation_status}><Tag>{translatedLabel(RELATION_STATUS_LABELS, row.relation_status)}</Tag></Tooltip>{row.effective_status === 'REVERTED' ? <Tag color="orange">已回滚</Tag> : null}</Space> },
     { title: '仓库 / SHA', key: 'repository', width: 160, render: (_: unknown, row: RuntimeAnalysisScopeCommit) => <Space direction="vertical" size={0}><Text>{row.repository_name}</Text><Text code>{row.short_sha}</Text></Space> },
     { title: '提交时间', dataIndex: 'committed_at', key: 'committed_at', width: 170, render: (value: string) => new Date(value).toLocaleString() },
     { title: '提交人', key: 'author', width: 150, render: (_: unknown, row: RuntimeAnalysisScopeCommit) => <Space direction="vertical" size={0}><Text>{row.author_display_name}</Text><Text type="secondary">{row.author_email_masked ?? '邮箱未披露'}</Text></Space> },
     { title: '提交描述', dataIndex: 'subject', key: 'subject', ellipsis: true },
     { title: '变更', key: 'changes', width: 135, render: (_: unknown, row: RuntimeAnalysisScopeCommit) => `${String(row.files_changed)} 文件 · +${String(row.additions)} / -${String(row.deletions)}` },
-    { title: '选择理由', dataIndex: 'reason_codes', key: 'reason_codes', width: 220, render: (values: string[]) => <Space size={[4, 4]} wrap>{values.map((value) => <Tag key={value}>{value}</Tag>)}</Space> },
+    { title: '选择理由', dataIndex: 'reason_codes', key: 'reason_codes', width: 220, render: (values: string[]) => <Space size={[4, 4]} wrap>{values.map((value) => <Tooltip key={value} title={value}><Tag>{translatedLabel(REASON_CODE_LABELS, value)}</Tag></Tooltip>)}</Space> },
     { title: 'AI 实际读取', key: 'read', width: 110, render: (_: unknown, row: RuntimeAnalysisScopeCommit) => row.actually_read ? <Tag color="green">已读 {row.read_count}</Tag> : <Tag>未读</Tag> },
   ]
 
@@ -88,7 +148,7 @@ export function RuntimeAnalysisScopeCard({
     <Card
       size="small"
       title="分析范围"
-      extra={<Space><Tag color={status.color}>{status.label}</Tag><Tag color={LEVEL_COLORS[summary.current_scope_level]}>{summary.current_scope_level}</Tag></Space>}
+      extra={<Space><Tag color={status.color}>{status.label}</Tag><Tooltip title={summary.current_scope_level}><Tag color={LEVEL_COLORS[summary.current_scope_level]}>{SCOPE_LEVEL_LABELS[summary.current_scope_level]}</Tag></Tooltip></Space>}
     >
       {summary.error_code === null ? null : <Alert style={{ marginBottom: 12 }} type={summary.status === 'FAILED' ? 'error' : 'warning'} showIcon title={summary.error_code} description="这是后端冻结的降级或失败原因，不根据前端活动推断。" />}
       <Descriptions size="small" column={{ xs: 1, md: 3 }}>
@@ -118,7 +178,10 @@ export function RuntimeAnalysisScopeCard({
       <Tabs
         style={{ marginTop: 12 }}
         activeKey={view}
-        onChange={(key) => setView(key as RuntimeScopeCommitView)}
+        onChange={(key) => {
+          setView(key as RuntimeScopeCommitView)
+          setPage(1)
+        }}
         items={[
           { key: 'SELECTED', label: '已选择提交' },
           { key: 'CANDIDATE', label: '候选' },
@@ -129,15 +192,27 @@ export function RuntimeAnalysisScopeCard({
         <Table<RuntimeAnalysisScopeCommit>
           size="small"
           rowKey="candidate_id"
-          loading={scope.commitsQuery.isLoading}
+          loading={scope.commitsQuery.isFetching}
           dataSource={scope.commits}
           columns={commitColumns}
-          pagination={false}
+          pagination={{
+            current: page,
+            pageSize,
+            total: scope.totalCommits,
+            showSizeChanger: true,
+            pageSizeOptions: RUNTIME_SCOPE_PAGE_SIZES.map((size) => String(size)),
+            size: 'small',
+            showTotal: (total, range) => `第 ${String(range[0])}–${String(range[1])} 条 / 共 ${String(total)} 条`,
+            onChange: (nextPage, nextPageSize) => {
+              const next = nextRuntimeScopePagination({ page, pageSize }, { page: nextPage, pageSize: nextPageSize })
+              setPage(next.page)
+              setPageSize(next.pageSize)
+            },
+          }}
           scroll={{ x: 1350 }}
           locale={{ emptyText: '该分类没有提交' }}
         />
       )}
-      {scope.commitsQuery.hasNextPage ? <Button style={{ marginTop: 8 }} block loading={scope.commitsQuery.isFetchingNextPage} onClick={() => void scope.commitsQuery.fetchNextPage()}>加载更多（已显示 {scope.commits.length}；当前分类共 {scope.totalCommits}）</Button> : null}
       <Space direction="vertical" size={6} style={{ width: '100%', marginTop: 16 }}>
         <Text strong>范围扩展轨迹</Text>
         {summary.expansions.length === 0 ? <Text type="secondary">没有后端记录的范围扩展事实。</Text> : summary.expansions.map((item) => (
@@ -145,10 +220,10 @@ export function RuntimeAnalysisScopeCard({
             <Space wrap>
               <Tag>Attempt {item.attempt}</Tag>
               <Text>{item.agent_label}</Text>
-              <Tag color={LEVEL_COLORS[item.from_level]}>{item.from_level}</Tag>
+              <Tag color={LEVEL_COLORS[item.from_level]}>{SCOPE_LEVEL_LABELS[item.from_level]}</Tag>
               <Text>→</Text>
-              <Tag color={LEVEL_COLORS[item.to_level]}>{item.to_level}</Tag>
-              <Text code>{item.reason_code}</Text>
+              <Tag color={LEVEL_COLORS[item.to_level]}>{SCOPE_LEVEL_LABELS[item.to_level]}</Tag>
+              <Tooltip title={item.reason_code}><Text code>{translatedLabel(REASON_CODE_LABELS, item.reason_code)}</Text></Tooltip>
               <Text type="secondary">{new Date(item.occurred_at).toLocaleString()}</Text>
             </Space>
           </Card>

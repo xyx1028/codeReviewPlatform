@@ -2078,40 +2078,6 @@ a.dashboard-distribution-item:focus-visible {
   color: #b91c1c;
 }
 
-.runtime-agent-node__calls {
-  margin: 0 12px 10px 14px;
-  padding: 8px 9px;
-  border: 1px solid #dbeafe;
-  border-radius: 8px;
-  background: #f8fbff;
-}
-
-.runtime-agent-node__calls-title {
-  display: block;
-  margin-bottom: 5px;
-  color: #64748b;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.runtime-agent-node__call-list {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.runtime-agent-node__call {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-}
-
-.runtime-agent-node__call .ant-tag {
-  margin: 0;
-}
-
 .runtime-agent-node__error {
   margin: 0 12px 10px 14px;
   color: #dc2626;
@@ -2120,22 +2086,6 @@ a.dashboard-distribution-item:focus-visible {
 
 .runtime-agent-node > .ant-alert {
   margin: 0 12px 10px 14px;
-}
-
-.runtime-scope-note {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 8px 10px;
-  border: 1px dashed #d8e1ec;
-  border-radius: 9px;
-  background: #f8fafc;
-  font-size: 12px;
-}
-
-.runtime-scope-note .ant-tag {
-  flex: 0 0 auto;
-  margin: 0;
 }
 
 .runtime-task-scroll::-webkit-scrollbar,
@@ -2254,10 +2204,6 @@ a.dashboard-distribution-item:focus-visible {
 
   .runtime-agent-node__metrics > :last-child {
     grid-column: 1 / -1;
-  }
-
-  .runtime-scope-note {
-    align-items: flex-start;
   }
 }
 
