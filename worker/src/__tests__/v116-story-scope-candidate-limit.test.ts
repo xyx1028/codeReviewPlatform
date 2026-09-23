@@ -132,50 +132,120 @@ describe('V1.16 模块重合不把仓库名当模块线索', () => {
   })
 })
 
-describe('V1.16 超过候选上限时截断而不是整条降级成全仓', () => {
-  it('保留 STRONG 证据，按上限截断，并如实记录截断原因', () => {
-    const story = {
-      task_id: '44444444-4444-4444-8444-444444444444',
-      story_id: '55555555-5555-4555-8555-555555555555',
-      story_code: 'US-2026-000001',
-      story_name: '订单接口调整',
-      owners_text: '张三',
-      normalized_developer_ids: ['66666666-6666-4666-8666-666666666666'],
-      project_name: null,
-      application_name: null,
-      release_window: null,
-      requirement_context: {},
-      input_hash: '7'.repeat(64),
-    }
-    // 1 条显式命中需求号（STRONG）+ 300 条同一已验证作者的无关提交（WEAK）。
+const OWNER = '66666666-6666-4666-8666-666666666666'
+
+function ownerStory(overrides: Record<string, unknown> = {}) {
+  return {
+    task_id: '44444444-4444-4444-8444-444444444444',
+    story_id: '55555555-5555-4555-8555-555555555555',
+    story_code: 'US-2026-000001',
+    story_name: '订单接口调整',
+    owners_text: '张三',
+    normalized_developer_ids: [OWNER],
+    project_name: null,
+    application_name: null,
+    release_window: null,
+    requirement_context: {},
+    input_hash: '7'.repeat(64),
+    ...overrides,
+  }
+}
+
+const ownerIdentity = {
+  developer_id: OWNER,
+  display_name: '张三',
+  email_fingerprint: '9'.repeat(64),
+  author_name_aliases: ['别人'],
+  verification_status: 'VERIFIED' as const,
+}
+
+/** 该需求负责人本人的提交（身份已验证）。 */
+function ownerCommit(index: number, overrides: Record<string, unknown> = {}) {
+  return commit(index, {
+    author_identity_status: 'MATCHED',
+    author_developer_id: OWNER,
+    ...overrides,
+  })
+}
+
+describe('V1.16 候选池构成遵守「WEAK 只在强/中候选为空时进入」', () => {
+  it('有 STRONG 候选时 WEAK 一条都不进池，强制裁定项为 0', () => {
     const commits = [
-      commit(0, {
-        subject: '实现订单接口',
-        message_body: 'Story-Id: US-2026-000001',
-        author_identity_status: 'MATCHED',
-        author_developer_id: '66666666-6666-4666-8666-666666666666',
-      }),
-      ...Array.from({ length: 300 }, (_, index) => commit(index + 1, {
-        author_identity_status: 'MATCHED',
-        author_developer_id: '66666666-6666-4666-8666-666666666666',
-      })),
+      ownerCommit(0, { subject: '实现订单接口', message_body: 'Story-Id: US-2026-000001' }),
+      // 同一位已验证负责人的 300 条无关提交：旧实现会把它们全部当 WEAK 塞进池子，
+      // 于是这个需求要做 301 条强制裁定。
+      ...Array.from({ length: 300 }, (_, index) => ownerCommit(index + 1)),
     ]
     const built = buildStoryScopes({
-      stories: [story],
-      identities: [{
-        developer_id: '66666666-6666-4666-8666-666666666666',
-        display_name: '张三',
-        email_fingerprint: '9'.repeat(64),
-        author_name_aliases: ['别人'],
-        verification_status: 'VERIFIED',
-      }],
+      stories: [ownerStory()],
+      identities: [ownerIdentity],
       histories: [history('kdmanage-backend', commits)],
       rulesetHash: '6'.repeat(64),
     })
     const scope = built.scopes[0]!
 
+    expect(scope.candidates).toHaveLength(1)
+    expect(scope.candidates[0]).toMatchObject({ tier: 'STRONG' })
+    expect(scope.candidates.filter((candidate) => candidate.tier === 'WEAK')).toHaveLength(0)
+    expect(scope.scope_mode).toBe('EXACT_STORY_COMMITS')
+    expect(scope.status).toBe('READY')
+    expect(scope.degradation_reasons).toEqual([])
+  })
+
+  it('只有 WEAK 且负责人身份已验证时收窄成 DEVELOPER_WINDOW，并按数量上限封顶', () => {
+    const built = buildStoryScopes({
+      stories: [ownerStory()],
+      identities: [ownerIdentity],
+      // 300 条本人提交，没有任何一条提到需求号。
+      histories: [history('kdmanage-backend', Array.from({ length: 300 }, (_, index) => ownerCommit(index)))],
+      rulesetHash: '6'.repeat(64),
+    })
+    const scope = built.scopes[0]!
+
+    expect(scope.candidates).toHaveLength(30)
+    expect(scope.candidates.every((candidate) => candidate.tier === 'WEAK')).toBe(true)
+    // 关键：知道提交属于谁，就不该退回全仓。
+    expect(scope.scope_mode).toBe('DEVELOPER_WINDOW')
+    expect(scope.current_scope_level).toBe('PRIMARY')
+    expect(scope.degradation_reasons).toContain('WEAK_CANDIDATES_CAPPED')
+  })
+
+  it('WEAK 无法收窄范围（身份未验证）时全仓降级，且不存候选、不产生强制裁定', () => {
+    const built = buildStoryScopes({
+      stories: [ownerStory()],
+      identities: [ownerIdentity],
+      // 作者姓名命中别名但邮箱指纹不同 → WEAK_NAME，建议仍是全仓。
+      histories: [history('kdmanage-backend', Array.from({ length: 50 }, (_, index) => commit(index, {
+        author_identity_status: 'UNMATCHED',
+        author_email_fingerprint: '1'.repeat(64),
+        author_name: '别人',
+      })))],
+      rulesetHash: '6'.repeat(64),
+    })
+    const scope = built.scopes[0]!
+
+    expect(scope.scope_mode).toBe('GLOBAL_FALLBACK')
+    expect(scope.scope_error_code).toBe('NO_STRONG_SCOPE')
+    // 范围已经是全仓，再要求逐条裁定只会烧预算。
+    expect(scope.candidates).toHaveLength(0)
+  })
+})
+
+describe('V1.16 超过候选上限时截断而不是整条降级成全仓', () => {
+  it('保留 STRONG 证据，按上限截断，并如实记录截断原因', () => {
+    // 201 条都显式命中需求号：真正需要截断的情形。
+    const built = buildStoryScopes({
+      stories: [ownerStory()],
+      identities: [ownerIdentity],
+      histories: [history('kdmanage-backend', Array.from({ length: 201 }, (_, index) => ownerCommit(index, {
+        message_body: 'Story-Id: US-2026-000001',
+      })))],
+      rulesetHash: '6'.repeat(64),
+    })
+    const scope = built.scopes[0]!
+
     expect(scope.candidates).toHaveLength(200)
-    expect(scope.candidates.filter((candidate) => candidate.tier === 'STRONG')).toHaveLength(1)
+    expect(scope.candidates.every((candidate) => candidate.tier === 'STRONG')).toBe(true)
     // 关键：不再是 GLOBAL_FALLBACK —— STRONG 证据必须留在范围里。
     expect(scope.scope_mode).not.toBe('GLOBAL_FALLBACK')
     expect(scope.current_scope_level).toBe('PRIMARY')

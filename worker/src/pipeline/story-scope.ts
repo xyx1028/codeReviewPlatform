@@ -12,6 +12,16 @@ import type { RepositoryMergeRequestEnrichment } from '../git/gitlab-readonly-cl
  */
 const CANDIDATE_LIMIT = 200
 
+/**
+ * 没有强/中候选时，允许进池的 WEAK 候选数量上限（V1.11 方案第 481 行的「数量上限」）。
+ *
+ * 每条进池的 AI_CANDIDATE/WEAK 都是**强制**裁定项：Agent 要读一次 diff 再写一条判定，
+ * 否则 `save_agent_review_result` 直接拒绝提交。按每条约 2 次模型/工具往返估算，30 条
+ * ≈ 60~90 次往返，在单 attempt 480 次 root 模型请求的预算内还能留出正式评审的余量；
+ * 200 条则必然撞预算。要调大先看真实 P95 往返数，不要凭感觉放大。
+ */
+const WEAK_CANDIDATE_LIMIT = 30
+
 export interface FrozenStoryScopeInput {
   task_id: string
   story_id: string
@@ -296,6 +306,46 @@ export function buildStoryScopes(input: {
     const relevant = attributed.filter(({ result }) => tier(result) !== null)
     if (relevant.length === 0) return globalScope(story, 'NO_CANDIDATE', generation)
     /*
+     * 候选池的构成必须遵守 V1.11 方案第 397/481 行写下的两条约束：
+     *
+     *   「`WEAK_FALLBACK` 只在强/中候选为空时进入，按排序和数量上限读取」
+     *
+     * 实现此前两条都没遵守：WEAK 与 STRONG/AI 一起进池，并共用 200 的大上限。后果是实测
+     * 数据（Job `7c46dc97`）里 26 个需求合计需要 **2444** 条 AI 裁定，单个需求最多 200 条，
+     * 其中 10 个需求 scope 已经是全仓降级却仍要裁定 156~200 条 —— 既没有收窄范围，又要
+     * 为每条候选读一次 diff 再写一条判定（`save_agent_review_result` 会以
+     * `ANALYSIS_SCOPE_TRIAGE_INCOMPLETE` 拒绝未裁完的提交），必然撞预算或提交不上去。
+     *
+     * 所以分三类处理：
+     *   * 有 STRONG/AI 候选时，WEAK 一条都不进池 —— 它们不提供证据，只增加裁定成本；
+     *   * 没有 STRONG/AI 时，只收「能真正收窄范围」的 WEAK（作者身份已验证，建议
+     *     DEVELOPER_WINDOW），并按 WEAK_CANDIDATE_LIMIT 取排序靠前的一批；
+     *   * 连这种 WEAK 都没有时，直接全仓降级，且**不存** WEAK 候选：范围已经是全仓，
+     *     再要求逐条裁定纯属浪费。
+     */
+    const auditOnly = relevant
+      .filter(({ result }) => tier(result) === 'EXCLUDED' || tier(result) === 'CONFLICT')
+      .map(({ result }) => result)
+    const strongOrAi = relevant
+      .filter(({ result }) => tier(result) === 'STRONG' || tier(result) === 'AI_CANDIDATE')
+      .map(({ result }) => result)
+    const narrowingWeak = relevant
+      .filter(({ result }) => tier(result) === 'WEAK' && result.scopeRecommendation !== 'GLOBAL_FALLBACK')
+      .map(({ result }) => result)
+
+    let weakCapped = false
+    let pool: StoryCommitAttributionResult[]
+    if (strongOrAi.length > 0) {
+      pool = [...strongOrAi, ...auditOnly]
+    } else if (narrowingWeak.length > 0) {
+      const rankedWeak = sortStoryCandidates(narrowingWeak)
+      weakCapped = rankedWeak.length > WEAK_CANDIDATE_LIMIT
+      pool = [...rankedWeak.slice(0, WEAK_CANDIDATE_LIMIT), ...auditOnly]
+    } else {
+      return globalScope(story, 'NO_STRONG_SCOPE', generation)
+    }
+
+    /*
      * 超出候选上限不再整条降级成全仓分析。
      *
      * 旧行为是 `return globalScope(story, 'STORY_CANDIDATE_LIMIT_EXCEEDED')` —— 把**已经
@@ -303,7 +353,7 @@ export function buildStoryScopes(input: {
      * （STRONG → AI_CANDIDATE → WEAK → CONFLICT → EXCLUDED，同级按分数）截断到上限，
      * 保留信息量最高的那一批，并把截断如实记为降级原因。
      */
-    const ranked = sortStoryCandidates(relevant.map(({ result }) => result))
+    const ranked = sortStoryCandidates(pool)
     const truncated = ranked.length > CANDIDATE_LIMIT
     const manifest = createStoryCandidateManifest(
       story.story_code,
@@ -336,6 +386,10 @@ export function buildStoryScopes(input: {
     const ai = candidates.filter((candidate) => candidate.tier === 'AI_CANDIDATE' || candidate.tier === 'WEAK').length
     const recommendation = manifest.candidates.find((candidate) => candidate.selected)?.scopeRecommendation
       ?? manifest.candidates.find((candidate) => candidate.decision === 'AI_RELEVANCE_REQUIRED')?.scopeRecommendation
+      // WEAK 自己的建议此前被完全忽略，于是"只有 WEAK"的需求即使已经知道提交属于哪位
+      // 负责人（WEAK_FALLBACK 在身份已验证时建议 DEVELOPER_WINDOW），范围仍被判成全仓。
+      // 候选都进池了却不用它们收窄范围，是既花钱又没收益的组合。
+      ?? manifest.candidates[0]?.scopeRecommendation
       ?? 'GLOBAL_FALLBACK'
     const scopeMode: StoryScopeWire['scope_mode'] = strong > 0 && ai > 0
       ? 'HYBRID_CANDIDATES'
@@ -345,6 +399,7 @@ export function buildStoryScopes(input: {
     const degradations = [
       ...(scopeMode === 'GLOBAL_FALLBACK' ? ['NO_STRONG_SCOPE'] : []),
       ...(truncated ? ['STORY_CANDIDATE_LIMIT_TRUNCATED'] : []),
+      ...(weakCapped ? ['WEAK_CANDIDATES_CAPPED'] : []),
     ]
     return {
       task_id: story.task_id,
