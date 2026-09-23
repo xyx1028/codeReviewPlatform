@@ -1,13 +1,17 @@
-import { Alert, Button, Card, Input, InputNumber, Select, Space, Switch, Tag, Typography } from 'antd'
+import { Alert, Button, Card, Collapse, Empty, Input, InputNumber, List, Select, Space, Switch, Tag, Typography } from 'antd'
 import type { AttributionRuleCondition, AttributionRuleDefinition } from '../../hooks/useAttributionRules'
 import {
   ADMIN_EDITABLE_ACTIONS,
   ATTRIBUTION_RULE_FIELD_OPTIONS,
   ATTRIBUTION_RULE_OPERATOR_OPTIONS,
+  attributionRuleActionLabel,
+  attributionRuleFieldLabel,
+  attributionRuleOperatorLabel,
+  attributionRuleReasonCodeLabel,
   validateEditableRules,
 } from '../../hooks/useAttributionRules'
 
-const { Text } = Typography
+const { Text, Paragraph } = Typography
 
 function nextId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
@@ -52,6 +56,94 @@ function cloneRule(rule: AttributionRuleDefinition): AttributionRuleDefinition {
   }
 }
 
+/**
+ * 查看模式：只读，不复用带一堆禁用输入框的编辑表单。
+ *
+ * 之前查看已发布/已锁定版本时直接把编辑表单整套禁用态渲染出来——每条规则都是一屏的
+ * 输入框、下拉框和灰色开关，字段名和运算符还是英文代码（如 commit.author_identity /
+ * VERIFIED_IDENTITY_MATCH），没人看得懂在说什么，页面也被撑得很长。查看不需要"能编辑
+ * 但被禁用"的控件，只需要一句话能读懂这条规则在干什么——用带分页的列表而不是无限堆卡片，
+ * 规则一多也不会把整页拖得很长。
+ */
+function RuleReadOnlyList({
+  rules,
+  mrEnhancedAvailable,
+}: {
+  rules: AttributionRuleDefinition[]
+  mrEnhancedAvailable: boolean
+}) {
+  if (rules.length === 0) return <Empty description="这个版本没有规则" />
+  return (
+    <List<AttributionRuleDefinition>
+      className="attribution-rule-list"
+      bordered
+      dataSource={rules}
+      pagination={{ pageSize: 10, hideOnSinglePage: true, align: 'center' }}
+      renderItem={(rule) => (
+        <List.Item
+          key={rule.id}
+          className={`attribution-rule-list-item ${rule.system_locked ? 'attribution-rule-list-item--locked' : 'attribution-rule-list-item--candidate'}`}
+        >
+          {/* 折叠：一行看清"这条规则叫什么、命中会怎样"，条件明细点开再看。
+              用 antd Collapse 而不是自己写一个可点的 div —— 键盘操作与 aria-expanded 都由它负责。 */}
+          <Collapse
+            ghost
+            className="attribution-rule-collapse"
+            items={[{
+              key: rule.id,
+              label: (
+                <div className="attribution-rule-list-item__header">
+                  <Text strong className="attribution-rule-list-item__title">{rule.display_name}</Text>
+                  <Space wrap size={6}>
+                    {rule.system_locked ? <Tag color="gold">安全底线 · 不可改</Tag> : <Tag color="blue">管理员候选规则</Tag>}
+                    <Tag color={rule.enabled ? 'green' : 'default'}>{rule.enabled ? '启用中' : '已停用'}</Tag>
+                    {rule.capability === 'MR_ENHANCED' ? (
+                      <Tag color={mrEnhancedAvailable ? 'purple' : 'default'}>
+                        {mrEnhancedAvailable ? '依赖 MR 增强' : 'MR 增强未配置 · 会跳过'}
+                      </Tag>
+                    ) : null}
+                    <Tag bordered={false} className="attribution-rule-list-item__priority-tag">优先级 {rule.priority}</Tag>
+                    {/* 命中后的动作是这条规则最关键的一句，收起时也要能看见。 */}
+                    <Text type="secondary" className="attribution-rule-list-item__action-summary">
+                      命中后：{attributionRuleActionLabel(rule.action.type)}
+                    </Text>
+                  </Space>
+                </div>
+              ),
+              children: (
+                <>
+                  {rule.description.trim() === '' ? null : (
+                    <Paragraph type="secondary" className="attribution-rule-list-item__description">
+                      {rule.description}
+                    </Paragraph>
+                  )}
+                  <div className="attribution-rule-list-item__body">
+                    <Text type="secondary">满足{rule.match === 'ALL' ? '下列全部条件' : '下列任一条件'}：</Text>
+                    <ul className="attribution-rule-list-item__conditions">
+                      {rule.conditions.map((condition) => (
+                        <li key={condition.id}>
+                          {attributionRuleFieldLabel(condition.field)} · {attributionRuleOperatorLabel(condition.operator)}
+                          {condition.value === undefined || condition.value === null || condition.value === ''
+                            ? ''
+                            : `「${String(condition.value)}」`}
+                        </li>
+                      ))}
+                    </ul>
+                    <Text>
+                      命中后：<Text strong>{attributionRuleActionLabel(rule.action.type)}</Text>
+                      <Text type="secondary">（原因：{attributionRuleReasonCodeLabel(rule.action.reason_code)}）</Text>
+                    </Text>
+                  </div>
+                </>
+              ),
+            }]}
+          />
+        </List.Item>
+      )}
+    />
+  )
+}
+
 export function RuleVisualEditor({
   rules,
   readOnly,
@@ -63,6 +155,10 @@ export function RuleVisualEditor({
   mrEnhancedAvailable: boolean
   onChange(rules: AttributionRuleDefinition[]): void
 }) {
+  if (readOnly) {
+    return <RuleReadOnlyList rules={rules} mrEnhancedAvailable={mrEnhancedAvailable} />
+  }
+
   const issues = validateEditableRules(rules)
   const updateRule = (ruleId: string, update: (rule: AttributionRuleDefinition) => AttributionRuleDefinition) => {
     onChange(rules.map((rule) => (rule.id === ruleId ? update(rule) : rule)))
@@ -214,7 +310,7 @@ export function RuleVisualEditor({
               <Space wrap>
                 <Text strong>动作</Text>
                 {rule.system_locked ? (
-                  <Tag color="gold">{rule.action.type}</Tag>
+                  <Tag color="gold">{attributionRuleActionLabel(rule.action.type)}</Tag>
                 ) : (
                   <Select
                     aria-label="规则动作"

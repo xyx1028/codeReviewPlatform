@@ -85,6 +85,32 @@ function discovery(overrides: Partial<GitEmailDiscovery> = {}): PhaseInput {
   } as PhaseInput
 }
 
+describe('describeGitEmailDiscoveryPhase 的视角', () => {
+  it('默认（本人）说"你提的合并申请"', () => {
+    const running = describeGitEmailDiscoveryPhase(discovery({ status: 'RUNNING', claimed: true }), 0)
+    expect(running.hint).toContain('你提的')
+  })
+
+  it('管理员代查时不能说"你" —— 提 MR 的是被查的那个人', () => {
+    const running = describeGitEmailDiscoveryPhase(
+      discovery({ status: 'RUNNING', claimed: true }),
+      0,
+      'ADMIN',
+    )
+    expect(running.hint).toContain('该用户提的')
+    expect(running.hint).not.toContain('你提的')
+
+    const done = describeGitEmailDiscoveryPhase(
+      discovery({ status: 'SUCCEEDED', candidate_count: 2, merge_request_count: 9, excluded_candidate_count: 3 }),
+      0,
+      'ADMIN',
+    )
+    expect(done.kind).toBe('DONE')
+    expect(done.hint).toContain('已剔除 3 个')
+    expect(done.hint).not.toContain('你提的')
+  })
+})
+
 describe('describeGitEmailDiscoveryPhase', () => {
   it('没发起查询时是空闲', () => {
     expect(describeGitEmailDiscoveryPhase(null, 0).kind).toBe('IDLE')

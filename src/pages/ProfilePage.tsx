@@ -5,6 +5,7 @@ import {
   Button,
   Card,
   Col,
+  Divider,
   Form,
   Input,
   Modal,
@@ -622,7 +623,6 @@ export function ProfilePage({ email, displayName, role }: ProfilePageProps) {
     <Space direction="vertical" size={24} className="profile-page">
       <div className="profile-page-header">
         <div>
-          <Text className="profile-eyebrow">ACCOUNT SETTINGS</Text>
           <Title level={2}>个人中心</Title>
           <Text type="secondary">管理你的用户名与员工号（需求里的「开发人员」就是它）、登录密码与 Git 身份。</Text>
         </div>
@@ -632,11 +632,15 @@ export function ProfilePage({ email, displayName, role }: ProfilePageProps) {
         <Row gutter={0} align="stretch">
           <Col xs={24} md={9} lg={8}>
             <div className="profile-summary">
+              <div className="profile-avatar" aria-hidden="true">
+                {accountName.slice(0, 1).toUpperCase()}
+              </div>
               <Title level={4}>{accountName}</Title>
               <Text className="profile-email">{email || '未绑定邮箱'}</Text>
               <Tag color={currentRole.color === 'default' ? undefined : currentRole.color}>
                 {currentRole.label}
               </Tag>
+              <Divider className="profile-summary-divider" />
               <Text type="secondary" className="profile-summary-hint">账号资料仅你本人可修改</Text>
             </div>
           </Col>

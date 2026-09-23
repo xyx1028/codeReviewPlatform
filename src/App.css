@@ -921,11 +921,24 @@ a.dashboard-distribution-item:focus-visible {
   color: #0f172a;
 }
 
-.profile-eyebrow {
-  color: #2563eb;
-  font-size: 12px;
+.profile-avatar {
+  display: flex;
+  width: 72px;
+  height: 72px;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 16px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #60a5fa 0%, #2563eb 100%);
+  box-shadow: 0 10px 24px rgba(37, 99, 235, 0.28);
+  color: #ffffff;
+  font-size: 28px;
   font-weight: 700;
-  letter-spacing: 0.12em;
+}
+
+.profile-summary-divider {
+  margin: 20px 0 16px;
+  border-color: #dbeafe;
 }
 
 .profile-card {
@@ -975,7 +988,7 @@ a.dashboard-distribution-item:focus-visible {
 }
 
 .profile-summary-hint {
-  margin-top: 22px;
+  margin-top: 0;
   font-size: 12px;
 }
 
@@ -2010,6 +2023,99 @@ a.dashboard-distribution-item:focus-visible {
     grid-column: 1 / -1;
     border-bottom: 0;
   }
+}
+
+.attribution-rule-list {
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.attribution-rule-list .ant-list-pagination {
+  margin-top: 16px;
+}
+
+.attribution-rule-list-item {
+  position: relative;
+  display: flex !important;
+  flex-direction: column;
+  align-items: stretch !important;
+  padding: 14px 18px 14px 24px !important;
+}
+
+.attribution-rule-list-item::before {
+  position: absolute;
+  inset: 10px auto 10px 10px;
+  width: 4px;
+  border-radius: 4px;
+  content: '';
+}
+
+.attribution-rule-list-item--locked::before {
+  background: linear-gradient(180deg, #fbbf24, #d97706);
+}
+
+.attribution-rule-list-item--candidate::before {
+  background: linear-gradient(180deg, #60a5fa, #2563eb);
+}
+
+/* 折叠后标题与标签排在同一行；标签多时自然换行。 */
+.attribution-rule-list-item__header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attribution-rule-list-item__title {
+  font-size: 15px;
+}
+
+.attribution-rule-list-item__priority-tag {
+  color: #64748b;
+  background: #f1f5f9;
+}
+
+.attribution-rule-list-item__description {
+  margin: 8px 0 0 !important;
+  font-size: 13px;
+}
+
+.attribution-rule-list-item__body {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.attribution-rule-list-item__conditions {
+  margin: 6px 0 10px;
+  padding-left: 18px;
+}
+
+.attribution-rule-list-item__conditions li {
+  color: #334155;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* 折叠态的规则行：标题与标签排成一行，条件明细收起来。
+   ghost Collapse 自带的内边距会让每行又高回去，这里压掉。 */
+.attribution-rule-collapse {
+  width: 100%;
+}
+
+.attribution-rule-collapse .ant-collapse-header {
+  align-items: center !important;
+  padding: 0 !important;
+}
+
+.attribution-rule-collapse .ant-collapse-content-box {
+  padding: 0 !important;
+}
+
+.attribution-rule-list-item__action-summary {
+  font-size: 13px;
 }
 
 .skill-filter-bar {

@@ -145,7 +145,13 @@ export function describeGitEmailDiscoveryPhase(
     | 'partial' | 'error_code' | 'error_message' | 'gitlab_username' | 'lookback_days'>
     & Partial<Pick<GitEmailDiscovery, 'excluded_candidate_count'>> | null,
   elapsedMs: number,
+  /**
+   * 谁在看这段话。管理员代查时说"你提的合并申请"是错的 —— 那是被查的那个人提的。
+   * 默认 'SELF' 保持个人中心原文不变。
+   */
+  audience: 'SELF' | 'ADMIN' = 'SELF',
 ): GitEmailDiscoveryPhase {
+  const owner = audience === 'SELF' ? '你' : '该用户'
   if (discovery === null) return { kind: 'IDLE', hint: '' }
   if (discovery.status === 'FAILED') {
     return {
@@ -159,7 +165,7 @@ export function describeGitEmailDiscoveryPhase(
     // 剔除数必须说出来：否则"我明明是 100 个 MR 的审核人，怎么只有一个邮箱"没人能自己想明白。
     const excludedHint = excluded > 0
       ? `；已剔除 ${excluded} 个不属于 ${discovery.gitlab_username} 的提交邮箱`
-        + '（你提的集成合并申请里带着别人的提交）'
+        + `（${owner}提的集成合并申请里带着别人的提交）`
       : ''
     if (discovery.candidate_count === 0) {
       if (discovery.merge_request_count > 0) {
@@ -182,7 +188,7 @@ export function describeGitEmailDiscoveryPhase(
     }
   }
   if (discovery.status === 'RUNNING' || discovery.claimed) {
-    return { kind: 'RUNNING', hint: '正在读取 GitLab 上你提的合并申请…' }
+    return { kind: 'RUNNING', hint: `正在读取 GitLab 上${owner}提的合并申请…` }
   }
   if (elapsedMs > GIT_EMAIL_DISCOVERY_CLAIM_TIMEOUT_MS) {
     return {

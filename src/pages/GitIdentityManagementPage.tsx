@@ -1,8 +1,16 @@
-import { useState } from 'react'
-import { Alert, Button, Card, Form, Input, Modal, Space, Table, Tag } from 'antd'
+import { useEffect, useState } from 'react'
+import { Alert, Button, Card, Form, Input, Modal, Radio, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { adminListDeveloperGitIdentities, adminSaveDeveloperGitIdentity } from '../lib/api'
+import {
+  adminListDeveloperGitIdentities,
+  adminSaveDeveloperGitIdentity,
+  enqueueMyGitEmailDiscovery,
+  getMyGitEmailDiscovery,
+} from '../lib/api'
+import { GIT_EMAIL_MATCH_REASON_META, describeGitEmailDiscoveryPhase } from '../lib/git-identity'
 import type { DeveloperGitIdentityRecord, DeveloperIdentityStatus } from '../types'
+
+const { Text } = Typography
 
 interface IdentityFormValues {
   displayName: string
@@ -25,12 +33,59 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
   const [editing, setEditing] = useState<DeveloperGitIdentityRecord | null>(null)
   const [addingEmail, setAddingEmail] = useState(false)
   const [open, setOpen] = useState(false)
+  // 反查（管理员代查）：与个人中心用同一组 RPC —— enqueue 只按 GitLab 用户名排队，
+  // requested_by 记的是发起人，所以管理员替别人查完全不需要新接口。
+  const [discoveryId, setDiscoveryId] = useState<string | null>(null)
+  const [discoveryStartedAt, setDiscoveryStartedAt] = useState<number | null>(null)
+  const [nowTick, setNowTick] = useState(() => Date.now())
+  const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null)
 
   const identities = useQuery({
     queryKey: ['developer-git-identities'],
     enabled: isAdmin,
     queryFn: adminListDeveloperGitIdentities,
   })
+  const discoveryQuery = useQuery({
+    queryKey: ['admin-git-email-discovery', discoveryId],
+    enabled: discoveryId !== null,
+    queryFn: () => getMyGitEmailDiscovery(discoveryId!),
+    // 终态就停轮询：这条链路会打 GitLab API，没必要一直问。
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status === 'SUCCEEDED' || status === 'FAILED' ? false : 2_000
+    },
+  })
+  const discovery = discoveryId === null ? null : discoveryQuery.data ?? null
+  const waiting = discovery !== null && (discovery.status === 'QUEUED' || discovery.status === 'RUNNING')
+  // 只在等待期间跑这个计时器：它唯一的用途是判断"排队多久还没 Worker 领"。
+  useEffect(() => {
+    if (!waiting) return
+    const timer = window.setInterval(() => setNowTick(Date.now()), 1_000)
+    return () => window.clearInterval(timer)
+  }, [waiting])
+  const phase = describeGitEmailDiscoveryPhase(
+    discovery,
+    discoveryStartedAt === null ? 0 : nowTick - discoveryStartedAt,
+    'ADMIN',
+  )
+  const candidates = discovery?.candidates ?? []
+
+  const resetDiscovery = () => {
+    setDiscoveryId(null)
+    setDiscoveryStartedAt(null)
+    setSelectedCandidateId(null)
+  }
+  const discover = useMutation({
+    mutationFn: (gitlabUsername: string) => enqueueMyGitEmailDiscovery(gitlabUsername),
+    onSuccess: (id) => {
+      setSelectedCandidateId(null)
+      setDiscoveryId(id)
+      setDiscoveryStartedAt(Date.now())
+      setNowTick(Date.now())
+    },
+    onError: (error) => message.error(error instanceof Error ? error.message : '查找失败'),
+  })
+
   const save = useMutation({
     mutationFn: (values: IdentityFormValues) => adminSaveDeveloperGitIdentity({
       developerId: editing?.developer_id,
@@ -55,6 +110,7 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
       setOpen(false)
       setEditing(null)
       setAddingEmail(false)
+      resetDiscovery()
       form.resetFields()
       await queryClient.invalidateQueries({ queryKey: ['developer-git-identities'] })
     },
@@ -67,11 +123,13 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
   const beginCreate = () => {
     setEditing(null)
     setAddingEmail(false)
+    resetDiscovery()
     setOpen(true)
   }
   const beginEdit = (record: DeveloperGitIdentityRecord) => {
     setEditing(record)
     setAddingEmail(false)
+    resetDiscovery()
     form.setFieldsValue({
       displayName: record.display_name,
       employeeCode: record.employee_code ?? undefined,
@@ -84,6 +142,7 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
   const beginAddEmail = (record: DeveloperGitIdentityRecord) => {
     setEditing(record)
     setAddingEmail(true)
+    resetDiscovery()
     form.setFieldsValue({
       displayName: record.display_name,
       employeeCode: record.employee_code ?? undefined,
@@ -96,12 +155,6 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Alert
-        type="info"
-        showIcon
-        title="上线前必须先配置 Vault secret：analysis_identity_pepper"
-        description="缺少时保存会明确返回 IDENTITY_PEPPER_MISSING；已有结构化 Story-Id 的分析仍可运行。成员在「个人中心 → Git 身份」自己维护的记录会标「本人维护」，这里代录的标「管理员代录」。归属匹配用的是数据库内计算的 HMAC 指纹；邮箱明文同时保存一份，仅用于这里的显示与编辑回显（内部平台，公司邮箱本身是公开的）。"
-      />
       {identities.isError ? <Alert type="error" showIcon title="读取 Git 身份失败" description={identities.error instanceof Error ? identities.error.message : '未知错误'} /> : null}
       <Card extra={<Button type="primary" onClick={beginCreate}>新增 Git 身份</Button>}>
         <Table<DeveloperGitIdentityRecord>
@@ -137,7 +190,7 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
         okText="保存"
         cancelText="取消"
         confirmLoading={save.isPending}
-        onCancel={() => { setOpen(false); setEditing(null); setAddingEmail(false); form.resetFields() }}
+        onCancel={() => { setOpen(false); setEditing(null); setAddingEmail(false); resetDiscovery(); form.resetFields() }}
         onOk={() => form.submit()}
       >
         <Form form={form} layout="vertical" onFinish={(values) => save.mutate(values)}>
@@ -145,26 +198,101 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
             <Input placeholder="例如：张三" />
           </Form.Item>
           <Form.Item name="employeeCode" label="员工号（推荐）"><Input placeholder="用于区分同名人员" /></Form.Item>
+
+          {/* 先填 GitLab 用户名并反查，再选邮箱：管理员代录拿到的是与本人自助绑定同一份 GitLab 证据，
+              而不是靠嘴问一个邮箱填进去。 */}
+          <Form.Item
+            name="gitlabUsername"
+            label="GitLab 用户名"
+            extra="就是 git.kingdee.com 个人设置里 Account 页面的 Path，例如 yuxuan_xue。"
+            rules={[{ pattern: /^[A-Za-z0-9][A-Za-z0-9_.-]{0,48}$/, message: '只能包含字母、数字、下划线、点和短横线' }]}
+          >
+            <Input placeholder="yuxuan_xue" autoComplete="off" onChange={() => resetDiscovery()} />
+          </Form.Item>
+          <div style={{ marginBottom: 16 }}>
+            <Button
+              onClick={() => {
+                const username = (form.getFieldValue('gitlabUsername') as string | undefined)?.trim() ?? ''
+                if (username === '') {
+                  message.warning('请先填写 GitLab 用户名')
+                  return
+                }
+                discover.mutate(username)
+              }}
+              loading={discover.isPending || waiting}
+            >
+              {discovery === null ? '查找该用户的提交邮箱' : '重新查找'}
+            </Button>
+          </div>
+
+          {phase.kind === 'WAITING_WORKER' || phase.kind === 'RUNNING' ? (
+            <Alert type="info" showIcon style={{ marginBottom: 16 }} title={phase.hint} />
+          ) : null}
+          {phase.kind === 'NO_WORKER' ? (
+            <Alert type="warning" showIcon style={{ marginBottom: 16 }} title="没有可用的 Worker" description={phase.hint} />
+          ) : null}
+          {phase.kind === 'FAILED' ? (
+            <Alert type="error" showIcon style={{ marginBottom: 16 }} title="查找失败" description={phase.hint} />
+          ) : null}
+          {phase.kind === 'DONE_EMPTY' ? (
+            <Alert type="warning" showIcon style={{ marginBottom: 16 }} title="没有找到提交邮箱" description={phase.hint} />
+          ) : null}
+
+          {candidates.length > 0 ? (
+            <Form.Item label="反查到的提交邮箱" required>
+              <Radio.Group
+                value={selectedCandidateId}
+                onChange={(event) => {
+                  const candidateId = event.target.value as string
+                  setSelectedCandidateId(candidateId)
+                  const picked = candidates.find((item) => item.candidate_id === candidateId)
+                  if (picked?.email) form.setFieldValue('email', picked.email)
+                  // 别名用这个邮箱在提交里真实出现过的作者名，省得管理员去猜。
+                  if (picked && picked.author_names.length > 0) {
+                    form.setFieldValue('aliases', picked.author_names.slice(0, 10).join('，'))
+                  }
+                }}
+                style={{ display: 'flex', flexDirection: 'column', gap: 12, width: '100%' }}
+              >
+                {candidates.map((candidate) => {
+                  const reason = candidate.match_reason === null
+                    ? null
+                    : GIT_EMAIL_MATCH_REASON_META[candidate.match_reason] ?? null
+                  return (
+                    <Radio key={candidate.candidate_id} value={candidate.candidate_id} disabled={candidate.already_bound}>
+                      <Text strong>{candidate.email ?? candidate.masked_email}</Text>
+                      <Text type="secondary" style={{ marginLeft: 8 }}>{candidate.commit_count} 个提交</Text>
+                      {reason === null ? null : (
+                        <Tooltip title={reason.hint}>
+                          <Tag color={reason.color} style={{ marginLeft: 8 }}>{reason.label}</Tag>
+                        </Tooltip>
+                      )}
+                      {candidate.already_bound ? <Tag style={{ marginLeft: 8 }}>已被绑定</Tag> : null}
+                    </Radio>
+                  )
+                })}
+              </Radio.Group>
+            </Form.Item>
+          ) : null}
+
+          {/* 邮箱与别名一律由上面的反查候选带下来，不接受手工输入：
+              手输的邮箱没有任何 GitLab 证据，一旦打错就是一条永远匹配不上的身份。
+              编辑已有行时这两个值来自该行本身，同样只读。 */}
           <Form.Item
             name="email"
             label="Git author email"
             extra={
               editing !== null && !addingEmail && editing.author_email === null
-                ? `这是改造前建的记录，库里没有明文（原掩码 ${editing.masked_email ?? '未配置'}）。完整输入一次即可补全。`
-                : '填写开发人员本机 Git 提交使用的邮箱。'
+                ? `这是改造前建的记录，库里没有明文（原掩码 ${editing.masked_email ?? '未配置'}）。请用上面的反查结果补全。`
+                : undefined
             }
-            rules={[{ required: true, type: 'email', message: '请输入有效邮箱' }]}
+            rules={[{ required: true, type: 'email', message: '请先在上面选择反查到的邮箱' }]}
           >
-            <Input autoComplete="off" placeholder="developer@example.com" />
+            <Input readOnly autoComplete="off" placeholder="请先在上面选择反查到的邮箱" />
           </Form.Item>
-          <Form.Item
-            name="aliases"
-            label="Git 作者别名"
-            extra="提交里的 git config user.name，通常是英文或拼音，不是中文姓名。"
-          >
-            <Input placeholder="多个用逗号分隔，例如 yuxuan_xue, guolichen2025" />
+          <Form.Item name="aliases" label="Git 作者别名">
+            <Input readOnly placeholder="选择邮箱后自动带出" />
           </Form.Item>
-          <Form.Item name="gitlabUsername" label="GitLab 用户名"><Input placeholder="git.kingdee.com 个人设置里 Account 页面的 Path" /></Form.Item>
           {save.isError ? <Alert type="error" showIcon title="保存失败" description={save.error instanceof Error ? save.error.message : '未知错误'} /> : null}
         </Form>
       </Modal>

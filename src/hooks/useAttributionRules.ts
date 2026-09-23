@@ -250,6 +250,53 @@ export const ADMIN_EDITABLE_ACTIONS: ReadonlyArray<{
   { value: 'DOWNRANK_CANDIDATE', label: '降低候选优先级' },
 ]
 
+/** 全部动作类型的中文说明，包含系统安全底线规则专用的动作（管理员规则只能用上面两种）。 */
+export const ATTRIBUTION_RULE_ACTION_LABELS: Record<AttributionRuleActionType, string> = {
+  SELECT_STRONG: '加入强关联主集',
+  ADD_AI_CANDIDATE: '加入 AI 待判候选',
+  EXCLUDE_CURRENT_STORY: '排除出当前需求',
+  MARK_EFFECTIVE_REVERTED: '标记为已被回滚',
+  DOWNRANK_CANDIDATE: '降低候选优先级',
+  FLAG_CONFLICT: '标记身份冲突',
+  GLOBAL_FALLBACK: '降级为全仓分析',
+}
+
+const FIELD_LABEL_MAP: Record<string, string> = Object.fromEntries(
+  ATTRIBUTION_RULE_FIELD_OPTIONS.map((option) => [option.value, option.label]),
+)
+const OPERATOR_LABEL_MAP: Record<string, string> = Object.fromEntries(
+  ATTRIBUTION_RULE_OPERATOR_OPTIONS.map((option) => [option.value, option.label]),
+)
+// 系统预置规则固定使用的原因码；管理员自定义规则的原因码是自由文本，未命中时原样显示。
+const SYSTEM_REASON_CODE_LABELS: Record<string, string> = {
+  EXPLICIT_STORY_ID: '提交说明明确标注需求号',
+  EXPLICIT_MR_STORY_ID: '合并请求明确标注需求号',
+  SAME_EXPLICIT_MR: '同一明确合并请求内的提交',
+  STORY_CODE_WITH_SUPPORT: '标题/分支命中需求号且有辅助线索',
+  OWNER_WINDOW_MODULE: '开发人员 + 时间窗 + 模块重合',
+  UNSTRUCTURED_STORY_MENTION: '正文提及需求号',
+  OTHER_STORY_EXPLICIT: '明确属于其它需求',
+  REVERT_OF_RELATED_COMMIT: '回滚了关联提交',
+  BOT_OR_GENERATED: '机器人或生成文件',
+  IDENTITY_AMBIGUOUS: '开发人员身份冲突',
+  RANGE_INCOMPLETE: '范围不完整降级',
+  NO_CANDIDATE: '无候选降级',
+  RULE_CONFLICT: '规则冲突降级',
+}
+
+export function attributionRuleFieldLabel(field: string): string {
+  return FIELD_LABEL_MAP[field] ?? field
+}
+export function attributionRuleOperatorLabel(operator: string): string {
+  return OPERATOR_LABEL_MAP[operator] ?? operator
+}
+export function attributionRuleActionLabel(action: AttributionRuleActionType): string {
+  return ATTRIBUTION_RULE_ACTION_LABELS[action] ?? action
+}
+export function attributionRuleReasonCodeLabel(reasonCode: string): string {
+  return SYSTEM_REASON_CODE_LABELS[reasonCode] ?? reasonCode
+}
+
 export function validateEditableRules(rules: AttributionRuleDefinition[]): AttributionRuleValidationIssue[] {
   const issues: AttributionRuleValidationIssue[] = []
   const codes = new Set<string>()
