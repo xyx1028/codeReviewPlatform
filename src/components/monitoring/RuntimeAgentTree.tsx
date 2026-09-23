@@ -1,96 +1,9 @@
-import { Alert, Card, Empty, Segmented, Tag, Tooltip, Typography } from 'antd'
-import type { RuntimeAgentSnapshot, RuntimeAttemptSnapshot, RuntimeTaskSnapshot } from '../../types'
-import {
-  agentNodeStatusMeta,
-  agentProviderLabels,
-  agentRoleLabels,
-  agentRunStatusMeta,
-  runtimeActivityLabel,
-  runtimeErrorCodeLabel,
-} from '../../lib/labels'
-import { formatAge, formatDuration, formatElapsed, formatTokens } from '../../lib/runtime-format'
+import { Card, Empty, Segmented, Tag, Tooltip, Typography } from 'antd'
+import type { RuntimeAttemptSnapshot, RuntimeTaskSnapshot } from '../../types'
+import { agentRunStatusMeta, runtimeActivityLabel, runtimeErrorCodeLabel } from '../../lib/labels'
+import { formatDuration, formatElapsed, formatTokens } from '../../lib/runtime-format'
 
 const { Text } = Typography
-
-/**
- * 单个 Agent 卡片。
- *
- * 并发 Agent 各自显示自己的活动 —— run 级摘要只是「最近发生的活动」，不能冒充唯一活动。
- * `open_correlations` 是「卡在哪」的直接答案：未闭合的工具/模型请求及其已持续时间。
- */
-function AgentNode({ agent, now }: { agent: RuntimeAgentSnapshot; now: number }) {
-  const statusMeta = agentNodeStatusMeta[agent.status]
-  const isWorkflowChild = agent.provider === 'workflow'
-  const statusKind = agent.status === 'RUNNING'
-    ? 'running'
-    : agent.status === 'FAILED'
-      ? 'error'
-      : agent.status === 'CANCELLED'
-        ? 'cancelled'
-        : 'complete'
-  return (
-    <div
-      className="runtime-agent-node"
-      style={{ marginLeft: agent.delegation_depth * 20 }}
-    >
-      <div className="runtime-agent-node__header">
-        <div className="runtime-agent-node__identity">
-          <span
-            className={`runtime-agent-node__status runtime-agent-node__status--${statusKind}`}
-            aria-hidden="true"
-          />
-          <Text strong>{agentRoleLabels[agent.agent_role] ?? agent.agent_role}</Text>
-          <Tag bordered={false}>{agentProviderLabels[agent.provider] ?? agent.provider}</Tag>
-          <span className="runtime-agent-node__depth">深度 {agent.delegation_depth}</span>
-        </div>
-        <Tag color={statusMeta?.color ?? 'default'}>{statusMeta?.label ?? agent.status}</Tag>
-      </div>
-
-      <div className="runtime-agent-node__metrics">
-        <div><span>模型请求</span><strong>{agent.model_requests}</strong></div>
-        <div><span>工具调用</span><strong>{agent.tool_calls}</strong></div>
-        <div><span>证据</span><strong>{agent.evidence_produced}</strong></div>
-        <div>
-          <span>Token</span>
-          <strong>{formatTokens(agent.input_tokens)} / {formatTokens(agent.output_tokens)}</strong>
-        </div>
-      </div>
-
-      <div className={`runtime-agent-node__activity runtime-agent-node__activity--${statusKind}`}>
-        {agent.current_activity_status === 'RUNNING' ? (
-          <>
-            {runtimeActivityLabel(agent.current_activity_code)}
-            {agent.current_tool_name === null ? '' : `：${agent.current_tool_name}`}
-            {agent.current_activity_started_at === null
-              ? ''
-              : ` · 已持续 ${formatElapsed(agent.current_activity_started_at, now)}`}
-          </>
-        ) : (
-          <>
-            {agent.status === 'RUNNING' ? '当前无未闭合活动' : '已结束'}
-            {agent.current_activity_updated_at === null
-              ? ''
-              : ` · 最后更新 ${formatAge(agent.current_activity_updated_at, now)}`}
-          </>
-        )}
-      </div>
-
-      {agent.error_code === null ? null : (
-        <div className="runtime-agent-node__error">{runtimeErrorCodeLabel(agent.error_code)}</div>
-      )}
-
-      {isWorkflowChild ? (
-        // Phase 3 之前平台没有 Workflow 的真实生命周期边界，绝不展示伪造的步骤树。
-        <Alert
-          type="info"
-          showIcon
-          message="Workflow 子 Agent 已运行，步骤明细尚未接入"
-          description="它调用 workflow 工具本身会正常出现在工具时间线里；Workflow 实例与步骤需要新增 Broker 协议后才可展开。"
-        />
-      ) : null}
-    </div>
-  )
-}
 
 function attemptTiming(attempt: RuntimeAttemptSnapshot, now: number): string | null {
   if (attempt.started_at === null) return null
@@ -120,14 +33,14 @@ export function RuntimeAgentTree({
 }) {
   if (task === null) {
     return (
-      <Card title="Attempt 与 Agent Tree">
+      <Card title="执行概览">
         <Empty description="选择一个需求任务" />
       </Card>
     )
   }
   if (task.attempts.length === 0) {
     return (
-      <Card title="Attempt 与 Agent Tree">
+      <Card title="执行概览">
         <Empty description="这个任务还没有 Attempt 运行事实" />
       </Card>
     )
@@ -202,30 +115,6 @@ export function RuntimeAgentTree({
             </div>
           )}
         </div>
-
-        <div className="runtime-agent-tree-section">
-          <div className="runtime-agent-tree-section__heading">
-            <span>Agent 执行树</span>
-            <Text type="secondary">按委派深度排列</Text>
-          </div>
-          {attempt.agents.length === 0 ? (
-            // Agent 只有数据库注册成功后才出现。没有节点就是真的还没有节点。
-            <Empty description="还没有任何 Agent 在数据库登记成功" />
-          ) : (
-            <div className="runtime-agent-tree-nodes">
-              {[...attempt.agents]
-                .sort(
-                  (a, b) =>
-                    a.delegation_depth - b.delegation_depth ||
-                    (a.started_at ?? '').localeCompare(b.started_at ?? ''),
-                )
-                .map((agent) => (
-                  <AgentNode key={agent.agent_node_id} agent={agent} now={now} />
-                ))}
-            </div>
-          )}
-        </div>
-
       </div>
     </Card>
   )

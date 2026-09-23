@@ -1844,8 +1844,7 @@ a.dashboard-distribution-item:focus-visible {
   gap: 10px;
 }
 
-.runtime-attempt-overview__state-main .ant-tag,
-.runtime-agent-node__header .ant-tag {
+.runtime-attempt-overview__state-main .ant-tag {
   flex: 0 0 auto;
   margin: 0;
 }
@@ -1923,171 +1922,6 @@ a.dashboard-distribution-item:focus-visible {
   font-size: 12px;
 }
 
-.runtime-agent-tree-section {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.runtime-agent-tree-section__heading {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding-inline: 2px;
-}
-
-.runtime-agent-tree-section__heading > span:first-child {
-  color: #0f172a;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.runtime-agent-tree-section__heading .ant-typography {
-  font-size: 11px;
-}
-
-.runtime-agent-tree-nodes {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.runtime-agent-node {
-  position: relative;
-  overflow: hidden;
-  border: 1px solid #e2e8f0;
-  border-radius: 11px;
-  background: #ffffff;
-  box-shadow: 0 3px 12px rgba(15, 23, 42, 0.035);
-}
-
-.runtime-agent-node::before {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 3px;
-  background: linear-gradient(180deg, #60a5fa, #2563eb);
-  content: '';
-}
-
-.runtime-agent-node__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-width: 0;
-  gap: 10px;
-  padding: 9px 12px 8px 14px;
-  border-bottom: 1px solid #edf1f5;
-  background: #fbfdff;
-}
-
-.runtime-agent-node__identity {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  gap: 7px;
-}
-
-.runtime-agent-node__identity .ant-typography {
-  overflow: hidden;
-  min-width: 0;
-  color: #172033;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.runtime-agent-node__status {
-  flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.runtime-agent-node__status--complete {
-  background: #22c55e;
-  box-shadow: 0 0 0 3px #dcfce7;
-}
-
-.runtime-agent-node__status--running {
-  background: #3b82f6;
-  box-shadow: 0 0 0 3px #dbeafe;
-}
-
-.runtime-agent-node__status--error {
-  background: #ef4444;
-  box-shadow: 0 0 0 3px #fee2e2;
-}
-
-.runtime-agent-node__status--cancelled {
-  background: #94a3b8;
-  box-shadow: 0 0 0 3px #e2e8f0;
-}
-
-.runtime-agent-node__depth {
-  color: #94a3b8;
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.runtime-agent-node__metrics {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(72px, 0.7fr)) minmax(180px, 1.4fr);
-  padding: 9px 12px 8px 14px;
-}
-
-.runtime-agent-node__metrics > div {
-  display: flex;
-  align-items: baseline;
-  min-width: 0;
-  gap: 6px;
-  padding-right: 12px;
-}
-
-.runtime-agent-node__metrics span {
-  color: #94a3b8;
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.runtime-agent-node__metrics strong {
-  overflow: hidden;
-  color: #334155;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.runtime-agent-node__activity {
-  margin: 0 12px 10px 14px;
-  padding: 7px 9px;
-  border-radius: 7px;
-  background: #f8fafc;
-  color: #64748b;
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.runtime-agent-node__activity--running {
-  background: #eff6ff;
-  color: #1d4ed8;
-  font-weight: 600;
-}
-
-.runtime-agent-node__activity--error {
-  background: #fef2f2;
-  color: #b91c1c;
-}
-
-.runtime-agent-node__error {
-  margin: 0 12px 10px 14px;
-  color: #dc2626;
-  font-size: 12px;
-}
-
-.runtime-agent-node > .ant-alert {
-  margin: 0 12px 10px 14px;
-}
-
 .runtime-task-scroll::-webkit-scrollbar,
 .runtime-workbench__detail::-webkit-scrollbar {
   width: 8px;
@@ -2113,15 +1947,6 @@ a.dashboard-distribution-item:focus-visible {
   .runtime-attempt-overview__metrics > :last-child {
     grid-column: 1 / -1;
     border-top: 1px solid #edf1f6;
-  }
-
-  .runtime-agent-node__metrics {
-    grid-template-columns: repeat(3, minmax(70px, 1fr));
-    gap: 6px;
-  }
-
-  .runtime-agent-node__metrics > :last-child {
-    grid-column: 1 / -1;
   }
 }
 
@@ -2184,26 +2009,6 @@ a.dashboard-distribution-item:focus-visible {
   .runtime-attempt-overview__metrics > :last-child {
     grid-column: 1 / -1;
     border-bottom: 0;
-  }
-
-  .runtime-agent-node {
-    margin-left: 0 !important;
-  }
-
-  .runtime-agent-node__header {
-    align-items: flex-start;
-  }
-
-  .runtime-agent-node__identity {
-    flex-wrap: wrap;
-  }
-
-  .runtime-agent-node__metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .runtime-agent-node__metrics > :last-child {
-    grid-column: 1 / -1;
   }
 }
 
