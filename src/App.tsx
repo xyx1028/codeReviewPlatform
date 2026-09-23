@@ -76,6 +76,7 @@ import {
   listStories,
   onAuthChange,
   reopenBatch,
+  requestJobCancel,
   retryAnalysisJob,
   saveHumanReview,
   setBatchDefaultBranch,
@@ -1650,7 +1651,7 @@ function AutoAnalysisSection({
   canManage: boolean
   hasExistingAiResult: boolean
 }) {
-  const { message } = AntApp.useApp()
+  const { message, modal } = AntApp.useApp()
   const queryClient = useQueryClient()
   const [supplementalModelId, setSupplementalModelId] = useState<string>()
   const [analysisContextVersion, setAnalysisContextVersion] = useState<1 | 2>(2)
@@ -1727,6 +1728,40 @@ function AutoAnalysisSection({
     },
     onError: (error) => message.error(error.message),
   })
+
+  // V1.15：停止整个分析任务。停止后 Job 立刻是终态，未开始的需求不再被领取；
+  // 在跑的 attempt 收到取消意图后在一个心跳周期内收敛，已提交的结果保留。
+  const cancelJobMutation = useMutation({
+    mutationFn: () => {
+      if (!job) throw new Error('没有可停止的任务')
+      return requestJobCancel(job.id)
+    },
+    onSuccess: (result) => {
+      if (result.already_terminal) {
+        message.info('该分析任务已经结束，无需停止')
+      } else {
+        message.success(
+          result.cancelled_attempts > 0
+            ? `已停止分析任务，正在收敛 ${String(result.cancelled_attempts)} 个运行中的 Agent 尝试`
+            : '已停止分析任务',
+        )
+      }
+      invalidateAll()
+    },
+    onError: (error) => message.error(error.message),
+  })
+
+  const confirmCancelJob = () => {
+    modal.confirm({
+      title: '停止这次分析任务？',
+      content:
+        '已经完成的需求结果会保留，正在运行的 Agent 尝试会被取消，未开始的需求不再执行。停止后需要重新发起分析，此操作不可撤销。',
+      okText: '停止分析',
+      okButtonProps: { danger: true },
+      cancelText: '继续运行',
+      onOk: () => cancelJobMutation.mutateAsync(),
+    })
+  }
 
   // 运行中每秒刷新一次运行时长展示
   const [, forceTick] = useState(0)
@@ -1907,6 +1942,11 @@ function AutoAnalysisSection({
             {analysisContextVersion === 2 ? '开始 V1.11 精准分析' : '开始兼容全仓分析'}
           </Button>
           {jobActive ? <Tag color="processing">分析进行中，页面每 4 秒自动刷新</Tag> : null}
+          {canManage && jobActive ? (
+            <Button danger loading={cancelJobMutation.isPending} onClick={confirmCancelJob}>
+              停止分析
+            </Button>
+          ) : null}
           {job ? (
             <Tag color={job.analysis_context_version === 2 ? 'blue' : 'default'}>
               {job.analysis_context_version === 2

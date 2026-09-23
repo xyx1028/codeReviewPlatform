@@ -233,6 +233,12 @@ export const analysisErrorCodeMeta: Record<string, AnalysisErrorMeta> = {
     suggestion: '确认要评审的分支后重新创建分析任务。',
     retryable: false,
   },
+  JOB_CANCELLED: {
+    title: '分析任务已被停止',
+    reason: '有批次管理权限的用户主动停止了这次分析。已经提交的需求结果保留，未开始的需求没有执行。',
+    suggestion: '确认原因（换模型、改范围、网络异常）后重新发起一次分析任务。',
+    retryable: true,
+  },
   RESULT_ALREADY_EXISTS: {
     title: '批次已经存在 AI 结果',
     reason: '平台检测到该批次已有结果，拒绝重复写入。',

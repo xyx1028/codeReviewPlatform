@@ -473,16 +473,31 @@ async function listStorageFilesRecursive(prefix: string): Promise<string[]> {
   return paths
 }
 
+/**
+ * 删除批次。
+ *
+ * 顺序是**先删数据库行、再清 Storage**。反过来的代价是：V1.15 给 `delete_review_batch`
+ * 加了"仍有分析任务在运行则拒绝"的守卫，如果先清 Storage，守卫一旦拒绝，附件已经没了
+ * 而批次还在。
+ */
 export async function deleteBatch(batchId: string) {
   const client = requireSupabase()
+  const { error } = await client.rpc('delete_review_batch', { p_batch_id: batchId })
+  if (error) throw new Error(batchDeleteErrorMessage(error.message))
+
   const filePaths = await listStorageFilesRecursive(batchId)
   if (filePaths.length) {
     const { error: removeError } = await client.storage.from('review-files').remove(filePaths)
     if (removeError) throw removeError
   }
+}
 
-  const { error } = await client.rpc('delete_review_batch', { p_batch_id: batchId })
-  if (error) throw new Error(error.message)
+/** 把数据库的稳定错误码翻成用户能照着做的提示。 */
+export function batchDeleteErrorMessage(raw: string): string {
+  if (raw.includes('BATCH_HAS_ACTIVE_ANALYSIS_JOB')) {
+    return '该批次仍有分析任务在运行。请先在「AI 结果」页点「停止分析」，任务停止后再删除批次。'
+  }
+  return raw
 }
 
 export async function listStories(batchId: string) {
@@ -927,8 +942,30 @@ export async function requestAttemptCancel(taskId: string, reason = 'USER_CANCEL
   return unwrap<boolean>({ data, error })
 }
 
-/** ADMIN：读取所选模型的新 Job 将冻结的完整 V4 策略。 */
-export async function adminGetV4CapabilityPolicy(modelConfigId: string) {
+export interface JobCancelResult {
+  job_id: string
+  job_status: string
+  already_terminal: boolean
+  cancelled_attempts: number
+}
+
+/**
+ * 停止整个分析任务（V1.15）。
+ *
+ * 需要批次管理权限。停止后 Job 立刻变成终态（`FAILED` + `error_code='JOB_CANCELLED'`），
+ * 未开始的需求不会再被 Worker 领取；在跑的 attempt 收到取消意图，一个心跳周期内收敛。
+ * 已经提交的需求结果保留。
+ */
+export async function requestJobCancel(jobId: string, reason = 'USER_CANCELLED') {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('request_analysis_job_cancel', {
+    p_job_id: jobId,
+    p_reason: reason,
+  })
+  return unwrap<JobCancelResult>({ data, error })
+}
+
+/** ADMIN：读取所选模型的新 Job 将冻结的完整 V4 策略。 */export async function adminGetV4CapabilityPolicy(modelConfigId: string) {
   const client = requireSupabase()
   const { data, error } = await client.rpc('admin_get_v4_capability_policy', {
     p_model_config_id: modelConfigId,

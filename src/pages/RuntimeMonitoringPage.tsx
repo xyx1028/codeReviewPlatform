@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
+  App as AntApp,
   Button,
   Card,
   Col,
@@ -9,11 +10,12 @@ import {
   Statistic,
   Typography,
 } from 'antd'
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   adminListActiveAnalysisBatches,
   adminListAnalysisWorkers,
   getAnalysisRuntimeTaskEvents,
+  requestJobCancel,
   runtimeAnalysisScopeApi,
 } from '../lib/api'
 import { computeRuntimeFreshness, useRuntimeConsole } from '../hooks/useRuntimeConsole'
@@ -26,6 +28,7 @@ import { RuntimeFreshnessBadge } from '../components/monitoring/RuntimeFreshness
 import { formatAge } from '../lib/runtime-format'
 import { agentRoleLabels } from '../lib/labels'
 import { buildRuntimeTaskEventPage } from '../lib/runtime-timeline'
+import type { ActiveAnalysisBatch } from '../types'
 
 const { Title, Text } = Typography
 
@@ -61,6 +64,8 @@ function useIsMobile(): boolean {
  */
 export function RuntimeMonitoringPage({ isAdmin }: { isAdmin: boolean }) {
   const isMobile = useIsMobile()
+  const { message, modal } = AntApp.useApp()
+  const queryClient = useQueryClient()
   const [pickedBatchId, setPickedBatchId] = useState<string | null>(null)
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   /**
@@ -83,8 +88,44 @@ export function RuntimeMonitoringPage({ isAdmin }: { isAdmin: boolean }) {
     refetchIntervalInBackground: false,
     staleTime: 3000,
   })
-  const workersQuery = useQuery({
-    queryKey: ['runtime-analysis-workers'],
+
+  // V1.15：监控台也是停止入口 —— 管理员通常是先在这里看到卡住的批次。
+  const [stoppingJobId, setStoppingJobId] = useState<string | null>(null)
+  const stopJobMutation = useMutation({
+    mutationFn: (jobId: string) => requestJobCancel(jobId),
+    onSuccess: (result) => {
+      if (result.already_terminal) {
+        message.info('该分析任务已经结束，无需停止')
+      } else {
+        message.success(
+          result.cancelled_attempts > 0
+            ? `已停止分析任务，正在收敛 ${String(result.cancelled_attempts)} 个运行中的 Agent 尝试`
+            : '已停止分析任务',
+        )
+      }
+      void queryClient.invalidateQueries({ queryKey: ['runtime-active-batches'] })
+      void queryClient.invalidateQueries({ queryKey: ['batches'] })
+    },
+    onError: (error: unknown) => {
+      message.error(error instanceof Error ? error.message : '停止分析任务失败')
+    },
+    onSettled: () => setStoppingJobId(null),
+  })
+  const confirmStopJob = (batch: ActiveAnalysisBatch) => {
+    modal.confirm({
+      title: `停止「${batch.batch_name}」的分析任务？`,
+      content:
+        '已经完成的需求结果会保留，正在运行的 Agent 尝试会被取消，未开始的需求不再执行。停止后需要重新发起分析，此操作不可撤销。',
+      okText: '停止分析',
+      okButtonProps: { danger: true },
+      cancelText: '继续运行',
+      onOk: () => {
+        setStoppingJobId(batch.job_id)
+        return stopJobMutation.mutateAsync(batch.job_id)
+      },
+    })
+  }
+  const workersQuery = useQuery({    queryKey: ['runtime-analysis-workers'],
     enabled: isAdmin,
     // 在线 Worker 与槽位不在监控 RPC 里重算：直接复用已有的 admin_list_analysis_workers。
     queryFn: adminListAnalysisWorkers,
@@ -350,6 +391,8 @@ export function RuntimeMonitoringPage({ isAdmin }: { isAdmin: boolean }) {
           setSelectedTaskId(null)
         }}
         isMobile={isMobile}
+        onStopJob={confirmStopJob}
+        stoppingJobId={stopJobMutation.isPending ? stoppingJobId : null}
       />
 
       <div className="runtime-workbench">

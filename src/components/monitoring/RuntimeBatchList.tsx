@@ -31,12 +31,17 @@ export function RuntimeBatchList({
   selectedBatchId,
   onSelect,
   isMobile,
+  onStopJob,
+  stoppingJobId,
 }: {
   batches: ActiveAnalysisBatch[]
   serverTime: string
   selectedBatchId: string | null
   onSelect(batchId: string): void
   isMobile: boolean
+  /** V1.15：停止整个分析任务。不传则不显示按钮（只读场景）。 */
+  onStopJob?(batch: ActiveAnalysisBatch): void
+  stoppingJobId?: string | null
 }) {
   const now = Date.parse(serverTime)
 
@@ -76,6 +81,19 @@ export function RuntimeBatchList({
                     运行时长 {formatElapsed(batch.job_started_at, now)} · 最后活动{' '}
                     {formatAge(batch.last_event_at, now)}
                   </Text>
+                  {onStopJob === undefined ? null : (
+                    <Button
+                      size="small"
+                      danger
+                      loading={stoppingJobId === batch.job_id}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onStopJob(batch)
+                      }}
+                    >
+                      停止分析
+                    </Button>
+                  )}
                 </Space>
               </Card>
             )
@@ -159,15 +177,31 @@ export function RuntimeBatchList({
     },
     {
       title: '',
-      width: 90,
+      width: 160,
       render: (_, batch) => (
-        <Button
-          size="small"
-          type={batch.batch_id === selectedBatchId ? 'primary' : 'default'}
-          onClick={() => onSelect(batch.batch_id)}
-        >
-          查看
-        </Button>
+        <Space size={6}>
+          <Button
+            size="small"
+            type={batch.batch_id === selectedBatchId ? 'primary' : 'default'}
+            onClick={() => onSelect(batch.batch_id)}
+          >
+            查看
+          </Button>
+          {onStopJob === undefined ? null : (
+            <Button
+              size="small"
+              danger
+              loading={stoppingJobId === batch.job_id}
+              onClick={(event) => {
+                // 行点击会切换选中批次，停止是破坏性动作，不能顺带触发。
+                event.stopPropagation()
+                onStopJob(batch)
+              }}
+            >
+              停止
+            </Button>
+          )}
+        </Space>
       ),
     },
   ]
