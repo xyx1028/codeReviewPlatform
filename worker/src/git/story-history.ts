@@ -26,7 +26,12 @@ export interface RepositoryHistoryManifestWire {
   head_sha: string
   head_subject: string | null
   range_source: 'TIME_DERIVED' | 'PREVIOUS_SUCCESSFUL_JOB' | 'UNAVAILABLE'
-  range_fallback_reason: 'PREVIOUS_BASE_INVALID' | 'PREVIOUS_BASE_MISSING' | 'PREVIOUS_BASE_NOT_ANCESTOR' | null
+  range_fallback_reason:
+    | 'PREVIOUS_BASE_INVALID'
+    | 'PREVIOUS_BASE_MISSING'
+    | 'PREVIOUS_BASE_NOT_ANCESTOR'
+    | 'PREVIOUS_BASE_INSIDE_WINDOW'
+    | null
   range_start_at: string
   range_end_at: string
   head_resolved_at: string
@@ -215,6 +220,21 @@ async function fetchHistory(
   let deepenCount = 0
   let previousFallbackReason: PreviousFallbackReason = null
   const previous = input.previousBaseSha?.toLowerCase() ?? null
+  /*
+   * 上一个成功 Job 的 head 只允许**放宽**分析范围，永远不许收窄。
+   *
+   * 原实现一旦确认 previous 是 head 的祖先就立即采用。git 认为一个提交是自己的祖先，
+   * 所以两个 Job 冻结在同一个 head 时（仓库这期间没有新提交，完全正常）base==head，
+   * `base..head` 是空集 → commit_count=0 → 所有需求 NO_CANDIDATE → 整批退化成全仓评审。
+   * 线上实测：首个成功的 v2 Job 之后，同分支上每个新 Job 都是这样，直到仓库来了新提交
+   * （2026-09-23 云端 Job `5e4b0f67`，四仓 base==head、commit 数 0、26/26 全仓降级；
+   * 12:33 的 `753d51e3` 同样如此）。也就是说"精准提交分析"对同一份代码状态只能用一次。
+   *
+   * 修正后的规则：base 取 {上次成功 head, 时间窗基线} 里**更老的那个**。时间窗（默认 21 天）
+   * 是批次声明的最小覆盖面，必须始终被覆盖；上次成功 head 只在它更老时生效（那时它覆盖的
+   * 是"距上次分析已超过窗口"的提交，确实不该漏）。
+   */
+  let previousUsable = false
   if (previous !== null) {
     if (!/^[0-9a-f]{40}$/.test(previous)) {
       previousFallbackReason = 'PREVIOUS_BASE_INVALID'
@@ -232,12 +252,8 @@ async function fetchHistory(
       while (true) {
         if (await gitObjectExists(historyPath, previous)
           && await isAncestor(historyPath, previous, input.prepared.commitSha)) {
-          return {
-            baseSha: previous,
-            deepenCount,
-            usedPrevious: true,
-            previousFallbackReason: null,
-          }
+          previousUsable = true
+          break
         }
         const shallowFile = join(historyPath, 'shallow')
         if (!existsSync(shallowFile)
@@ -254,9 +270,11 @@ async function fetchHistory(
         }
         deepenCount += amount
       }
-      previousFallbackReason = !(await gitObjectExists(historyPath, previous)) && exactFetchFailed
-        ? 'PREVIOUS_BASE_MISSING'
-        : 'PREVIOUS_BASE_NOT_ANCESTOR'
+      previousFallbackReason = previousUsable
+        ? null
+        : !(await gitObjectExists(historyPath, previous)) && exactFetchFailed
+          ? 'PREVIOUS_BASE_MISSING'
+          : 'PREVIOUS_BASE_NOT_ANCESTOR'
     }
   }
 
@@ -265,12 +283,31 @@ async function fetchHistory(
   // baseline as before from whatever history has safely been fetched.
   while (true) {
     const commits = await firstParent(historyPath, input.prepared.commitSha)
-    const baseSha = deriveTimeBasedBase(commits, rangeStart)
-    if (baseSha !== null) {
-      return { baseSha, deepenCount, usedPrevious: false, previousFallbackReason }
+    const timeBase = deriveTimeBasedBase(commits, rangeStart)
+    if (timeBase !== null) {
+      if (previous !== null && previousUsable) {
+        // 两者都可用时取更老的那个：previous 是 timeBase 的祖先（含相等）才说明它更老。
+        // 反之（previous 落在窗口内部，最典型的就是 previous===head）必须让时间窗基线胜出，
+        // 否则范围会被收窄，极端情况下收窄成空集。
+        if (await isAncestor(historyPath, previous, timeBase)) {
+          return { baseSha: previous, deepenCount, usedPrevious: true, previousFallbackReason: null }
+        }
+        return {
+          baseSha: timeBase,
+          deepenCount,
+          usedPrevious: false,
+          previousFallbackReason: 'PREVIOUS_BASE_INSIDE_WINDOW',
+        }
+      }
+      return { baseSha: timeBase, deepenCount, usedPrevious: false, previousFallbackReason }
     }
     const shallowFile = join(historyPath, 'shallow')
     if (!existsSync(shallowFile) || readFileSync(shallowFile, 'utf8').trim() === '' || deepenCount >= limit) {
+      // 历史回溯不到窗口起点（仓库比窗口年轻，或深化上限用尽）：此时上次成功 head 是唯一
+      // 可用的确定基线，它不会收窄任何东西，照旧采用。
+      if (previous !== null && previousUsable) {
+        return { baseSha: previous, deepenCount, usedPrevious: true, previousFallbackReason: null }
+      }
       return { baseSha: null, deepenCount, usedPrevious: false, previousFallbackReason }
     }
     const amount = Math.min(step, limit - deepenCount)

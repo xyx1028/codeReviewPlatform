@@ -1,10 +1,8 @@
 import { useState } from 'react'
-import { Alert, Button, Card, Form, Input, Modal, Select, Space, Table, Tag, Typography } from 'antd'
+import { Alert, Button, Card, Form, Input, Modal, Space, Table, Tag } from 'antd'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { adminListDeveloperGitIdentities, adminSaveDeveloperGitIdentity } from '../lib/api'
 import type { DeveloperGitIdentityRecord, DeveloperIdentityStatus } from '../types'
-
-const { Title, Text } = Typography
 
 interface IdentityFormValues {
   displayName: string
@@ -12,9 +10,6 @@ interface IdentityFormValues {
   email: string
   aliases?: string
   gitlabUsername?: string
-  gitlabUserId?: string
-  developerStatus: DeveloperIdentityStatus
-  verificationStatus: DeveloperIdentityStatus
 }
 
 const statusOptions = [
@@ -48,9 +43,12 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
         .map((value) => value.trim())
         .filter(Boolean),
       gitlabUsername: values.gitlabUsername?.trim() || null,
-      gitlabUserId: values.gitlabUserId?.trim() || null,
-      developerStatus: values.developerStatus,
-      verificationStatus: values.verificationStatus,
+      // GitLab User ID 和身份状态不在表单里露出（新增/编辑主要就是为了配邮箱，露出这些
+      // 只会让人不知道该填什么）。编辑/新增邮箱时原样保留当前值，避免整行覆盖语义把它们
+      // 静默清空；只有全新建档时才用默认的「已验证」。
+      gitlabUserId: addingEmail || editing === null ? null : editing.gitlab_user_id,
+      developerStatus: editing?.status ?? 'VERIFIED',
+      verificationStatus: addingEmail || editing === null ? 'VERIFIED' : editing.verification_status,
       expectedRevision: editing?.revision ?? null,
     }),
     onSuccess: async () => {
@@ -69,7 +67,6 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
   const beginCreate = () => {
     setEditing(null)
     setAddingEmail(false)
-    form.setFieldsValue({ developerStatus: 'VERIFIED', verificationStatus: 'VERIFIED' })
     setOpen(true)
   }
   const beginEdit = (record: DeveloperGitIdentityRecord) => {
@@ -81,9 +78,6 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
       email: '',
       aliases: record.author_name_aliases.join('，'),
       gitlabUsername: record.gitlab_username ?? undefined,
-      gitlabUserId: record.gitlab_user_id ?? undefined,
-      developerStatus: record.status,
-      verificationStatus: record.verification_status,
     })
     setOpen(true)
   }
@@ -96,24 +90,17 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
       email: '',
       aliases: record.author_name_aliases.join('，'),
       gitlabUsername: undefined,
-      gitlabUserId: undefined,
-      developerStatus: record.status,
-      verificationStatus: 'VERIFIED',
     })
     setOpen(true)
   }
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <div>
-        <Title level={4} style={{ marginBottom: 4 }}>Git 身份总览（全部成员）</Title>
-        <Text type="secondary">成员在「个人中心 → Git 身份」自己维护；这里用于代录未登录的人、排查漏配和处理重名冲突。邮箱只在数据库函数内计算 HMAC，页面、业务表和日志均不保存明文。</Text>
-      </div>
       <Alert
         type="info"
         showIcon
         title="上线前必须先配置 Vault secret：analysis_identity_pepper"
-        description="缺少时保存会明确返回 IDENTITY_PEPPER_MISSING；已有结构化 Story-Id 的分析仍可运行。"
+        description="缺少时保存会明确返回 IDENTITY_PEPPER_MISSING；已有结构化 Story-Id 的分析仍可运行。成员在「个人中心 → Git 身份」自己维护的记录会标「本人维护」，这里代录的标「管理员代录」。邮箱只在数据库函数内计算 HMAC，页面、业务表和日志均不保存明文。"
       />
       {identities.isError ? <Alert type="error" showIcon title="读取 Git 身份失败" description={identities.error instanceof Error ? identities.error.message : '未知错误'} /> : null}
       <Card extra={<Button type="primary" onClick={beginCreate}>新增 Git 身份</Button>}>
@@ -153,7 +140,11 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
           <Form.Item
             name="email"
             label="Git author email"
-            extra={editing && !addingEmail ? `为安全起见不回显原邮箱；编辑时请重新输入。当前：${editing.masked_email ?? '未配置'}` : '填写开发人员本机 Git 提交使用的邮箱。'}
+            extra={
+              editing !== null && !addingEmail
+                ? `当前邮箱：${editing.masked_email ?? '未配置'}（数据库不存明文，无法回显，请重新完整输入一遍才能保存）`
+                : '填写开发人员本机 Git 提交使用的邮箱。'
+            }
             rules={[{ required: true, type: 'email', message: '请输入有效邮箱' }]}
           >
             <Input autoComplete="off" placeholder="developer@example.com" />
@@ -165,14 +156,7 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
           >
             <Input placeholder="多个用逗号分隔，例如 yuxuan_xue, guolichen2025" />
           </Form.Item>
-          <Space size={12} style={{ display: 'flex' }}>
-            <Form.Item name="gitlabUsername" label="GitLab 用户名"><Input /></Form.Item>
-            <Form.Item name="gitlabUserId" label="GitLab User ID"><Input /></Form.Item>
-          </Space>
-          <Space size={12} style={{ display: 'flex' }}>
-            <Form.Item name="developerStatus" label="人员状态" rules={[{ required: true }]}><Select style={{ width: 150 }} options={statusOptions} /></Form.Item>
-            <Form.Item name="verificationStatus" label="Git 身份状态" rules={[{ required: true }]}><Select style={{ width: 150 }} options={statusOptions} /></Form.Item>
-          </Space>
+          <Form.Item name="gitlabUsername" label="GitLab 用户名"><Input placeholder="git.kingdee.com 个人设置里 Account 页面的 Path" /></Form.Item>
           {save.isError ? <Alert type="error" showIcon title="保存失败" description={save.error instanceof Error ? save.error.message : '未知错误'} /> : null}
         </Form>
       </Modal>

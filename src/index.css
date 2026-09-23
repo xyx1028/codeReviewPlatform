@@ -264,6 +264,10 @@ a {
   width: 100%;
 }
 
+.users-management-card .ant-tabs-nav {
+  margin-bottom: 16px;
+}
+
 .select-with-margin {
   margin-top: 8px;
 }

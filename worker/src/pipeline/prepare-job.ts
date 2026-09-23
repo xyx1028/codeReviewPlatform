@@ -216,6 +216,23 @@ export async function prepareJob(
         })
       }
     }
+    /*
+     * 四个仓库的冻结范围全空 = 这个 Job 的每个需求都只能全仓降级。
+     * 它以前是无声的：范围卡片上只是一排 0，没有任何日志或错误码说"这一批精准分析已经失效"。
+     * 这里留一行 warn，让运维在模型开始烧钱之前就能看到。
+     */
+    const totalFrozenCommits = histories.reduce((sum, item) => sum + item.manifest.commit_count, 0)
+    if (histories.length > 0 && totalFrozenCommits === 0) {
+      log.warn('analysis_range_empty_all_repositories', {
+        event: 'analysis_range_empty_all_repositories',
+        repositories: histories.map((item) => ({
+          repository: item.manifest.repository,
+          range_source: item.manifest.range_source,
+          range_fallback_reason: item.manifest.range_fallback_reason,
+          base_equals_head: item.manifest.base_sha === item.manifest.head_sha,
+        })),
+      })
+    }
     const built = buildStoryScopes({
       stories: frozen.stories,
       identities: frozen.identities ?? [],

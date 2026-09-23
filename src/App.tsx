@@ -668,12 +668,7 @@ function Shell({ session }: { session: Session }) {
             <Route path="/models" element={<ModelConfigPage isAdmin={isAdmin} />} />
             <Route
               path="/users"
-              element={(
-                <Space direction="vertical" size={24} style={{ width: '100%' }}>
-                  <AdminUsersPage isAdmin={isAdmin} />
-                  {isAdmin ? <GitIdentityManagementPage isAdmin={isAdmin} /> : null}
-                </Space>
-              )}
+              element={<UsersManagementPage isAdmin={isAdmin} />}
             />
             <Route path="/batches/:batchId/*" element={<BatchPage canManageBatch={canManageBatch} />} />
             <Route path="*" element={<Navigate to="/batches" replace />} />
@@ -1031,6 +1026,29 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
   )
 }
 
+/**
+ * 用户管理页。
+ *
+ * 账号列表（登录/角色/删除）和 Git 身份（提交邮箱归因用）是两套不同的数据 ——
+ * 不是每个账号都已配 Git 身份，也不是每个 Git 身份都绑定了登录账号（新人还没登录时
+ * 管理员可以先代录）。用 Tab 收进同一张卡片里，而不是两个各自成篇的大块堆在一起。
+ */
+function UsersManagementPage({ isAdmin }: { isAdmin: boolean }) {
+  return (
+    <Space direction="vertical" size="large" className="page-stack">
+      <PageTitle title="用户管理" />
+      <Card className="users-management-card" styles={{ body: { paddingTop: 8 } }}>
+        <Tabs
+          items={[
+            { key: 'accounts', label: '账号列表', children: <AdminUsersPage isAdmin={isAdmin} /> },
+            { key: 'git-identity', label: 'Git 身份', children: <GitIdentityManagementPage isAdmin={isAdmin} /> },
+          ]}
+        />
+      </Card>
+    </Space>
+  )
+}
+
 function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
   const queryClient = useQueryClient()
   // 用受控 Modal 而不是 modal.confirm：弹窗内容要等一次异步影响评估回来才完整，
@@ -1141,8 +1159,7 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
   const pendingCount = usersQuery.data?.filter((user) => !user.email_confirmed_at).length ?? 0
 
   return (
-    <Space direction="vertical" size="large" className="page-stack">
-      <PageTitle title="用户管理" />
+    <Space direction="vertical" size={16} className="full-width">
       {pendingCount > 0 ? (
         <Alert
           type="warning"
@@ -1151,7 +1168,9 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
           description="这些账号注册流程没走完，暂时登录不了。让本人在登录页点一次「重新发送验证邮件」即可；实在收不到邮件（企业邮箱网关拦截等）再去 Supabase 后台手动确认。"
         />
       ) : null}
-      <Table rowKey="id" loading={usersQuery.isLoading} columns={columns} dataSource={usersQuery.data ?? []} />
+      <Card>
+        <Table rowKey="id" loading={usersQuery.isLoading} columns={columns} dataSource={usersQuery.data ?? []} />
+      </Card>
       <Modal
         open={deleteTarget !== null}
         title="删除账号"
@@ -1654,7 +1673,6 @@ function AutoAnalysisSection({
   const { message, modal } = AntApp.useApp()
   const queryClient = useQueryClient()
   const [supplementalModelId, setSupplementalModelId] = useState<string>()
-  const [analysisContextVersion, setAnalysisContextVersion] = useState<1 | 2>(2)
   const [commitWindowDays, setCommitWindowDays] = useState<14 | 21 | 28>(21)
 
   const jobQuery = useQuery({
@@ -1706,12 +1724,13 @@ function AutoAnalysisSection({
   })
 
   const enqueueMutation = useMutation({
+    // 页面只提供最新的精准提交分析；V1 全仓流程不再对用户开放（RPC 仍保留给历史任务）。
     mutationFn: () => enqueueAnalysisJob(batch.id, {
-      analysisContextVersion,
+      analysisContextVersion: 2,
       commitWindowDays,
     }),
     onSuccess: () => {
-      message.success(analysisContextVersion === 2 ? `已发起精准提交分析（${String(commitWindowDays)} 天辅助窗口）` : '已发起兼容全仓分析')
+      message.success(`已发起精准提交分析（${String(commitWindowDays)} 天辅助窗口）`)
       invalidateAll()
     },
     onError: (error) => message.error(error.message),
@@ -1902,31 +1921,21 @@ function AutoAnalysisSection({
       {canManage && !hasExistingAiResult && !jobActive ? (
         <Card size="small" className="mt-md" title="分析方式">
           <Space direction="vertical" size={10} className="full-width">
-            <Radio.Group
-              value={analysisContextVersion}
-              onChange={(event) => setAnalysisContextVersion(event.target.value as 1 | 2)}
-            >
-              <Radio value={2}>V1.11 精准提交分析（推荐）</Radio>
-              <Radio value={1}>兼容全仓分析（V1）</Radio>
-            </Radio.Group>
-            {analysisContextVersion === 2 ? (
-              <Space wrap>
-                <Text>历史漏标辅助窗口：</Text>
-                <Select<14 | 21 | 28>
-                  value={commitWindowDays}
-                  style={{ width: 130 }}
-                  options={[
-                    { value: 14, label: '14 天' },
-                    { value: 21, label: '21 天（默认）' },
-                    { value: 28, label: '28 天' },
-                  ]}
-                  onChange={setCommitWindowDays}
-                />
-                <Text type="secondary">强需求号关联不受该窗口截断；任务创建后配置会冻结。</Text>
-              </Space>
-            ) : (
-              <Text type="secondary">仅用于旧流程兼容：每个需求仍从四仓冻结版本全仓分析。</Text>
-            )}
+            <Text>精准提交分析：先按需求定位相关提交，再核对冻结版本里的最终实现。</Text>
+            <Space wrap>
+              <Text>历史漏标辅助窗口：</Text>
+              <Select<14 | 21 | 28>
+                value={commitWindowDays}
+                style={{ width: 130 }}
+                options={[
+                  { value: 14, label: '14 天' },
+                  { value: 21, label: '21 天（默认）' },
+                  { value: 28, label: '28 天' },
+                ]}
+                onChange={setCommitWindowDays}
+              />
+              <Text type="secondary">强需求号关联不受该窗口截断；任务创建后配置会冻结。</Text>
+            </Space>
           </Space>
         </Card>
       ) : null}
@@ -1939,7 +1948,7 @@ function AutoAnalysisSection({
             loading={enqueueMutation.isPending}
             onClick={() => enqueueMutation.mutate()}
           >
-            {analysisContextVersion === 2 ? '开始 V1.11 精准分析' : '开始兼容全仓分析'}
+            开始分析
           </Button>
           {jobActive ? <Tag color="processing">分析进行中，页面每 4 秒自动刷新</Tag> : null}
           {canManage && jobActive ? (
