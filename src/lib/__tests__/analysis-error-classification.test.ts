@@ -74,6 +74,36 @@ describe('resolveAnalysisError transport truncation', () => {
     expect(r.code).toBe('MODEL_ENDPOINT_UNREACHABLE')
   })
 
+  it('classifies a provider 401 invalid_api_key as an auth failure, not an unknown error', () => {
+    // 2026-09-23 线上：通义千问（DashScope）返回 401 invalid_api_key，页面原来显示
+    // 「未知错误 / 不建议重试」，而处置其实很明确：换密钥并重新做连接测试。
+    const r = resolveAnalysisError(
+      '-32603',
+      'Internal error: turn failed: 401: {"message":"Incorrect API key provided. For details, see: '
+        + 'https://help.aliyun.com/zh/model-studio/error-code","type":"invalid_request_error","param":null,"code":"invalid_api_key"}',
+    )
+    expect(r.code).toBe('MODEL_AUTH_FAILED')
+    expect(r.meta.title).toBe('模型密钥无效')
+    expect(r.meta.retryable).toBe(true)
+    expect(r.originalCode).toBe('-32603')
+  })
+
+  it('classifies other OpenAI-compatible auth rejections the same way', () => {
+    for (const message of [
+      'turn failed: 401 Unauthorized',
+      'turn failed: 403 InvalidApiKey: the api key is revoked',
+      'turn failed: Incorrect API key provided: sk-***',
+    ]) {
+      expect(resolveAnalysisError('-32603', message).code).toBe('MODEL_AUTH_FAILED')
+    }
+  })
+
+  it('does not confuse an auth rejection with a connect failure', () => {
+    // 两者的处置完全不同：一个换密钥，一个查网络。
+    expect(resolveAnalysisError('-32603', 'turn failed: Connection error.').code).toBe('MODEL_CONNECT_FAILED')
+    expect(resolveAnalysisError('-32603', 'turn failed: 401 invalid_api_key').code).toBe('MODEL_AUTH_FAILED')
+  })
+
   it('does not hijack a known platform error code embedded in the message', () => {
     // 已登记错误码优先，传输兜底不应抢占（这里消息含 MODEL_RATE_LIMITED）。
     const r = resolveAnalysisError('MODEL_RATE_LIMITED', 'MODEL_RATE_LIMITED: too many requests')

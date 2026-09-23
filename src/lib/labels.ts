@@ -127,8 +127,8 @@ export const analysisErrorCodeMeta: Record<string, AnalysisErrorMeta> = {
   },
   MODEL_AUTH_FAILED: {
     title: '模型密钥无效',
-    reason: '模型服务拒绝了当前 API Key。',
-    suggestion: '在模型管理中更新并测试 API Key，然后重试。',
+    reason: '模型服务在认证阶段拒绝了当前 API Key（例如通义千问返回 401 invalid_api_key）。任务冻结的是密钥的引用，不是密钥本身，所以密钥被吊销或换过之后，原任务一定失败。',
+    suggestion: '到「模型管理」更新该模型的 API Key，点「测试连接」看到成功后再创建新的分析任务。注意页面上「已配置密钥」只表示 Vault 里存在密钥，不代表它仍然有效。',
     retryable: true,
   },
   MODEL_CONFIG_DISABLED: {
@@ -457,6 +457,21 @@ export function resolveAnalysisError(
       code: 'MODEL_ENDPOINT_UNREACHABLE',
       originalCode,
       meta: analysisErrorCodeMeta.MODEL_ENDPOINT_UNREACHABLE!,
+    }
+  }
+  // 模型服务在**认证阶段**拒绝：DashScope 返回 `401 {"code":"invalid_api_key"}`，
+  // 其它 OpenAI 兼容网关多半是 401 + `Incorrect API key provided`。这类失败既不是"连不上"
+  // 也不是"流中断"，处置只有一件事：换掉 Vault 里的密钥并重新做连接测试。平台已经有
+  // MODEL_AUTH_FAILED 这个稳定码，冒泡到页面时只剩 -32603，所以要从文本恢复分类。
+  const providerAuthRejected =
+    /\b(?:invalid_api_key|invalidapikey)\b/i.test(message) ||
+    /incorrect api key/i.test(message) ||
+    (/\b40[13]\b/.test(message) && /\b(?:api[_ ]?key|unauthorized|authentication)\b/i.test(message))
+  if (providerAuthRejected && (originalCode === null || analysisErrorCodeMeta[originalCode] === undefined)) {
+    return {
+      code: 'MODEL_AUTH_FAILED',
+      originalCode,
+      meta: analysisErrorCodeMeta.MODEL_AUTH_FAILED!,
     }
   }
   // 传输层截断：Harness 把「流在收到 finish_reason 前关闭」统一抛成 `-32603` +
