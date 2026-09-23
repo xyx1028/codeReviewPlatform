@@ -1,7 +1,16 @@
 import { createHash } from 'node:crypto'
-import { ATTRIBUTION_ALGORITHM_VERSION, attributeStoryCommit, createStoryCandidateManifest, type IdentityMatchStatus, type StoryCommitAttributionInput, type StoryCommitAttributionResult } from '../analysis/story-commit-attribution.js'
+import { ATTRIBUTION_ALGORITHM_VERSION, attributeStoryCommit, createStoryCandidateManifest, sortStoryCandidates, type IdentityMatchStatus, type StoryCommitAttributionInput, type StoryCommitAttributionResult } from '../analysis/story-commit-attribution.js'
 import type { CollectedRepositoryHistory } from '../git/story-history.js'
 import type { RepositoryMergeRequestEnrichment } from '../git/gitlab-readonly-client.js'
+
+/**
+ * 每个需求每代的候选上限。
+ *
+ * 与数据库硬约束一致：`analysis_story_scope.candidate_count between 0 and 200`，且
+ * `save_analysis_story_scopes` 对超过 200 的候选数组直接抛 `STORY_CANDIDATE_LIMIT_EXCEEDED`。
+ * 所以这里必须在发送前截断，而不是让数据库拒绝整批。
+ */
+const CANDIDATE_LIMIT = 200
 
 export interface FrozenStoryScopeInput {
   task_id: string
@@ -100,10 +109,20 @@ function identityForCommit(story: FrozenStoryScopeInput, identities: readonly Fr
   return { status: 'UNRESOLVED', type: 'NONE' }
 }
 
-function moduleOverlap(story: FrozenStoryScopeInput, entry: Record<string, unknown>): boolean {
+/**
+ * 模块重合。
+ *
+ * 需求的项目/应用名里常常带着仓库名本身（实测 `kdmanage下架智能体提供租户影响范围
+ * （FT-2026-001591）`）。而这些仓库的提交路径是以仓库名开头的（`kdmanage-backend/...`），
+ * 于是 `kdmanage` 这个词会命中该仓库的**每一条**路径，模块重合退化成恒真。
+ *
+ * 所以：与仓库名重叠的词、纯数字词（`2026` / 单号数字）都不作为模块线索。
+ */
+function moduleOverlap(story: FrozenStoryScopeInput, entry: Record<string, unknown>, repository: string): boolean {
+  const repositoryTokens = new Set(repository.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean))
   const needles = [story.project_name, story.application_name]
     .flatMap((value) => String(value ?? '').toLowerCase().split(/[^\p{L}\p{N}]+/u))
-    .filter((value) => value.length >= 3)
+    .filter((value) => value.length >= 3 && !/^\d+$/.test(value) && !repositoryTokens.has(value))
   if (needles.length === 0) return false
   const files = Array.isArray(entry.files) ? entry.files as Array<Record<string, unknown>> : []
   return files.some((file) => needles.some((needle) => String(file.path ?? '').toLowerCase().includes(needle)))
@@ -233,7 +252,7 @@ export function buildStoryScopes(input: {
             rangeCompleteness: 'COMPLETE',
             identityStatus: identity.status,
             withinFrozenWindow: true,
-            moduleOverlap: moduleOverlap(story, entry),
+            moduleOverlap: moduleOverlap(story, entry, history.manifest.repository),
             sameExplicitMr: relatedMergeRequests.some((mergeRequest) =>
               mergeRequest.structured_story_ids.some(
                 (code) => code.trim().toUpperCase() === story.story_code.trim().toUpperCase(),
@@ -276,8 +295,21 @@ export function buildStoryScopes(input: {
     })
     const relevant = attributed.filter(({ result }) => tier(result) !== null)
     if (relevant.length === 0) return globalScope(story, 'NO_CANDIDATE', generation)
-    if (relevant.length > 200) return globalScope(story, 'STORY_CANDIDATE_LIMIT_EXCEEDED', generation)
-    const manifest = createStoryCandidateManifest(story.story_code, generation, relevant.map(({ result }) => result))
+    /*
+     * 超出候选上限不再整条降级成全仓分析。
+     *
+     * 旧行为是 `return globalScope(story, 'STORY_CANDIDATE_LIMIT_EXCEEDED')` —— 把**已经
+     * 命中的 STRONG 证据一起扔掉**，换成"请看全仓"，这是最坏的一种降级。现在按优先级
+     * （STRONG → AI_CANDIDATE → WEAK → CONFLICT → EXCLUDED，同级按分数）截断到上限，
+     * 保留信息量最高的那一批，并把截断如实记为降级原因。
+     */
+    const ranked = sortStoryCandidates(relevant.map(({ result }) => result))
+    const truncated = ranked.length > CANDIDATE_LIMIT
+    const manifest = createStoryCandidateManifest(
+      story.story_code,
+      generation,
+      truncated ? ranked.slice(0, CANDIDATE_LIMIT) : ranked,
+    )
     const candidates = manifest.candidates.map((result) => {
       const identityType = relevant.find((item) => item.result.candidateId === result.candidateId)?.identityType ?? 'NONE'
       const candidateTier = tier(result)!
@@ -310,15 +342,19 @@ export function buildStoryScopes(input: {
       : recommendation === 'EXACT_STORY_COMMITS' || recommendation === 'DEVELOPER_WINDOW' || recommendation === 'REQUIREMENT_REF_ONLY'
         ? recommendation
         : 'GLOBAL_FALLBACK'
+    const degradations = [
+      ...(scopeMode === 'GLOBAL_FALLBACK' ? ['NO_STRONG_SCOPE'] : []),
+      ...(truncated ? ['STORY_CANDIDATE_LIMIT_TRUNCATED'] : []),
+    ]
     return {
       task_id: story.task_id,
       generation,
       scope_mode: scopeMode,
-      status: scopeMode === 'GLOBAL_FALLBACK' ? 'DEGRADED' : 'READY',
+      status: degradations.length > 0 ? 'DEGRADED' : 'READY',
       current_scope_level: scopeMode === 'GLOBAL_FALLBACK' ? 'GLOBAL' : 'PRIMARY',
       candidate_manifest_hash: manifest.manifestHash,
-      scope_error_code: scopeMode === 'GLOBAL_FALLBACK' ? 'NO_STRONG_SCOPE' : null,
-      degradation_reasons: scopeMode === 'GLOBAL_FALLBACK' ? ['NO_STRONG_SCOPE'] : [],
+      scope_error_code: degradations[0] ?? null,
+      degradation_reasons: degradations,
       candidates,
     }
   })

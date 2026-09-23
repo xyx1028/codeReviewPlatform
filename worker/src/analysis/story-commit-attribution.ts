@@ -269,7 +269,18 @@ export function attributeStoryCommit(input: StoryCommitAttributionInput): StoryC
     return result(input, tokens, 'AI_RELEVANCE_REQUIRED', currentUnstructured ? 'REQUIREMENT_REF_ONLY' : 'DEVELOPER_WINDOW', reasons, 500 - (input.bot || input.generated ? 100 : 0))
   }
 
-  const weakSignals = [input.identityStatus === 'WEAK_NAME', verifiedIdentity, input.withinFrozenWindow, input.moduleOverlap].filter(Boolean).length
+  /*
+   * 弱信号里**不包含** `withinFrozenWindow`。
+   *
+   * 提交清单本身就是按冻结时间窗枚举出来的（`story-scope` 对每条提交都传 true），所以
+   * "在窗口内"对"这条提交是否与这个需求有关"零信息量。把它算作弱信号的后果是实测灾难：
+   * 窗口内每一条提交都拿到 WEAK 档，26 个需求 × 1482 条提交全部越过候选上限，于是每个
+   * 需求都被降级成全仓分析 —— V1.11 精准提交分析在真实仓库上永远不可能生效
+   * （2026-09-23 线上 `STORY_CANDIDATE_LIMIT_EXCEEDED` 全量降级）。
+   *
+   * 弱信号必须是**关于这个需求**的：作者身份（已验证或姓名别名）或模块重合。
+   */
+  const weakSignals = [input.identityStatus === 'WEAK_NAME', verifiedIdentity, input.moduleOverlap].filter(Boolean).length
   if (weakSignals > 0 && input.identityStatus !== 'AMBIGUOUS') {
     return result(input, tokens, 'WEAK_FALLBACK', verifiedIdentity ? 'DEVELOPER_WINDOW' : 'GLOBAL_FALLBACK', [...commonReasons, 'WEAK_ATTRIBUTION_SIGNAL'], 100 - (input.bot || input.generated ? 50 : 0))
   }
