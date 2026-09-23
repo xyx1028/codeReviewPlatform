@@ -18,6 +18,21 @@ export type ReviewVerdict = 'IMPLEMENTED' | 'PARTIAL' | 'NOT_IMPLEMENTED' | 'UNC
 
 export const EXISTING_IMPLEMENTATION_EVIDENCE = '现有实现'
 
+/**
+ * 允许的证据类型。
+ *
+ * 必须与数据库 `analysis_agent_evidence_evidence_type_check` 的取值集合逐字一致。
+ * 之前 Worker 侧**完全不校验**这个字段，后果在本地全链路实测里很具体（2026-09-23，
+ * Job `0d4a6a37`）：模型编了一个不在词表里的类型，deterministic verifier 放过，
+ * 到 `save_agent_review_result` 才被数据库 CHECK 拒绝，模型收到的是
+ *
+ *   rpc save_agent_review_result failed: new row for relation "analysis_agent_evidence"
+ *   violates check constraint "analysis_agent_evidence_evidence_type_check"
+ *
+ * 它既没有稳定错误码、也没说清"应该填什么"，模型只能靠猜重试，反复烧预算。
+ */
+export const ALLOWED_EVIDENCE_TYPES = ['现有实现', '缺失依据', '风险依据'] as const
+
 export interface ReviewSubmission {
   verdict: ReviewVerdict
   confidence: number
@@ -99,6 +114,15 @@ export async function verifyReviewSubmission(
 
   const verified: VerifiedEvidence[] = []
   for (const [index, claim] of submission.evidence.entries()) {
+    // 类型先校验：数据库那条 CHECK 是最终边界，但把它留给数据库意味着模型收到的是一条
+    // 原始约束违规文本，而不是"应该填这三个值之一"。
+    if (!(ALLOWED_EVIDENCE_TYPES as readonly string[]).includes(claim.evidenceType)) {
+      return {
+        ok: false,
+        code: 'EVIDENCE_TYPE_INVALID',
+        reason: `evidence[${index}]: evidenceType must be one of ${ALLOWED_EVIDENCE_TYPES.join(' / ')}`,
+      }
+    }
     const structural = options.evidenceLedger.check(claim)
     if (!structural.ok) {
       return {

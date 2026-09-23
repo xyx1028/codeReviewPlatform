@@ -726,6 +726,20 @@ describe('database error-code normalization', () => {
       'ANALYSIS_SCOPE_TRIAGE_INCOMPLETE',
       'SESSION_ANALYSIS_SCOPE_MISMATCH',
       'TRIAGE_CONTEXT_MISMATCH',
+      // V1.11 工具级门禁：漏登记会让 Broker 把它们抹成 TOOL_FAILED，审计里
+      // "模型没读 diff 就下判定"与"工具崩了"就分不开（2026-09-23 本地实测）。
+      'ANALYSIS_SCOPE_NOT_FROZEN',
+      'ANALYSIS_SCOPE_UNAVAILABLE',
+      'CANDIDATE_NOT_AI_TRIAGE',
+      'CANDIDATE_TASK_MISMATCH',
+      'AGENT_RUN_MISMATCH',
+      'TRIAGE_VERDICT_INVALID',
+      'TRIAGE_VERDICT_CONFLICT',
+      'TRIAGE_SUMMARY_INVALID',
+      'DIFF_ACCESS_REQUIRED',
+      'DIFF_ACCESS_EVIDENCE_INVALID',
+      'UNREADABLE_DIFF_REQUIRES_UNCERTAIN',
+      'SCOPE_EXPANSION_FROM_MISMATCH',
     ]
 
     expect(KNOWN_DB_ERROR_CODES).toEqual(expectedCodes)

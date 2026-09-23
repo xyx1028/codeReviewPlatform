@@ -143,14 +143,31 @@ async function confirmRemote() {
   if (answer !== 'yes') fail('已取消。')
 }
 
-function resolveCredentials(options) {
-  // 环境变量优先；否则读既有的本地/容器 env 文件。值只在内存里用。
-  const fileEnv = {
+export function resolveCredentials(options) {
+  /*
+   * 本地与远端读**不同**的 env 文件。
+   *
+   * 之前两种模式都把 `.docker/worker.env`（云端）并进来，于是在任何跑过云端 Worker 的机器上
+   * 默认模式必然拿到云端 `SUPABASE_URL`，然后被自己的"必须是本地地址"守卫拒掉 ——
+   * 文档写的"默认连本地 Supabase"在这些机器上根本走不通（2026-09-23 本地全链路排查实测）。
+   *
+   * 本地模式还刻意**不采用 env 文件里的 URL**：`.docker/worker.local.env` 里是容器视角的
+   * `http://host.docker.internal:54321`，在宿主机上不解析。本地只用文件里的 service role key，
+   * URL 固定回落到 127.0.0.1，除非调用方在 process.env 里显式指定（那时守卫仍然生效）。
+   */
+  const localFileEnv = {
+    ...readEnvFile(join(root, '.docker/worker.local.env')),
+    ...readEnvFile(join(root, '.env.local')),
+  }
+  const remoteFileEnv = {
     ...readEnvFile(join(root, '.docker/worker.env')),
     ...readEnvFile(join(root, '.env.local')),
   }
+  const fileEnv = options.remote === true ? remoteFileEnv : localFileEnv
   const env = { ...fileEnv, ...process.env }
-  const url = options.remote === true ? env.SUPABASE_URL : (env.SUPABASE_URL ?? LOCAL_SUPABASE_URL)
+  const url = options.remote === true
+    ? env.SUPABASE_URL
+    : (process.env.SUPABASE_URL ?? LOCAL_SUPABASE_URL)
   const key = env.SUPABASE_SERVICE_ROLE_KEY
 
   if (options.remote !== true) {

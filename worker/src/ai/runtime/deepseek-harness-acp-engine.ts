@@ -1042,6 +1042,14 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
             onToolCall: (name) => {
               agentToolCalls[name] = (agentToolCalls[name] ?? 0) + 1
             },
+            // 截断续写必须在日志里可见：它会多花模型请求，运维要能看到"这次 attempt 被
+            // 截断过几次"，而不是只看到一个偏高的 model_requests。
+            onTruncatedContinuation: (attempt) => {
+              log.info('agent_turn_truncated_continued', {
+                event: 'agent_turn_truncated_continued',
+                continuation: attempt,
+              })
+            },
             onPermissionDecision: (decision) => {
               if (!decision.allowed) {
                 log.info('acp_permission_denied', {

@@ -85,6 +85,23 @@ export const KNOWN_DB_ERROR_CODES = [
   'ANALYSIS_SCOPE_TRIAGE_INCOMPLETE',
   'SESSION_ANALYSIS_SCOPE_MISMATCH',
   'TRIAGE_CONTEXT_MISMATCH',
+  // V1.11 **工具级**门禁。这些码由 submit_story_commit_relevance_verdict /
+  // record_analysis_scope_expansion / get_story_task_analysis_scope 等 RPC 抛出，
+  // 是给模型看的"你这次调用哪里不对"。漏登记的后果在本地全链路实测里很具体
+  // （2026-09-23 Job `e55681b7`）：Broker 的 catch 认不出它们，一律记成 `TOOL_FAILED`，
+  // 于是审计与监控里"模型没读 diff 就下判定"和"工具崩了"长得一模一样。
+  'ANALYSIS_SCOPE_NOT_FROZEN',
+  'ANALYSIS_SCOPE_UNAVAILABLE',
+  'CANDIDATE_NOT_AI_TRIAGE',
+  'CANDIDATE_TASK_MISMATCH',
+  'AGENT_RUN_MISMATCH',
+  'TRIAGE_VERDICT_INVALID',
+  'TRIAGE_VERDICT_CONFLICT',
+  'TRIAGE_SUMMARY_INVALID',
+  'DIFF_ACCESS_REQUIRED',
+  'DIFF_ACCESS_EVIDENCE_INVALID',
+  'UNREADABLE_DIFF_REQUIRES_UNCERTAIN',
+  'SCOPE_EXPANSION_FROM_MISMATCH',
 ] as const
 
 export type KnownDbErrorCode = (typeof KNOWN_DB_ERROR_CODES)[number]

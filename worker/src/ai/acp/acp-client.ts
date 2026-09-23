@@ -13,6 +13,33 @@ import { Readable, Writable } from 'node:stream'
 import { client, methods, ndJsonStream } from '@agentclientprotocol/sdk'
 import type { AcpProcessHandle } from './acp-process-supervisor.js'
 
+/**
+ * 输出被 `max_tokens` 截断后的续写提示。
+ *
+ * 刻意只说"接着写完并按规则提交"，不重述评审要求：要求已经在首轮 prompt 里，重复一遍
+ * 只是多烧 token，还可能与首轮措辞冲突。
+ */
+const TRUNCATED_CONTINUATION_PROMPT =
+  '你上一段输出因为达到单次输出上限被截断了。请直接继续未完成的工作，' +
+  '不要重新开始、不要重复已经写过的内容；完成后必须调用 submit_review_result 提交结论。'
+
+/**
+ * 是否该让被截断的输出接着写。
+ *
+ * 抽成纯函数是为了让规则可单测：ACP turn 本身需要真实 agent 进程，而这条规则恰恰是
+ * "一个需求输出超长就把整个 Job 判失败"的分界线，不能只靠集成用例覆盖。
+ */
+export function shouldContinueAfterTruncation(input: {
+  stopReason: string
+  continuations: number
+  maxContinuations: number
+  aborted: boolean
+}): boolean {
+  if (input.stopReason !== 'max_tokens') return false
+  if (input.aborted) return false
+  return input.continuations < input.maxContinuations
+}
+
 export interface AcpSessionOptions {
   process: AcpProcessHandle
   /** Working directory reported to the agent. */
@@ -38,6 +65,15 @@ export interface AcpSessionOptions {
     allowed: boolean
     outcome: string
   }) => void
+  /**
+   * 输出被 `max_tokens` 截断时允许的续写次数上界（默认 2）。
+   *
+   * 评审结论是长文本，截断会反复出现；把可恢复的截断当终态失败会让一个需求拖垮整个 Job
+   * （`fail_agent_review` 是 fail-fast）。设为 0 可关闭续写，恢复旧行为。
+   */
+  maxTruncatedContinuations?: number
+  /** 每次因截断续写时回调，用于日志与运行事件。 */
+  onTruncatedContinuation?: (attempt: number) => void
   /**
    * Session 一建立（或一恢复）就回调，**在 turn 结束之前**。
    *
@@ -153,6 +189,8 @@ export interface AcpTurnObservation {
   sessionId: string
   /** 是否走了 resume/load 而不是 session/new。 */
   resumed: boolean
+  /** 因 `max_tokens` 截断而续写的次数（0 表示没发生截断）。 */
+  truncatedContinuations?: number
 }
 
 export interface AcpTurnResult extends AcpTurnObservation {
@@ -273,12 +311,27 @@ export async function runSingleAcpTurn(
       // prompt 与 update 循环必须并行推进（prompt 在 turn 结束前不会 settle），
       // 但它的失败原因不能丢：记下来，随 turn 结果一起返回。
       let promptError: string | null = null
-      const promptSettled = session.prompt(prompt).then(
-        () => undefined,
-        (err: unknown) => {
-          promptError = describeProtocolError(err)
-        },
-      )
+      const capturePrompt = (pending: Promise<unknown>): Promise<void> =>
+        pending.then(
+          () => undefined,
+          (err: unknown) => {
+            promptError = describeProtocolError(err)
+          },
+        )
+      let promptSettled = capturePrompt(session.prompt(prompt))
+      /*
+       * 输出被 max_tokens 截断不是终态失败，而是"话没说完"。
+       *
+       * 本地全链路实测（2026-09-23 Job `3552cc95`）：glm5.3-flash 的一次 attempt 以
+       * `max_tokens` 结束、还没调用 submit_review_result，引擎把它记成
+       * `AGENT_TURN_INCOMPLETE`，而 `fail_agent_review` 是 fail-fast —— 一个需求的输出
+       * 超长就把整个 Job 判失败。评审结论本身就是长文本，这种截断会反复发生。
+       *
+       * 处理方式是**有上界地**让它接着说（默认 2 次）：每次续写都照常经 usage-reporter
+       * 计量与预算门禁，所以这不是绕过预算，只是不把可恢复的截断当成终态。
+       */
+      const maxContinuations = options.maxTruncatedContinuations ?? 2
+      let continuations = 0
 
       try {
         for (;;) {
@@ -287,6 +340,19 @@ export async function runSingleAcpTurn(
             // 让已经 settle 的 prompt 有机会把错误写进 promptError，
             // 但不等待未完成的 prompt，避免在这里挂住。
             await Promise.race([promptSettled, Promise.resolve()])
+            if (
+              shouldContinueAfterTruncation({
+                stopReason: message.stopReason,
+                continuations,
+                maxContinuations,
+                aborted: signal.aborted,
+              })
+            ) {
+              continuations += 1
+              options.onTruncatedContinuation?.(continuations)
+              promptSettled = capturePrompt(session.prompt(TRUNCATED_CONTINUATION_PROMPT))
+              continue
+            }
             return {
               ok: message.stopReason === 'end_turn',
               stopReason: message.stopReason,
@@ -295,6 +361,7 @@ export async function runSingleAcpTurn(
               promptError,
               sessionId: session.sessionId,
               resumed: false,
+              truncatedContinuations: continuations,
             }
           }
           updates++

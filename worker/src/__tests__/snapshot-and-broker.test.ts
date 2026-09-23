@@ -297,6 +297,43 @@ describe('verifyReviewSubmission', () => {
     })
   }
 
+  it('rejects an invented evidenceType before the database CHECK sees it', async () => {
+    /*
+     * 2026-09-23 本地实测（Job `0d4a6a37`）：Worker 侧不校验 evidenceType，
+     * 模型自造的类型一路走到 save_agent_review_result 才被数据库 CHECK 拒绝，
+     * 模型只收到一条原始约束违规文本。现在在这里就以稳定码拒绝并说清合法取值。
+     */
+    const evidenceLedger = new EvidenceLedger(TASK_ID, ATTEMPT)
+    const receipt = await showRange(evidenceLedger)
+    const result = await verifyReviewSubmission({
+      submission: {
+        verdict: 'IMPLEMENTED',
+        confidence: 90,
+        summary: 'createOrder implements the story',
+        evidence: [
+          {
+            evidenceId: receipt.evidenceId,
+            repository: REPO,
+            filePath: 'src/main/OrderService.java',
+            startLine: 3,
+            endLine: 6,
+            evidenceType: '实现证据',
+            description: 'createOrder',
+          },
+        ],
+      },
+      evidenceLedger,
+      coverageLedger: new SearchCoverageLedger(),
+      snapshots: store(),
+      coveragePolicy,
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.code).toBe('EVIDENCE_TYPE_INVALID')
+      expect(result.reason).toContain('现有实现')
+    }
+  })
+
   it('accepts a submission whose evidence re-reads identically', async () => {
     const evidenceLedger = new EvidenceLedger(TASK_ID, ATTEMPT)
     const receipt = await showRange(evidenceLedger)
@@ -344,7 +381,9 @@ describe('verifyReviewSubmission', () => {
             filePath: 'src/main/OrderService.java',
             startLine: 3,
             endLine: 6,
-            evidenceType: '相关代码',
+            // 用一个**数据库合法**但不是"现有实现"的类型：原来写的 '相关代码' 本身就会被
+            // CHECK 约束拒绝，这条用例其实从未覆盖到真实的 EVIDENCE_IMPLEMENTATION_REQUIRED 路径。
+            evidenceType: '风险依据',
             description: 'related only',
           },
         ],

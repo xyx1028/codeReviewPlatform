@@ -44,17 +44,24 @@ export interface Interval {
 }
 
 /**
- * 平台 origin 工具：这 5 个经 Broker 执行（读冻结快照 / 提交结论），其余 25 个是
- * harness origin，在 Harness 进程内执行。
+ * 平台 origin 工具：这 9 个经 Broker 执行（读冻结快照 / 读冻结提交 diff / 写 AI 裁定 /
+ * 扩展范围 / 提交结论），其余是 harness origin，在 Harness 进程内执行。
  *
- * 区分它们才能回答 §1.2 第 13 条"慢是模型侧还是平台侧"。必须与 0032 的
- * `analysis_runtime_platform_tool_names()` 逐字一致。
+ * 区分它们才能回答 §1.2 第 13 条"慢是模型侧还是平台侧"。必须与
+ * `analysis_runtime_platform_tool_names()`（最新定义在
+ * 20260923045903_runtime_monitoring_story_commit_tool_names.sql）以及 Broker 的
+ * `platformToolByRoute` 值集合逐字一致 —— V1.11 的四个 Story 提交工具就是因为三处没同步，
+ * 在监控里丢了工具名并被算到 Harness 侧。
  */
 export const PLATFORM_TOOL_NAMES = [
   'search_snapshot_code',
   'find_snapshot_files',
   'read_snapshot_code',
   'list_snapshot_commits',
+  'list_story_commits',
+  'read_story_commit_diff',
+  'submit_commit_relevance_verdict',
+  'expand_analysis_scope',
   'submit_review_result',
 ] as const
 

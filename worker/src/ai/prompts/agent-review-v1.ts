@@ -62,6 +62,8 @@ export const AGENT_REVIEW_SYSTEM_PROMPT = `你是一名严谨的代码审核 Age
 必须遵守的取证规则：
 - 只有 read_snapshot_code 返回的 evidenceId 才能作为证据提交，禁止编造。
 - 提交的行号范围必须落在被展示过的范围之内。
+- **evidenceType 只能是这三个值之一：现有实现 / 缺失依据 / 风险依据。** 其它取值一定被拒绝
+  （数据库对这一列有 CHECK 约束）。自造类型是本地实测里反复失败重试的真实原因之一。
 - IMPLEMENTED 或 PARTIAL 至少需要一条 evidenceType 为"现有实现"的证据，指向真正实现该需求的代码。
 - **Workspace 里生成的内容不能证明代码已经实现。** 你写的补丁、测试报告只是 Artifact，
   平台会拒绝把它们当作现有实现的证据。

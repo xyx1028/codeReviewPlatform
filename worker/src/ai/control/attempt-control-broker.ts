@@ -736,12 +736,45 @@ export function startAttemptControlBroker(
         status = 403
         responsePayload = { accepted: false, code: err.code, reason: err.message }
       } else {
-        errorCode = err instanceof SnapshotError ? err.code : 'TOOL_FAILED'
+        /*
+         * 稳定错误码优先，`TOOL_FAILED` 只当最后兜底。
+         *
+         * 之前这里只认 `SnapshotError`，于是数据库侧的工具级门禁（`DIFF_ACCESS_REQUIRED`、
+         * `ANALYSIS_SCOPE_TRIAGE_INCOMPLETE`、`TRIAGE_VERDICT_INVALID` …）全部被抹成
+         * `TOOL_FAILED`：审计行、运行事件和返回给模型的 `code` 里都看不出到底哪里不对
+         * （2026-09-23 本地全链路实测，Job `e55681b7` 有 8 条这样的审计行）。
+         * `DbError.code` 已经由 `normalizeDbErrorCode` 归一化过，直接用它。
+         */
+        const stableCode = (err as { code?: unknown }).code
+        const message = (err as Error)?.message ?? ''
+        // 一部分内部门禁抛的是普通 Error，稳定码写在消息前缀里（`TRIAGE_INCOMPLETE: …`、
+        // `SCOPE_EXPANSION_UNAVAILABLE: …`）。前缀也算稳定码，否则同样退化成匿名失败。
+        const prefixCode = /^([A-Z][A-Z0-9_]{2,63}):/.exec(message)?.[1]
+        errorCode = err instanceof SnapshotError
+          ? err.code
+          : typeof stableCode === 'string' && /^[A-Z][A-Z0-9_]{2,63}$/.test(stableCode)
+            ? stableCode
+            : prefixCode ?? 'TOOL_FAILED'
         status = errorCode === 'SNAPSHOT_SCOPE_DENIED' ? 403 : 422
         responsePayload = {
           accepted: false,
           code: errorCode,
-          reason: (err as Error)?.message ?? 'tool failed',
+          reason: message === '' ? 'tool failed' : message,
+        }
+        if (errorCode === 'TOOL_FAILED') {
+          /*
+           * 分不出类的工具失败必须留一行日志。
+           *
+           * 否则审计表里只有一个匿名的 `TOOL_FAILED`，而这正是"平台哪里坏了"最需要线索的
+           * 一格（2026-09-23 本地实测里 submit_review_result 上就有这样的行）。只记错误类名
+           * 与截断后的消息，不记请求体。
+           */
+          options.logger.info('broker_tool_failed_unclassified', {
+            event: 'broker_tool_failed_unclassified',
+            route,
+            error_name: (err as Error)?.name ?? 'Error',
+            error_message: message.slice(0, 300),
+          })
         }
       }
     }
@@ -1155,8 +1188,26 @@ export function startAttemptControlBroker(
     if (!['RELATED', 'GLOBAL'].includes(targetLevel) || !ANALYSIS_EXPANSION_REASON_CODES.includes(reasonCode)) {
       throw new SnapshotError('scope expansion target or reason is invalid', 'SCOPE_EXPANSION_INVALID')
     }
-    if (scopeLevel === 'GLOBAL' || (scopeLevel === 'RELATED' && targetLevel !== 'GLOBAL')) {
-      throw new SnapshotError(`cannot expand ${scopeLevel} to ${targetLevel}`, 'SCOPE_EXPANSION_INVALID')
+    /*
+     * 已经到（或超过）目标层级时是**成功的空操作**，不是错误。
+     *
+     * 降级任务里 25/26 个需求的范围本来就是 GLOBAL（2026-09-23 本地实测 Job `e55681b7`），
+     * Agent 按提示去扩展范围，旧实现一律抛 `SCOPE_EXPANSION_INVALID`——请求的意图（能读到
+     * 全仓）其实已经满足，却回一个硬错误，模型只能再猜一轮，审计里还多出一堆 tool_calls_denied。
+     * 层级只会变宽这条约束没有被放宽：这里不记新的扩展事实，也不改层级。
+     */
+    const widening: Readonly<Record<'PRIMARY' | 'RELATED' | 'GLOBAL', number>> = {
+      PRIMARY: 0,
+      RELATED: 1,
+      GLOBAL: 2,
+    }
+    if (widening[targetLevel] <= widening[scopeLevel]) {
+      return {
+        expanded: false,
+        fromLevel: scopeLevel,
+        currentLevel: scopeLevel,
+        reasonCode: 'ALREADY_AT_OR_ABOVE_TARGET_LEVEL',
+      }
     }
     if (!options.expandAnalysisScope) {
       throw new Error('SCOPE_EXPANSION_UNAVAILABLE: v2 expansion hook is not configured')
