@@ -83,10 +83,6 @@ function translatedLabel(map: Record<string, string>, value: string): string {
   return map[value] ?? value
 }
 
-function shortHash(value: string | null): string {
-  return value === null ? '—' : value.replace(/^sha256:/, '').slice(0, 12)
-}
-
 function utcRange(repository: RuntimeRepositoryScope): string {
   return `${repository.range_start_at} ≤ committed_at < ${repository.range_end_at}`
 }
@@ -175,10 +171,9 @@ export function RuntimeAnalysisScopeCard({
           }
         />
       )}
-      <Descriptions size="small" column={{ xs: 1, md: 3 }}>
+      <Descriptions size="small" column={{ xs: 1, md: 2 }}>
         <Descriptions.Item label="范围模式">{MODE_LABELS[summary.mode]}</Descriptions.Item>
         <Descriptions.Item label="时间窗">{summary.window_days === null ? <Text type="secondary">服务端未返回</Text> : <Tooltip title={summary.repositories.map((repository) => `${repository.repository_name}: ${utcRange(repository)}`).join('\n')}><Text>{`各仓冻结时刻向前 ${String(summary.window_days)} 天`}</Text></Tooltip>}</Descriptions.Item>
-        <Descriptions.Item label="算法 / Manifest"><Text code>{summary.algorithm_version} · {shortHash(summary.manifest_hash)}</Text></Descriptions.Item>
       </Descriptions>
       <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
         <Col xs={12} md={4}><Statistic title={<MetricTitle text="候选" hint={SCOPE_METRIC_HINTS.candidate} />} value={summary.candidate_count} /></Col>
