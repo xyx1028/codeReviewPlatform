@@ -387,6 +387,12 @@ describe('V1.19 技能 AI 优化 · 本地全链路', () => {
       expect(evidence.human_review_counts.INCORRECT).toBe(1)
       // 人工标错的那条必须排在抽样第一位。
       expect(evidence.sample_findings[0].human_review_result).toBe('INCORRECT')
+      // 用到这个技能的批次必须列出来（批次名 + 周次，而不是 Job id）。
+      expect(evidence.referenced_batches).toHaveLength(1)
+      expect(evidence.referenced_batches[0].batch_name).toBe(`V119 e2e ${RUN}`)
+      expect(evidence.referenced_batches[0].week_code).toBe('2026-W39')
+      expect(evidence.referenced_batches[0].skill_version).toBe(1)
+      expect(evidence.referenced_batches[0].result_count).toBe(2)
 
       // ---- 2. 入队（幂等）-------------------------------------------------
       const enqueueSql = `select public.admin_enqueue_skill_ai_optimization(${quoteSql(f.skillId)})::text;`
@@ -427,9 +433,17 @@ describe('V1.19 技能 AI 优化 · 本地全链路', () => {
       expect(workerEvidence.referenced_job_count).toBe(evidence.referenced_job_count)
       expect(workerEvidence.human_review_counts.INCORRECT).toBe(1)
       expect(workerEvidence.sample_findings[0]!.human_review_comment).toContain('数据权限')
+      expect(workerEvidence.referenced_batches[0]!.batch_name).toBe(`V119 e2e ${RUN}`)
 
-      // ---- 4. 执行（只有模型是假的）--------------------------------------
+      /*
+       * ---- 4. 执行（只有模型是假的）--------------------------------------
+       *
+       * 第一次故意返回一份**不合规**的输出（把脚本放到根目录，角色 OTHER 不允许 .sh），
+       * 用来验证"AI 改完必须自检、不通过要继续改"这条在真实链路上成立：Worker 会把拒绝原因
+       * 回灌给模型，第二次才产出草稿。
+       */
       let promptSeen = ''
+      let modelCalls = 0
       const outcome = await runSkillAiOptimization(claim!, {
         jobsDb: f.jobsDb,
         storage: f.storage,
@@ -437,21 +451,38 @@ describe('V1.19 技能 AI 优化 · 本地全链路', () => {
         modelProxy: null,
         logger: silentLogger,
         callModel: async (input): Promise<ChatCompletionResult> => {
+          modelCalls += 1
           promptSeen = input.userPrompt
-          return {
-            content: JSON.stringify({
-              summary: '依据 1 条人工标错的结论补充了数据权限校验要点',
-              files: { 'SKILL.md': entryMarkdown(OPTIMIZED_BODY) },
-            }),
-            latencyMs: 5,
-            promptTokens: 100,
-            completionTokens: 200,
-          }
+          const content =
+            modelCalls === 1
+              ? JSON.stringify({
+                  summary: '第一次故意放错目录',
+                  files: { 'inspect.sh': '#!/bin/sh\necho nope\n' },
+                })
+              : JSON.stringify({
+                  summary: '依据 1 条人工标错的结论补充了数据权限校验要点，并拆出一份检查清单',
+                  files: {
+                    'SKILL.md': entryMarkdown(OPTIMIZED_BODY),
+                    'templates/checklist.md': '- [ ] 数据权限逐条核对\n',
+                  },
+                  deletedFiles: ['references/domain-model.md'],
+                })
+          return { content, latencyMs: 5, promptTokens: 100, completionTokens: 200 }
         },
       })
       expect(outcome.status).toBe('SUCCEEDED')
-      expect(outcome.changedPaths).toEqual(['SKILL.md'])
-      // 模型真的看到了当前正文与那条人工意见。
+      // 自检真的发生过：第一次被拒、第二次才过。
+      expect(modelCalls).toBe(2)
+      expect(outcome.modelAttempts).toBe(2)
+      expect(outcome.changedPaths).toEqual([
+        'SKILL.md',
+        'references/domain-model.md',
+        'templates/checklist.md',
+      ])
+      // 第二次提示词里必须带着第一次的拒绝原因，否则模型只是在重新抽一次签。
+      expect(promptSeen).toContain('上一次的输出被结构检查拒绝了')
+      expect(promptSeen).toContain('inspect.sh')
+      // 模型确实看到了当前正文与那条人工意见。
       expect(promptSeen).toContain('确认字段校验存在')
       expect(promptSeen).toContain('实际只校验了登录，没校验数据权限')
 
@@ -467,6 +498,7 @@ describe('V1.19 技能 AI 优化 · 本地全链路', () => {
       expect(taskAfter.status).toBe('SUCCEEDED')
       expect(taskAfter.result_upload_id).toBe(outcome.uploadId)
       expect(taskAfter.ai_summary).toContain('数据权限')
+      expect(taskAfter.model_attempts).toBe(2)
       // 草稿必须是 VALIDATED：走的是与人工上传完全相同的那一条校验 RPC。
       expect(
         psql(
@@ -492,16 +524,29 @@ describe('V1.19 技能 AI 优化 · 本地全链路', () => {
         error?: string
         skill_name?: string
         ai_summary?: string
-        files?: { path: string; before: string | null; after: string | null }[]
+        model_attempts?: number
+        contains_scripts?: boolean
+        file_count?: number | null
+        files?: { path: string; before: string | null; after: string | null; binary?: boolean }[]
       }
       expect(diffResponse.status, `diff failed: ${diffBody.error ?? ''}`).toBe(200)
       expect(diffBody.skill_name).toBe(SKILL_NAME)
-      expect(diffBody.files).toHaveLength(1)
-      expect(diffBody.files![0]!.path).toBe('SKILL.md')
-      // 两侧正文都是从**两个真实归档**里解出来的，不是数据库里存的副本。
-      expect(diffBody.files![0]!.before).toContain('确认字段校验存在')
-      expect(diffBody.files![0]!.before).not.toContain('确认数据权限校验')
-      expect(diffBody.files![0]!.after).toContain('确认数据权限校验')
+      expect(diffBody.model_attempts).toBe(2)
+      expect(diffBody.contains_scripts).toBe(false)
+      // 原 2 个文件，删 1 加 1 = 2。
+      expect(diffBody.file_count).toBe(2)
+      expect(diffBody.files).toHaveLength(3)
+      const byPath = new Map((diffBody.files ?? []).map((file) => [file.path, file]))
+      // 改写：两侧都有正文，且都是从**两个真实归档**里解出来的。
+      expect(byPath.get('SKILL.md')!.before).toContain('确认字段校验存在')
+      expect(byPath.get('SKILL.md')!.before).not.toContain('确认数据权限校验')
+      expect(byPath.get('SKILL.md')!.after).toContain('确认数据权限校验')
+      // 新增：before 为 null。
+      expect(byPath.get('templates/checklist.md')!.before).toBeNull()
+      expect(byPath.get('templates/checklist.md')!.after).toContain('数据权限逐条核对')
+      // 删除：after 为 null。
+      expect(byPath.get('references/domain-model.md')!.before).toContain('领域模型')
+      expect(byPath.get('references/domain-model.md')!.after).toBeNull()
 
       // ---- 6. 管理员确认发布 V2（既有发布链路，原样复用）-----------------
       const publishResponse = await fetch(`${f.env.url}/functions/v1/skill-bundle-admin`, {

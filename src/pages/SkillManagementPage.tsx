@@ -42,6 +42,9 @@ import {
   canOptimizeFromEvidence,
   collapseUnchanged,
   describeOptimizationError,
+  fileChangeKind,
+  FILE_CHANGE_LABELS,
+  groupEvidenceBatches,
   isOptimizationInFlight,
   optimizationStepIndex,
   renderFileDiff,
@@ -281,6 +284,7 @@ export function SkillReviewEvidenceBlock({
   evidence: SkillReviewEvidence | null
   loading: boolean
 }) {
+  const batchGroups = useMemo(() => groupEvidenceBatches(evidence), [evidence])
   if (loading) return <Text type="secondary">正在汇总历史评审证据…</Text>
   if (evidence === null) return <Text type="secondary">暂无历史评审证据。</Text>
   if (!canOptimizeFromEvidence(evidence)) {
@@ -309,6 +313,68 @@ export function SkillReviewEvidenceBlock({
           </Descriptions.Item>
         ))}
       </Descriptions>
+
+      {/*
+        用到这个技能的任务批次。
+        显示批次名 + 周次而不是 Job id：管理员记得的是「第 39 周那个批次评得不准」，
+        Job id 对他没有意义。同一批次重跑过就会有多个 Job，折进「分析任务次数」。
+      */}
+      <Text strong>用到这个技能的评审批次</Text>
+      {batchGroups.length === 0 ? (
+        <Text type="secondary">
+          这些分析任务所属的批次信息不可用（升级前创建的历史任务不带批次投影）。
+        </Text>
+      ) : (
+        <Table
+          dataSource={batchGroups}
+          rowKey="batch_id"
+          size="small"
+          pagination={batchGroups.length > 5 ? { size: 'small', pageSize: 5 } : false}
+          columns={[
+            { title: '批次', dataIndex: 'batch_name', ellipsis: true },
+            {
+              title: '周次',
+              dataIndex: 'week_code',
+              width: 110,
+              render: (value: string | null) => value ?? '—',
+            },
+            {
+              title: '用到的技能版本',
+              dataIndex: 'skill_versions',
+              width: 140,
+              render: (versions: number[]) =>
+                versions.length === 0
+                  ? '—'
+                  : versions
+                      .slice()
+                      .sort((a, b) => a - b)
+                      .map((version) => formatSkillVersion(version))
+                      .join('、'),
+            },
+            {
+              title: '分析任务次数',
+              dataIndex: 'job_count',
+              width: 120,
+              align: 'center' as const,
+            },
+            {
+              title: '评审结论数',
+              dataIndex: 'result_count',
+              width: 110,
+              align: 'center' as const,
+            },
+            {
+              title: '最近一次',
+              dataIndex: 'latest_job_at',
+              width: 165,
+              render: (value: string | null) =>
+                value === null ? '—' : new Date(value).toLocaleString(),
+            },
+          ]}
+        />
+      )}
+
+      <Text strong>抽样评审结论</Text>
       {evidence.sample_findings.length === 0 ? (
         <Text type="secondary">这些分析任务下还没有产生评审结论。</Text>
       ) : (
@@ -370,6 +436,7 @@ export function SkillReviewEvidenceBlock({
  * 审阅退化成滚屏。
  */
 export function SkillFileDiffView({ file }: { file: SkillFileDiff }) {
+  const kind = fileChangeKind(file)
   const rendered = renderFileDiff(file)
   const rows = collapseUnchanged(rendered.lines)
   return (
@@ -377,33 +444,55 @@ export function SkillFileDiffView({ file }: { file: SkillFileDiff }) {
       <div className="skill-diff__header">
         <Text code>{file.path}</Text>
         <Space size={4}>
-          <Tag color="green">+{rendered.stats.added}</Tag>
-          <Tag color="red">-{rendered.stats.removed}</Tag>
-          {file.before === null ? <Tag color="blue">新增文件</Tag> : null}
+          <Tag
+            color={
+              kind === 'ADDED'
+                ? 'green'
+                : kind === 'DELETED'
+                  ? 'red'
+                  : kind === 'BINARY'
+                    ? 'default'
+                    : 'blue'
+            }
+          >
+            {FILE_CHANGE_LABELS[kind]}
+          </Tag>
+          {kind === 'BINARY' ? null : (
+            <>
+              <Tag color="green">+{rendered.stats.added}</Tag>
+              <Tag color="red">-{rendered.stats.removed}</Tag>
+            </>
+          )}
           {rendered.lineEndingChanged ? <Tag color="orange">仅行尾符变化</Tag> : null}
         </Space>
       </div>
-      <pre className="skill-diff__body">
-        {rows.map((row: DiffLine | null, index: number) =>
-          row === null ? (
-            <div key={`gap-${index}`} className="skill-diff__gap">
-              ⋯ 省略未改动内容 ⋯
-            </div>
-          ) : (
-            <div
-              key={`${row.kind}-${index}`}
-              className={`skill-diff__line skill-diff__line--${row.kind.toLowerCase()}`}
-            >
-              <span className="skill-diff__gutter">{row.beforeLineNumber ?? ''}</span>
-              <span className="skill-diff__gutter">{row.afterLineNumber ?? ''}</span>
-              <span className="skill-diff__sign">
-                {row.kind === 'ADDED' ? '+' : row.kind === 'REMOVED' ? '-' : ' '}
-              </span>
-              <span className="skill-diff__text">{row.text === '' ? ' ' : row.text}</span>
-            </div>
-          ),
-        )}
-      </pre>
+      {kind === 'BINARY' ? (
+        <div className="skill-diff__gap">
+          二进制文件，只能新增或删除，没有逐行 diff。
+        </div>
+      ) : (
+        <pre className="skill-diff__body">
+          {rows.map((row: DiffLine | null, index: number) =>
+            row === null ? (
+              <div key={`gap-${index}`} className="skill-diff__gap">
+                ⋯ 省略未改动内容 ⋯
+              </div>
+            ) : (
+              <div
+                key={`${row.kind}-${index}`}
+                className={`skill-diff__line skill-diff__line--${row.kind.toLowerCase()}`}
+              >
+                <span className="skill-diff__gutter">{row.beforeLineNumber ?? ''}</span>
+                <span className="skill-diff__gutter">{row.afterLineNumber ?? ''}</span>
+                <span className="skill-diff__sign">
+                  {row.kind === 'ADDED' ? '+' : row.kind === 'REMOVED' ? '-' : ' '}
+                </span>
+                <span className="skill-diff__text">{row.text === '' ? ' ' : row.text}</span>
+              </div>
+            ),
+          )}
+        </pre>
+      )}
     </div>
   )
 }
@@ -1289,9 +1378,15 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
                   modal.confirm({
                     title: `发布 ${optimizeSkill?.name ?? ''} 的 AI 优化结果？`,
                     content:
-                      '这份内容已经通过与人工上传完全相同的服务端校验。发布后不可替换，' +
-                      '只能再发一个新版本；发布只影响之后新建的 Job，不影响历史或在途 Job。',
+                      diffQuery.data?.contains_scripts === true
+                        ? '这份内容已经通过与人工上传完全相同的服务端校验，但它包含 scripts/ 下的' +
+                          '可执行资源 —— 拥有 bash 的 Agent 可以显式运行它们。确认你已经看过这些脚本' +
+                          '的完整内容？发布后不可替换，只能再发一个新版本。'
+                        : '这份内容已经通过与人工上传完全相同的服务端校验。发布后不可替换，' +
+                          '只能再发一个新版本；发布只影响之后新建的 Job，不影响历史或在途 Job。',
                     okText: '确认发布',
+                    okButtonProps:
+                      diffQuery.data?.contains_scripts === true ? { danger: true } : undefined,
                     onOk: () => publishOptimizationMutation.mutateAsync(uploadId),
                   })
                 }}
@@ -1312,13 +1407,6 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
               current={optimizationStepIndex(task?.status ?? null)}
               status={task?.status === 'FAILED' ? 'error' : undefined}
               items={[{ title: '排队中' }, { title: 'AI 生成中' }, { title: '等待确认' }]}
-            />
-
-            <Alert
-              type="info"
-              showIcon
-              message="AI 只会改写 SKILL.md 正文，且必须由你确认后才发布"
-              description="其余文件（参考资料、模板、图片、脚本）在重新打包时保持字节级不变。产出内容会先通过与人工上传完全相同的 fail-closed 校验，任何一项不合规都不会产出可发布的草稿。"
             />
 
             <Text strong>历史评审证据</Text>
@@ -1354,13 +1442,21 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
                 <Text type="secondary">
                   {task?.status === 'QUEUED'
                     ? '已排队，等待一个在线的 Worker 认领。如果长时间停在这一步，请确认至少有一个 Worker 在运行。'
-                    : 'Worker 正在下载当前版本、读取评审证据并调用模型。这一步通常需要几十秒。'}
+                    : 'AI 正在读取当前技能包与评审证据并改写内容。改完会先做一次结构检查，不通过时 AI 会自己重写（最多 3 次），所以这一步可能需要一到几分钟。'}
                 </Text>
               </Space>
             ) : null}
 
             {task !== null && task.status === 'SUCCEEDED' ? (
               <Space direction="vertical" size="middle" className="full-width">
+                {diffQuery.data?.contains_scripts === true ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message="这份草稿包含 scripts/ 下的可执行资源"
+                    description="拥有 bash 的 Agent 可以显式运行这些脚本。请在 diff 里逐行看完脚本内容再决定是否发布。"
+                  />
+                ) : null}
                 <Descriptions size="small" column={2} bordered title="AI 优化结果">
                   <Descriptions.Item label="改动文件">
                     {task.changed_paths.length === 0
@@ -1371,8 +1467,16 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
                           </Tag>
                         ))}
                   </Descriptions.Item>
+                  <Descriptions.Item label="结构检查">
+                    {task.model_attempts <= 1
+                      ? '一次通过'
+                      : `AI 自检不通过后重写了 ${task.model_attempts - 1} 次，最终通过`}
+                  </Descriptions.Item>
                   <Descriptions.Item label="完成时间">
                     {task.finished_at === null ? '—' : new Date(task.finished_at).toLocaleString()}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="发布后文件数">
+                    {diffQuery.data?.file_count ?? '—'}
                   </Descriptions.Item>
                   <Descriptions.Item label="AI 修改理由" span={2}>
                     {task.ai_summary ?? <Text type="secondary">模型没有给出说明</Text>}

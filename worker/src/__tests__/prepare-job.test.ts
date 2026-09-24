@@ -6,6 +6,7 @@ import { GitError } from '../git/verify.js'
 import { Logger } from '../logger.js'
 import { prepareJob } from '../pipeline/prepare-job.js'
 import type { RuntimeEventReporterLike } from '../monitoring/runtime-event-reporter.js'
+import { DISABLED_LINKY_CONFIG } from './helpers/worker-config.js'
 
 const config: WorkerConfig = {
   supabaseUrl: 'https://project.supabase.co',
@@ -25,6 +26,7 @@ const config: WorkerConfig = {
   modelConnectivityTestLeaseSeconds: 90,
   gitEmailDiscoveryLeaseSeconds: 90,
   modelConnectivityProxy: null,
+  linky: DISABLED_LINKY_CONFIG,
   agentAttemptsRoot: '/tmp/agent-attempts',
   skillCacheRoot: '/tmp/skill-cache',
   skillCacheMaxBytes: 4 * 1024 * 1024 * 1024,

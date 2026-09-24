@@ -28,6 +28,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join, relative, resolve, sep } from 'node:path'
@@ -36,6 +37,14 @@ import { redactError } from '../../security/redaction.js'
 import { V4_ERROR_CODES, V4GovernanceError } from '../policy/v4-errors.js'
 import type { V4CapabilityPolicy } from '../policy/v4-capability-policy.js'
 import { measureTree, WorkspacePolicy } from './workspace-policy.js'
+
+/**
+ * 需求附件在 Workspace 里的目录名（V1.20）。
+ *
+ * 与 `repos/`（只读证据源）、`overlay/`（可写代码副本）、`artifacts/`（产物）并列的第四块：
+ * 需求资料。它不是代码，也不能当作"代码已实现"的证据 —— 提示词里写明了这一点。
+ */
+export const REQUIREMENTS_DIR = 'requirements'
 
 export interface AttemptWorkspaceOptions {
   attemptsRoot: string
@@ -195,9 +204,38 @@ export class AttemptWorkspace {
     return target
   }
 
+  /**
+   * 把一个需求附件写进 `requirements/<story>/`（V1.20）。
+   *
+   * 为什么放在 Workspace 里而不是新增一个模型工具：`WorkspacePolicy` 是"禁止根 + 配额"
+   * 模型，多一个目录不需要改能力契约，于是 `v4-capability-contract.json` 与 manifest 哈希
+   * 都不变，新旧 Worker 可以混跑同一批次。Agent 用现成的 `read` / `grep` / `bash` 读它。
+   *
+   * 文件名由调用方清洗过（`linky/mapping.ts` 的 `sanitizeAttachmentFileName`），这里再过一次
+   * `policy.resolvePath`：一个能影响文件名的 bug 也不该能写出 workspace。
+   */
+  materializeRequirementAttachment(storyCode: string, fileName: string, bytes: Buffer): string {
+    const safeStory = storyCode.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64) || 'story'
+    if (fileName.includes('/') || fileName.includes('\\') || fileName === '.' || fileName === '..') {
+      throw new V4GovernanceError(
+        V4_ERROR_CODES.WORKSPACE_POLICY_DENIED,
+        'requirement attachment name must not contain path separators',
+      )
+    }
+    const relativePath = `${REQUIREMENTS_DIR}/${safeStory}/${fileName}`
+    const absolute = this.policy.resolvePath(relativePath, 'write')
+    const usage = this.usage()
+    this.policy.assertQuota(usage, bytes.length, 1)
+    mkdirSync(join(this.workspaceDir, REQUIREMENTS_DIR, safeStory), {
+      recursive: true,
+      mode: 0o700,
+    })
+    writeFileSync(absolute, bytes, { mode: 0o600 })
+    return relativePath
+  }
+
   /** 当前占用与配额。 */
-  usage(): WorkspaceUsage {
-    const measured = measureTree(this.workspaceDir)
+  usage(): WorkspaceUsage {    const measured = measureTree(this.workspaceDir)
     return {
       bytes: measured.bytes,
       files: measured.files,

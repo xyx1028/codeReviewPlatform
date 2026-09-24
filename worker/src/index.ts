@@ -27,6 +27,9 @@ import { SkillCache } from './ai/skills/skill-cache.js'
 import { runSkillAiOptimization } from './ai/skills/skill-ai-optimizer.js'
 import { SupabaseSkillStorageClient, type SkillStorageClient } from './ai/skills/skill-storage.js'
 import { cleanOrphanedOverlays } from './ai/workspace/overlay-cleaner.js'
+import { SupabaseStoryAttachmentStorage, type StoryAttachmentStorage } from './linky/attachment-storage.js'
+import { LinkyApiError, LinkyClient } from './linky/client.js'
+import { runLinkySync, type LinkySyncClaim } from './linky/sync-runner.js'
 import { loadConfig, type WorkerConfig } from './config.js'
 import { SlotPool } from './coordination/concurrency.js'
 import { Heartbeat } from './coordination/heartbeat.js'
@@ -163,6 +166,13 @@ export async function runStoryTask(
      * 都跑一次。缺省时本次 attempt 使用空技能目录 —— 单测走的就是这条路。
      */
     skills?: { cache: SkillCache; storage: SkillStorageClient }
+    /**
+     * V1.20：需求附件的 service-role 对象通道。
+     *
+     * 同样从调用方传进来：一个 Worker 进程一份就够，而这个函数每条故事跑一次。
+     * 缺省时附件不物化，行为与 V1.20 之前一致。
+     */
+    requirementAttachmentStorage?: StoryAttachmentStorage
   } = {},
 ): Promise<void> {
   const log = logger.child({
@@ -268,6 +278,7 @@ export async function runStoryTask(
       repositories,
       agentAttemptsRoot: config.agentAttemptsRoot,
       sessionRoot: config.sessionRoot,
+      requirementAttachmentStorage: options.requirementAttachmentStorage,
       // Workspace 绝不能触及这些：pinned 快照缓存（写它会污染证据源）、attempt 树根、
       // Session 卷、Worker 自己的工作目录、共享 Skill Cache（写它会污染其他 attempt 的
       // 不可变技能包）。
@@ -721,6 +732,102 @@ export async function runGitEmailDiscovery(
   }
 }
 
+
+/**
+ * 一次 Linky 同步（V1.20）。
+ *
+ * 失败分三类，处理方式不同：
+ *   租约丢了（LINKY_SYNC_LEASE_LOST）—— 说明已经被别的副本接管，这里**什么都不写**，
+ *     否则会把别人正在做的请求改成 FAILED。
+ *   Worker 正在关闭 —— 归还 claim，让请求回到 QUEUED，下一个副本接着做。
+ *   其它 —— 写 FAILED 与稳定错误码，页面要能说清"上次同步为什么失败"。
+ */
+export async function runLinkySyncTask(
+  config: WorkerConfig,
+  jobsDb: JobsDb,
+  storage: StoryAttachmentStorage,
+  client: LinkyClient,
+  claim: LinkySyncClaim,
+  logger: Logger,
+  signal: AbortSignal,
+): Promise<void> {
+  const log = logger.child({ linky_sync_id: claim.id })
+  try {
+    const outcome = await runLinkySync({
+      claim,
+      workerId: config.workerId,
+      client,
+      db: jobsDb,
+      storage,
+      limits: {
+        attachmentMaxBytes: config.linky.attachmentMaxBytes,
+        storyAttachmentMaxBytes: config.linky.storyAttachmentMaxBytes,
+        maxDetailsPerSync: config.linky.maxDetailsPerSync,
+        leaseSeconds: config.linky.syncLeaseSeconds,
+      },
+      logger: log,
+      signal,
+      webBaseUrl: config.linky.webBaseUrl,
+    })
+    await jobsDb.completeLinkySync({
+      syncId: claim.id,
+      workerId: config.workerId,
+      claimToken: claim.claim_token,
+      storiesSynced: outcome.storiesSynced,
+      detailsSynced: outcome.detailsSynced,
+      attachmentsStored: outcome.attachmentsStored,
+      attachmentsFailed: outcome.attachmentsFailed,
+      bytesDownloaded: outcome.bytesDownloaded,
+    })
+    log.info('linky_sync_completed', {
+      event: 'linky_sync_completed',
+      depth: claim.depth,
+      stories_synced: outcome.storiesSynced,
+      details_synced: outcome.detailsSynced,
+      attachments_stored: outcome.attachmentsStored,
+      attachments_failed: outcome.attachmentsFailed,
+      attachments_skipped: outcome.attachmentsSkipped,
+      bytes_downloaded: outcome.bytesDownloaded,
+      story_failures: outcome.storyFailures.length,
+    })
+  } catch (error) {
+    const code =
+      error instanceof LinkyApiError
+        ? error.code
+        : ((error as { code?: string } | null)?.code ?? 'LINKY_SYNC_FAILED')
+    if (code === 'LINKY_SYNC_LEASE_LOST' || (error as Error)?.name === 'LinkySyncLeaseLost') {
+      log.warn('linky_sync_lease_lost', { event: 'linky_sync_lease_lost', depth: claim.depth })
+      return
+    }
+    if (signal.aborted) {
+      await jobsDb
+        .releaseLinkySyncClaim({
+          syncId: claim.id,
+          workerId: config.workerId,
+          claimToken: claim.claim_token,
+        })
+        .catch(() => false)
+      log.warn('linky_sync_released_on_shutdown', { event: 'linky_sync_released_on_shutdown' })
+      return
+    }
+    log.error('linky_sync_failed', {
+      event: 'linky_sync_failed',
+      depth: claim.depth,
+      error_code: code,
+      error_message: redactError(error),
+    })
+    await jobsDb
+      .failLinkySync({
+        syncId: claim.id,
+        workerId: config.workerId,
+        claimToken: claim.claim_token,
+        errorCode: code,
+        errorMessage: error instanceof Error ? error.message.slice(0, 280) : 'Linky 同步失败',
+      })
+      .catch(() => false)
+  }
+}
+
 /**
  * Start the polling worker.
  *
@@ -743,6 +850,13 @@ export function startWorker(
    */
   const skillCache = new SkillCache({ cacheRoot: config.skillCacheRoot })
   const skillStorage = new SupabaseSkillStorageClient(config)
+  /*
+   * 需求附件的对象通道（V1.20）。
+   *
+   * 与 Linky 同步循环共用一个实例：同步往里写字节，分析链路从里面读字节，
+   * 中间以 sha256 对账。
+   */
+  const storyAttachmentStorage = new SupabaseStoryAttachmentStorage(config)
   let stopped = false
   const shutdownController = new AbortController()
   let stopPromise: Promise<void> | null = null
@@ -858,6 +972,7 @@ export function startWorker(
   let modelTestLoopPromise: Promise<void> | null = null
   let gitEmailDiscoveryLoopPromise: Promise<void> | null = null
   let skillAiOptimizationLoopPromise: Promise<void> | null = null
+  let linkySyncLoopPromise: Promise<void> | null = null
   let resolveRanOnce: () => void
   const ranOnce = new Promise<void>((resolve) => {
     resolveRanOnce = resolve
@@ -1073,6 +1188,7 @@ export function startWorker(
           const run = runStoryTask(config, jobsDb, task, logger, {
             signal: shutdownController.signal,
             skills: { cache: skillCache, storage: skillStorage },
+            requirementAttachmentStorage: storyAttachmentStorage,
           })
             .catch((error) =>
               logger.error('slot_run_error', {
@@ -1249,10 +1365,103 @@ export function startWorker(
     }
   }
 
+
+  /*
+   * 第 5 条轮询：Linky 用户故事同步（V1.20）。
+   *
+   * 没配 LINKY_API_BASE_URL 就整条不启动 —— 老部署升级后行为不变。
+   * 空闲时顺手清理"没有被任何批次引用、且超过保留期"的镜像附件字节：清理是无损的
+   * （元数据留着，下一次 FULL 同步会重新下载），被引用的对象由数据库函数排除在外。
+   */
+  const linkySyncLoop = async (): Promise<void> => {
+    if (config.linky.baseUrl === null) {
+      logger.info('linky_sync_disabled', { event: 'linky_sync_disabled' })
+      return
+    }
+    const client = new LinkyClient({
+      baseUrl: config.linky.baseUrl,
+      proxy:
+        config.linky.networkAccessMode === 'HOST_PROXY' ? config.modelConnectivityProxy : null,
+      timeoutMs: config.linky.httpTimeoutMs,
+      configId: config.linky.configId,
+    })
+    const attachmentStorage = storyAttachmentStorage
+    logger.info('linky_sync_enabled', {
+      event: 'linky_sync_enabled',
+      network_access_mode: config.linky.networkAccessMode,
+      via_host_proxy:
+        config.linky.networkAccessMode === 'HOST_PROXY' && config.modelConnectivityProxy !== null,
+    })
+    let idleCycles = 0
+    while (!stopped) {
+      try {
+        if (draining()) {
+          await sleep(config.pollIntervalMs)
+          continue
+        }
+        const claim = await jobsDb.claimNextLinkySync(
+          config.workerId,
+          config.linky.syncLeaseSeconds,
+        )
+        if (!claim) {
+          idleCycles += 1
+          if (idleCycles % 120 === 0) {
+            await purgeUnreferencedLinkyAttachments(attachmentStorage)
+          }
+          await sleep(config.pollIntervalMs)
+          continue
+        }
+        idleCycles = 0
+        if (stopped) break
+        await runLinkySyncTask(
+          config,
+          jobsDb,
+          attachmentStorage,
+          client,
+          claim,
+          logger,
+          shutdownController.signal,
+        )
+      } catch (error) {
+        logger.error('linky_sync_loop_error', {
+          event: 'linky_sync_loop_error',
+          error_message: redactError(error),
+        })
+        await sleep(config.pollIntervalMs)
+      }
+    }
+  }
+
+  const purgeUnreferencedLinkyAttachments = async (
+    storage: StoryAttachmentStorage,
+  ): Promise<void> => {
+    try {
+      const candidates = await jobsDb.listLinkyCatalogAttachmentsForCleanup({
+        retentionDays: config.linky.catalogAttachmentRetentionDays,
+        limit: 200,
+      })
+      if (candidates.length === 0) return
+      await storage.remove(candidates.map((entry) => entry.storage_path))
+      for (const entry of candidates) {
+        await jobsDb.markLinkyCatalogAttachmentPurged(entry.id).catch(() => false)
+      }
+      logger.info('linky_attachment_cache_purged', {
+        event: 'linky_attachment_cache_purged',
+        purged: candidates.length,
+      })
+    } catch (error) {
+      logger.warn('linky_attachment_cache_purge_failed', {
+        event: 'linky_attachment_cache_purge_failed',
+        error_message: redactError(error),
+      })
+    }
+  }
+
   void loop()
   modelTestLoopPromise = modelTestLoop()
   gitEmailDiscoveryLoopPromise = gitEmailDiscoveryLoop()
   skillAiOptimizationLoopPromise = skillAiOptimizationLoop()
+  linkySyncLoopPromise = linkySyncLoop()
 
   return {
     stop(): Promise<void> {
@@ -1265,6 +1474,7 @@ export function startWorker(
         ...(modelTestLoopPromise ? [modelTestLoopPromise] : []),
         ...(gitEmailDiscoveryLoopPromise ? [gitEmailDiscoveryLoopPromise] : []),
         ...(skillAiOptimizationLoopPromise ? [skillAiOptimizationLoopPromise] : []),
+        ...(linkySyncLoopPromise ? [linkySyncLoopPromise] : []),
       ]).then(() => undefined)
       return stopPromise
     },

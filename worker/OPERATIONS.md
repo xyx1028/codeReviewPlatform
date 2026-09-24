@@ -1723,10 +1723,22 @@ from analysis_job order by created_at desc limit 5;
 
 - **不会自动发布。** 代码里没有任何一条从优化任务通向 `admin_publish_review_skill_version`
   的路径；发布只能由管理员在前端看完 diff 后触发，走的是与人工上传完全相同的那一条链路。
-- **不会改二进制或脚本。** 首版白名单只有 `SKILL.md`；其余文件在重新打包时用原归档里的
-  **原始字节**，不做任何再编码。模型试图写白名单外的路径即 fail closed，且**不产出任何
-  草稿**（不会在技能详情页留下一条待发布的 upload）。
+- **放开到整包，但没有放宽任何规则。** AI 可以改写、新增、删除包里的任意**文本**文件
+  （`SKILL.md`、`references/`、`templates/`、`scripts/`、根目录文本），图片只能删不能改写，
+  未被触碰的文件字节级不变。放开范围**不等于**放开校验：路径规范、目录角色与扩展名对应
+  （脚本必须在 `scripts/`）、容量上限、frontmatter 要求全部照旧，由同一套 fail-closed 校验
+  判定。模型试图越界即拒绝那一轮输出，且**不产出任何草稿**。
+- **AI 改完必须过结构自检，不过要自己重写。** 自检就是人工上传那条路上的
+  `validateSkillArchive`。不通过时 Worker 把具体拒绝原因回灌进下一轮 Prompt，最多 3 轮
+  （`MAX_MODEL_ATTEMPTS`）；用尽仍不合规才终态 `FAILED`。重写发生在**同一个任务内部**，
+  不会产生第二条任务。任务行的 `model_attempts` 记录实际调了几次模型。
 - **不影响历史与在途 Job。** 技能版本发布只对之后新建的 Job 生效，这条 V1.6 的边界没有变。
+
+> **含脚本的草稿需要额外注意。** AI 可以新增 `scripts/` 下的文件，那会让草稿的
+> `contains_scripts=true`，发布时命中既有的 `SKILL_SCRIPTS_NOT_ACKNOWLEDGED` 门禁。前端在
+> **点发布之前**就会显示警告并把确认按钮标红（`optimization-diff` 返回 `contains_scripts`）。
+> 运维层面没有额外开关：拥有 `bash` 的 Agent 能显式运行这些脚本，所以这类版本的把关点就是
+> 管理员在 diff 里逐行看完脚本内容。
 
 ## 20.2 配置
 
@@ -1744,7 +1756,10 @@ from analysis_job order by created_at desc limit 5;
 ## 20.3 上线顺序
 
 1. 用户执行 `supabase migration list --linked` 与 `supabase db push --linked --dry-run --skip-vault`
-   确认目标项目，再 `supabase db push`（两个迁移：`20260924033000`、`20260924034553`）；
+   确认目标项目，再 `supabase db push`（三个迁移：`20260924033000`、`20260924034553`、
+   `20260924050153`）。`20260924050153` 会**幂等重申** `20260924034553` 里在本地开发期间修订过的
+   两条硬约束（表级 `revoke`、两个外键改 `cascade`/`set null`）与入队时的模型选择规则 ——
+   如果云端在那几次修订之间已经 push 过 `034553`，靠这一步收敛，不需要手工补；
 2. 部署 Edge Function：`supabase functions deploy skill-bundle-admin`（新增 `optimization-diff`
    action；**`db push` 不会部署 Function**）；
 3. 排空后更新 Worker（新循环在 `startWorker` 里挂载，旧版本不认识这三个新 RPC，但它不会
@@ -1754,11 +1769,16 @@ from analysis_job order by created_at desc limit 5;
 顺序可以宽松：数据库先上、Worker 后上期间，入队的任务只是排队；Worker 先上、数据库没上时
 新循环会每个轮询周期记一条 `skill_ai_optimization_loop_error`（RPC 不存在），不影响评审链路。
 
+**Worker 与数据库必须同批上。** `20260924050153` 给两个提交类 RPC 加了 `p_model_attempts`
+并**删掉了旧签名**，所以旧 Worker 在新数据库上提交会因为函数不存在而失败（任务停在 RUNNING
+直到租约超时被回收）。反过来新 Worker 在旧数据库上会以 `MODEL_CONFIG_NOT_FOUND` 之类失败。
+先 push 数据库、再更新 Worker，中间窗口只影响这一类任务。
+
 ## 20.4 运行检查
 
 ```sql
 -- 在飞任务（同一技能最多一条，由部分唯一索引保证）
-select id, skill_id, status, worker_id, lease_expires_at, error_code
+select id, skill_id, status, worker_id, lease_expires_at, error_code, model_attempts
 from public.skill_ai_optimization_request
 where status in ('QUEUED', 'RUNNING')
 order by created_at;
@@ -1769,8 +1789,14 @@ from public.skill_ai_optimization_request
 where status = 'FAILED' and finished_at > now() - interval '7 days'
 group by error_code order by 2 desc;
 
+-- 结构自检的重写率：一次过 vs 重写过。持续偏高说明提示词与现行结构要求脱节。
+select model_attempts, count(*)
+from public.skill_ai_optimization_request
+where status = 'SUCCEEDED' and finished_at > now() - interval '30 days'
+group by model_attempts order by 1;
+
 -- 产出但一直没被发布的草稿（24h 后随 staging 对象一起被保留期任务清理）
-select r.id, r.skill_id, u.status, u.expires_at
+select r.id, r.skill_id, r.model_attempts, u.status, u.contains_scripts, u.expires_at
 from public.skill_ai_optimization_request r
 join public.review_skill_upload u on u.id = r.result_upload_id
 where r.status = 'SUCCEEDED' and u.status = 'VALIDATED';
@@ -1779,12 +1805,15 @@ where r.status = 'SUCCEEDED' and u.status = 'VALIDATED';
 告警判据：
 
 - 任何 `QUEUED` 超过 10 分钟 → 没有 Worker 在线，或全部 Worker 处于 drain；
-- 同一技能连续 3 次 `SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID` → 模型不遵守输出约定，
-  先看是不是模型配置换了，再考虑调整 Prompt；不要放宽校验；
+- `SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID` 出现即意味着**同一次任务里连续 3 轮**都没通过
+  结构自检。同一技能反复如此，先看是不是模型配置换了，再考虑调整 Prompt；**不要放宽校验**；
+- `model_attempts = 3` 的成功占比走高（自检两次才过）→ 提示词里的结构规则与实际校验规则开始
+  脱节，值得复查 `skill-optimization-prompt.ts` 的 system 段是否漏了某条新增限制；
 - `RUNNING` 且 `lease_expires_at < now()` 存在超过一个轮询周期 → 回收循环没在跑
   （`reclaim_stale_skill_ai_optimization_leases` 在每次认领前执行一次）。
 
-日志字段只有 `skill_ai_optimization_id` / `skill_name` / `error_code` / 延迟与 token 计数。
+日志字段只有 `skill_ai_optimization_id` / `skill_name` / `error_code` / `attempt` /
+`model_attempts` / 延迟与 token 计数。
 **Prompt 正文、模型输出、技能正文、API Key 一律不进日志。**
 
 ## 20.5 错误码
@@ -1797,7 +1826,7 @@ where r.status = 'SUCCEEDED' and u.status = 'VALIDATED';
 | `MODEL_SECRET_MISSING` | 模型配置缺 Vault Key | 补 Key |
 | `MODEL_PROXY_NOT_CONFIGURED` | 内网模型 + Worker 无代理 | 配 `MODEL_CONNECTIVITY_PROXY_*` 或改公网模型 |
 | `MODEL_HTTP_<code>` / `MODEL_TIMEOUT` / `MODEL_NETWORK_ERROR` | 模型端点问题 | 与连接测试同一套判读 |
-| `SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID` | 输出不符合约定（越界路径、改了 frontmatter 的 name、正文超长、逐字节未改动） | 可直接重试；不产出草稿 |
+| `SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID` | **同一次任务里连续 3 轮**输出都没通过结构自检（越界路径、放错目录、写二进制、删 `SKILL.md`、改 frontmatter 的 name、容量超限、逐字节未改动） | 可直接重试；不产出草稿。**不要放宽校验** |
 | `SKILL_OPTIMIZATION_REPACK_REJECTED` | 重新打包的归档没通过与人工上传相同的校验 | 看是不是正文触了容量上限；这也是打包器自身的回归信号 |
 | `SKILL_OPTIMIZATION_ACTOR_MISSING` | 发起人账号已删除 | 重新发起（产出物必须以一个 ADMIN 身份走上传校验） |
 | `TASK_LEASE_LOST` | 租约失效（Worker 失联） | 等回收重排队，或重新发起 |
@@ -1807,17 +1836,24 @@ where r.status = 'SUCCEEDED' and u.status = 'VALIDATED';
 纯新增：停掉 Worker 新循环（回滚 Worker 镜像）+ 前端隐藏入口即可。已发布的技能版本沿用既有
 方式（发新版本覆盖），不需要数据库回滚脚本，也不执行 down migration。
 
+**注意**：回滚 Worker 镜像到 `20260924050153` 之前的版本时，旧 Worker 会调 6 参数的提交 RPC，
+而那个签名已经被删掉了 —— 这类任务会一直停在 RUNNING 直到租约超时回收。回滚 Worker 前先确认
+没有在飞的优化任务，或者接受它们被回收后重新排队。
+
 ## 20.7 怎么复跑验证
 
 ```bash
-# 数据库契约
+# 数据库契约（两份）
 docker exec -i supabase_db_codeReviewPlatform psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
   < supabase/tests/20260924034553_skill_ai_optimization_model_and_diff_test.sql
+docker exec -i supabase_db_codeReviewPlatform psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  < supabase/tests/20260924050153_skill_ai_optimization_full_bundle_test.sql
 
-# Worker 单测（打包器/Prompt 解析/主流程）
+# Worker 单测（打包器 / 整包解析 / 结构自检重写 / 主流程）
 npx vitest run worker/src/__tests__/v119-skill-ai-optimizer.test.ts
 
 # 本地全链路：真实 Supabase + 真实 Storage + 真实 Edge Function，只有模型是假的
+# （用例里第一轮故意返回不合规输出，用来验证「自检不通过要继续改」在真实链路上成立）
 RUN_V119_LOCAL_INTEGRATION=1 npx vitest run \
   worker/src/__tests__/v119-skill-ai-optimization.integration.test.ts
 
@@ -1829,3 +1865,168 @@ RUN_V119_LOCAL_INTEGRATION=1 RUN_V119_WORKER_LOOP=1 npx vitest run \
 集成测试会按 id 精确清理自己建的行与 Storage 对象；`batch_operation_log` 是 append-only 且
 `performed_by` 为 `no action`，所以它也会把自己写下的那几行按 `performed_by` 删掉 —— 否则
 `admin_delete_user` 会以 `USER_HAS_REFERENCES` 正确地拒绝删除测试账号。
+
+---
+
+# 21. V1.20 用户故事直连 Linky（镜像 + 同步队列 + 需求附件）
+
+## 21.1 先知道这三条
+
+**1）Linky 取数接口是内网/VPN 专属服务。** 2026-09-24 在开发机上的实测：
+
+| 发起方 | 解析到 | 结果 |
+|---|---|---|
+| macOS 宿主机（默认解析器） | `feature.kingdee.com → 172.18.2.177` | **200**，走 VPN 隧道 `utun7` |
+| 宿主机强制走公网 IP `114.119.32.43:2055` | — | **超时** |
+| Docker 容器（默认 bridge） | 同一个内网 IP | **超时**（容器没有 VPN 路由） |
+| 容器 + `--dns 8.8.8.8` / `--resolve` 公网 IP | `114.119.32.43` | **超时** |
+| 容器 → 宿主机代理（放开 2055） | 代理在宿主机侧解析并出隧道 | **200，1.5 s** |
+
+推论：Supabase Edge Function 与浏览器直连都不可行（云端与公网用户到不了 `172.18.x.x`），
+所以取数只能由 Worker 做；而**容器化 Worker 必须经宿主机代理**。
+
+**2）看板不直连 Linky。** 前端只读平台镜像（`linky_story_catalog`），所以 Linky 挂掉、
+或使用者不在内网时，看板照常浏览已同步的数据。「刷新」是往 `linky_sync_request` 下单，
+由内网侧 Worker 执行。
+
+**3）附件字节只存一份。** 镜像层对象（bucket `story-attachments`，key
+`catalog/<workspace_id>/<attachment_id>.<ext>`）被批次导入时**直接引用**，不拷贝；
+被引用的对象永不删除（`linky_catalog_attachment_is_referenced` + storage.objects 上的
+`protect_referenced_story_attachment_objects` 触发器，后者在没有权限时降级为通知）。
+`review_story_attachment.content_sha256` 在导入时记下，Worker 物化到 attempt workspace
+时重算比对，不符即 `REQUIREMENT_ATTACHMENT_DIGEST_MISMATCH` fail closed。
+
+## 21.2 配置
+
+Worker env 见 `.docker/worker.env.example` 的 V1.20 段（`LINKY_API_BASE_URL` /
+`LINKY_NETWORK_ACCESS_MODE` / `LINKY_WEB_BASE_URL` / `LINKY_CONFIG_ID` /
+`LINKY_HTTP_TIMEOUT_MS` / `LINKY_SYNC_LEASE_SECONDS` / `LINKY_ATTACHMENT_MAX_BYTES` /
+`LINKY_STORY_ATTACHMENT_MAX_BYTES` / `LINKY_MAX_DETAILS_PER_SYNC` /
+`LINKY_CATALOG_ATTACHMENT_RETENTION_DAYS`）。
+
+宿主机代理必须放开 Linky 端口：
+
+```bash
+# 默认值已改成 80,443,2055,90；改动后需要重装 launchd 服务
+MODEL_VPN_PROXY_ALLOWED_PORTS=80,443,2055,90 ./scripts/install-model-vpn-proxy.sh
+
+# 验证（预期 http=200；返回 000 + CONNECT tunnel failed, 403 就是端口没放开）
+docker run --rm curlimages/curl:latest -sS -m 20 \
+  -x "http://<user>:<pass>@host.docker.internal:17890" \
+  -o /dev/null -w 'http=%{http_code}\n' \
+  "https://feature.kingdee.com:2055/quality-platform/api/linky/stories?page_size=1"
+```
+
+`LINKY_API_BASE_URL` 留空则同步循环不启动（日志 `linky_sync_disabled`），其余功能不受影响
+—— 这也是这个特性的关闭开关。
+
+## 21.3 上线顺序
+
+1. 本地：`supabase migration up --local` → 跑迁移测试 → `npm test` 全绿 → 真实同步一次。
+2. 宿主机代理放开 2055/90 并用上面那条 curl 验证。
+3. `supabase db push`（只前滚，不 reset）。
+4. `.docker/worker.env` 补 V1.20 段。
+5. 前端发布（看板 `/stories` + 批次内「从 Linky 导入」）。
+6. Worker 镜像重建 + 排空重启：`npm run worker:release`。
+7. 验收：选一个组 + 一个发布窗口做 FULL 同步，导入 2~3 条（含带附件的），跑一次分析。
+
+**能力契约没有变**：`v4-capability-contract.json` 与 manifest revision 保持 3，附件走
+workspace 文件而不是新工具。所以新旧 Worker 可以混跑同一批次，不需要同时替换。
+
+## 21.4 运行检查
+
+```sql
+-- 同步队列近况
+select id, depth, workspace_name, release_window, status, attempt,
+       stories_synced, details_synced, attachments_stored, attachments_failed,
+       error_code, left(coalesce(error_message,''),80) as err, created_at, finished_at
+from public.linky_sync_request order by created_at desc limit 10;
+
+-- 镜像规模与正文覆盖率（正文为空的故事导入时会被拒）
+select workspace_name,
+       count(*) as stories,
+       count(detail_synced_at) as with_detail,
+       count(requirement_detail) as with_text,
+       sum(attachment_count) as attachments,
+       max(list_synced_at) as last_list_sync
+from public.linky_story_catalog group by workspace_name order by stories desc;
+
+-- 附件落盘状态
+select fetch_status, count(*), sum(size_bytes) from public.linky_story_catalog_attachment
+group by fetch_status;
+
+-- 卡住的租约（Worker 崩了会留 RUNNING；下一次 claim 会在租约过期后接管）
+select id, worker_id, lease_expires_at, heartbeat_at from public.linky_sync_request
+where status='RUNNING' and lease_expires_at < now();
+
+-- 某个批次里被冻结的需求与附件
+select s.story_code, s.source_system, length(coalesce(s.requirement_detail,'')) as text_len,
+       s.iteration_name, s.release_window, s.owners_text, s.requirement_handlers, s.test_handlers,
+       count(a.id) as attachments
+from public.review_story s
+left join public.review_story_attachment a on a.story_id = s.id
+where s.batch_id = '<batch-uuid>'
+group by s.id order by s.story_code;
+```
+
+日志事件（都在 Worker stdout）：`linky_sync_enabled` / `linky_sync_disabled` /
+`linky_sync_listed` / `linky_sync_detail_scope` / `linky_sync_completed` /
+`linky_sync_failed` / `linky_sync_lease_lost` / `linky_sync_released_on_shutdown` /
+`linky_attachment_failed` / `linky_attachment_cache_purged` /
+`requirement_attachments_materialized` / `requirement_attachment_unavailable`。
+日志里没有需求正文、没有附件内容、没有 signed URL。
+
+## 21.5 错误码
+
+| 码 | 含义 | 处置 |
+|---|---|---|
+| `LINKY_PROXY_PORT_BLOCKED` | 宿主机代理拒绝隧道（通常 403） | 放开 `MODEL_VPN_PROXY_ALLOWED_PORTS` 的 2055/90 并重装服务 |
+| `LINKY_PROXY_UNREACHABLE` | 代理没起 | `launchctl` 查 `com.codereviewplatform.model-vpn-proxy` |
+| `LINKY_TIMEOUT` / `LINKY_NETWORK_ERROR` | 上游或链路抖动 | 重试；持续失败先确认 Mac 还连着 VPN |
+| `LINKY_NOT_FOUND` | 编号或附件在上游不存在 | 刷新列表；上游删了故事属正常 |
+| `LINKY_RESPONSE_INVALID` / `_TOO_LARGE` | 响应不是 JSON / 超过上限 | 查上游改动；附件超限调 `LINKY_ATTACHMENT_MAX_BYTES` |
+| `LINKY_SYNC_LEASE_LOST` | 租约被接管 | 无需处理，另一个副本在做 |
+| `LINKY_SYNC_TOO_FREQUENT` | 同一用户 30 秒内重复触发 | 等一会儿再点 |
+| `LINKY_SYNC_SCOPE_REQUIRED` | FULL 同步没选项目组 | 选定项目组（可再选发布窗口） |
+| `LINKY_SYNC_FORBIDDEN` | 角色不是 ADMIN/REVIEWER | 正常门禁 |
+| `LINKY_DETAIL_NOT_SYNCED` | 所选故事没有正文 | 先对该组做一次 FULL 同步 |
+| `LINKY_ATTACHMENTS_NOT_READY` | 有附件还没落盘 | 重试同步，或显式「允许缺少附件」 |
+| `LINKY_STORY_NOT_IN_CATALOG` | 选了镜像里没有的故事 | 刷新列表 |
+| `ACTIVE_JOB_EXISTS` / `BATCH_READ_ONLY` | 批次在跑任务 / 已完成或已有 AI 结果 | 先停止任务或换批次 |
+| `REQUIREMENT_ATTACHMENT_DIGEST_MISMATCH` | 物化时 sha256 与冻结值不符 | 不是"少一份资料"，是资料被换过：查 Storage 与导入记录，重新导入 |
+
+## 21.6 清理归属
+
+`linky_story_catalog` 行长期保留（体量小，是看板的离线可用性来源）。
+镜像附件字节由 Worker 同步循环在**空闲时**清理：超过
+`LINKY_CATALOG_ATTACHMENT_RETENTION_DAYS` 且没有被任何批次引用的对象会被删除，
+元数据行状态回到 `PENDING`（下一次 FULL 同步重新下载）。被引用的对象由
+`list_linky_catalog_attachments_for_cleanup` 直接排除，`mark_linky_catalog_attachment_purged`
+也会再判一次 —— 两道闸门，因为误删它等于让某个历史批次的需求附件永久缺失。
+
+## 21.7 回滚
+
+- 只清空 `LINKY_API_BASE_URL` 并重启 Worker：同步循环不启动，已导入批次与在跑分析不受影响。
+- 前端回滚上一版即可（旧 Excel 导入页在上一版里还在）。
+- 迁移只增列增表 + `create or replace` 函数，没有删改既有对象。真要退，再写一个把
+  `freeze_analysis_job_scope_inputs` 的 `requirement_context` 表达式 replace 回旧形态的前滚迁移。
+  **任何情况下都不 reset 数据库。**
+
+## 21.8 怎么复跑验证
+
+```bash
+# 数据库契约（自带 begin…rollback，不留数据）
+docker exec -i supabase_db_codeReviewPlatform psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  < supabase/tests/20260924051800_linky_story_direct_import_test.sql
+
+# 单测：映射 / 同步执行器 / 附件物化
+npx vitest run worker/src/__tests__/v120-linky-sync.test.ts \
+  worker/src/__tests__/v120-requirement-attachments.test.ts
+npx vitest run -c vitest.web.config.ts src/lib/__tests__/v120-linky-errors.test.ts
+
+# 真实链路（会真的调 Linky 并写本地镜像与 Storage）
+export SUPABASE_URL=http://127.0.0.1:54321
+export SUPABASE_SERVICE_ROLE_KEY=$(supabase status -o env | grep '^SERVICE_ROLE_KEY=' | cut -d= -f2- | tr -d '"')
+npx tsx scripts/v120-linky-e2e.mts                 # 完整：同步 + 核对 + 物化
+E2E_SKIP_SYNC=1 npx tsx scripts/v120-linky-e2e.mts # 只核对与物化，复用上次镜像
+```

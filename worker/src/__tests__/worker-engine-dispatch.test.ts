@@ -4,6 +4,7 @@ import type { WorkerConfig } from '../config.js'
 import type { CompletedStoryTask, JobsDb, StoryTask } from '../db/jobs.js'
 import { recordSetupFailure, toAgentResultRow } from '../index.js'
 import { aggregateCompletedResults } from '../pipeline/finalize-job.js'
+import { DISABLED_LINKY_CONFIG } from './helpers/worker-config.js'
 
 const TASK_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 const CLAIM_TOKEN = '99999999-8888-4777-8666-555555555555'
@@ -38,6 +39,7 @@ function config(): WorkerConfig {
     modelConnectivityTestLeaseSeconds: 90,
     gitEmailDiscoveryLeaseSeconds: 90,
     modelConnectivityProxy: null,
+    linky: DISABLED_LINKY_CONFIG,
     agentAttemptsRoot: '/tmp/attempts',
     skillCacheRoot: '/tmp/skill-cache',
     skillCacheMaxBytes: 4 * 1024 * 1024 * 1024,

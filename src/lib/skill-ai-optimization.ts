@@ -23,6 +23,27 @@ import type {
 
 export type DiffLineKind = 'ADDED' | 'REMOVED' | 'CONTEXT'
 
+/** 一个被改动文件的性质。渲染层据此给标签，而不是让人从 +/- 数字里推断。 */
+export type FileChangeKind = 'ADDED' | 'DELETED' | 'MODIFIED' | 'BINARY'
+
+export function fileChangeKind(file: {
+  before: string | null
+  after: string | null
+  binary?: boolean
+}): FileChangeKind {
+  if (file.binary === true) return 'BINARY'
+  if (file.before === null) return 'ADDED'
+  if (file.after === null) return 'DELETED'
+  return 'MODIFIED'
+}
+
+export const FILE_CHANGE_LABELS: Record<FileChangeKind, string> = {
+  ADDED: '新增文件',
+  DELETED: '删除文件',
+  MODIFIED: '修改',
+  BINARY: '二进制文件（无逐行 diff）',
+}
+
 export interface DiffLine {
   kind: DiffLineKind
   /** 旧文件里的行号；新增行为 null。 */
@@ -193,11 +214,11 @@ const OPTIMIZATION_ERROR_TEXT: Record<string, string> = {
   SKILL_OPTIMIZATION_NO_EVIDENCE:
     '这个技能还没有被任何分析任务引用过，没有可依据的历史评审证据。先让它参与几次评审，再来优化。',
   SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID:
-    '模型返回的内容不符合约定结构（例如试图改动 SKILL.md 之外的文件、改了 frontmatter 的 name、或者正文超长）。没有产出任何草稿，可以直接重试。',
+    'AI 连续几次写出的技能包都没通过结构检查（路径不合规、放错目录、frontmatter 的 name 被改、文件或整包超出容量上限之类）。没有产出任何草稿，可以直接重试。',
   SKILL_OPTIMIZATION_SOURCE_UNREADABLE:
     '当前已发布版本的技能包读不出可优化的 SKILL.md 正文。请先确认这个版本能正常下载。',
   SKILL_OPTIMIZATION_REPACK_REJECTED:
-    '重新打包后的技能包没有通过与人工上传完全相同的校验，已拒绝产出草稿。这通常意味着模型写出的正文触碰了容量或格式上限。',
+    '重新打包后的技能包没有通过与人工上传完全相同的校验，已拒绝产出草稿。这通常意味着 AI 写出的内容触碰了容量或格式上限。',
   SKILL_OPTIMIZATION_UPLOAD_INVALID:
     '优化产出的待发布包没有通过服务端校验，不能作为结果提交。',
   SKILL_OPTIMIZATION_ACTOR_MISSING:
@@ -260,5 +281,62 @@ export function summarizeEvidence(evidence: SkillReviewEvidence): string {
   if (evidence.referenced_job_count === 0) {
     return '还没有历史评审证据，暂不建议 AI 优化。'
   }
-  return `被 ${evidence.referenced_job_count} 个分析任务引用过，共 ${total} 条评审结论，其中 ${flagged} 条被人工标为「错 / 部分对 / 需讨论」。`
+  const batches = evidence.referenced_batches ?? []
+  const batchCount = new Set(batches.map((batch) => batch.batch_id)).size
+  const batchText = batchCount === 0 ? '' : `来自 ${batchCount} 个评审批次、`
+  return `${batchText}被 ${evidence.referenced_job_count} 个分析任务引用过，共 ${total} 条评审结论，其中 ${flagged} 条被人工标为「错 / 部分对 / 需讨论」。`
+}
+
+/**
+ * 按批次归并引用记录。
+ *
+ * 同一批次重跑过就会有多个 Job。表格按批次一行显示，把 Job 次数与最近一次时间折进去 ——
+ * 管理员关心的是"哪几轮评审用过它"，不是"哪几个 Job id"。
+ */
+export interface EvidenceBatchGroup {
+  batch_id: string
+  batch_name: string
+  week_code: string | null
+  job_count: number
+  latest_job_at: string | null
+  result_count: number
+  skill_versions: number[]
+}
+
+export function groupEvidenceBatches(
+  evidence: SkillReviewEvidence | null,
+): EvidenceBatchGroup[] {
+  const batches = evidence?.referenced_batches ?? []
+  const grouped = new Map<string, EvidenceBatchGroup>()
+  for (const batch of batches) {
+    const existing = grouped.get(batch.batch_id)
+    if (existing === undefined) {
+      grouped.set(batch.batch_id, {
+        batch_id: batch.batch_id,
+        batch_name: batch.batch_name,
+        week_code: batch.week_code,
+        job_count: 1,
+        latest_job_at: batch.job_created_at,
+        result_count: batch.result_count,
+        skill_versions: batch.skill_version === null ? [] : [batch.skill_version],
+      })
+      continue
+    }
+    existing.job_count += 1
+    if (
+      batch.job_created_at !== null &&
+      (existing.latest_job_at === null || batch.job_created_at > existing.latest_job_at)
+    ) {
+      existing.latest_job_at = batch.job_created_at
+    }
+    if (batch.skill_version !== null && !existing.skill_versions.includes(batch.skill_version)) {
+      existing.skill_versions.push(batch.skill_version)
+    }
+  }
+  return [...grouped.values()].sort((a, b) => {
+    const left = a.latest_job_at ?? ''
+    const right = b.latest_job_at ?? ''
+    if (left !== right) return left < right ? 1 : -1
+    return a.batch_name < b.batch_name ? -1 : 1
+  })
 }

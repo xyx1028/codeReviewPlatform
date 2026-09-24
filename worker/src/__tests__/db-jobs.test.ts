@@ -753,6 +753,15 @@ describe('database error-code normalization', () => {
       'DIFF_ACCESS_EVIDENCE_INVALID',
       'UNREADABLE_DIFF_REQUIRES_UNCERTAIN',
       'SCOPE_EXPANSION_FROM_MISMATCH',
+      // V1.20 Linky 直连：租约类与"这条写入路径不该走"类必须能被 Worker 区分。
+      'LINKY_SYNC_LEASE_LOST',
+      'LINKY_SYNC_NOT_FOUND',
+      'LINKY_STORY_NOT_IN_CATALOG',
+      'LINKY_ITEMS_INVALID',
+      'LINKY_ISSUE_ID_REQUIRED',
+      'LINKY_ATTACHMENT_STATUS_INVALID',
+      'LINKY_ATTACHMENT_STORAGE_REQUIRED',
+      'STORY_ATTACHMENT_OBJECT_REFERENCED',
     ]
 
     expect(KNOWN_DB_ERROR_CODES).toEqual(expectedCodes)

@@ -299,8 +299,127 @@ export interface ReviewStory {
   /** 需求在源系统里的状态，例如「提测完成」「基线测试完成」。看板按它分组。 */
   source_status: string | null
   source_data: Record<string, unknown>
+  /** V1.20：需求来源通道。EXCEL 为历史批次，LINKY 为直连接口导入。 */
+  source_system: 'EXCEL' | 'LINKY'
+  /** V1.20：需求正文（Linky field_values.gf_description）。历史批次为 null。 */
+  requirement_detail: string | null
+  /** V1.20：关联特性。 */
+  subject_name: string | null
+  linky_issue_id: string | null
+  linky_workspace_id: string | null
+  /** V1.20：项目组（Linky 工作区名）。 */
+  linky_workspace_name: string | null
+  /** V1.20：回到 Linky 看原文的链接；未配置 LINKY_WEB_BASE_URL 时为 null。 */
+  story_url: string | null
+  synced_at: string | null
   created_at: string
   updated_at: string
+}
+
+/** V1.20：批次内冻结的需求附件。字节存在 story-attachments bucket。 */
+export interface ReviewStoryAttachment {
+  id: string
+  story_id: string
+  linky_attachment_id: string
+  filename: string
+  content_type: string | null
+  size_bytes: number | null
+  storage_path: string
+  content_sha256: string
+  created_at: string
+}
+
+/** V1.20：Linky 用户故事镜像行。看板的全部筛选都查它，不直连 Linky。 */
+export interface LinkyCatalogStory {
+  issue_id: string
+  story_code: string
+  title: string
+  workspace_id: string
+  workspace_name: string
+  status_label: string | null
+  assignee_name: string | null
+  iteration: string | null
+  release_window: string | null
+  subject_name: string | null
+  requirement_detail: string | null
+  team: { req?: Array<{ id?: string; name: string }>; dev?: Array<{ id?: string; name: string }>; test?: Array<{ id?: string; name: string }> } | null
+  team_resolve_error: string | null
+  story_url: string | null
+  list_synced_at: string
+  detail_synced_at: string | null
+  attachment_count: number
+}
+
+export type LinkyAttachmentFetchStatus = 'PENDING' | 'STORED' | 'SKIPPED' | 'FAILED'
+
+export interface LinkyCatalogAttachment {
+  id: string
+  issue_id: string
+  linky_attachment_id: string
+  filename: string
+  content_type: string | null
+  size_bytes: number | null
+  storage_path: string | null
+  content_sha256: string | null
+  fetch_status: LinkyAttachmentFetchStatus
+  fetch_error: string | null
+  synced_at: string | null
+}
+
+export type LinkySyncDepth = 'LIST' | 'FULL'
+export type LinkySyncStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
+
+export interface LinkySyncRequest {
+  id: string
+  depth: LinkySyncDepth
+  workspace_id: string | null
+  workspace_name: string | null
+  release_window: string | null
+  scope_key: string
+  status: LinkySyncStatus
+  attempt: number
+  worker_id: string | null
+  stories_synced: number | null
+  details_synced: number | null
+  attachments_stored: number | null
+  attachments_failed: number | null
+  bytes_downloaded: number | null
+  error_code: string | null
+  error_message: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface LinkyFacetEntry {
+  value: string
+  count: number
+}
+
+export interface LinkyWorkspaceFacet {
+  workspace_id: string
+  workspace_name: string
+  count: number
+  list_synced_at: string | null
+  detail_synced_at: string | null
+}
+
+export interface LinkyCatalogFacets {
+  total: number
+  workspaces: LinkyWorkspaceFacet[]
+  release_windows: LinkyFacetEntry[]
+  iterations: LinkyFacetEntry[]
+  statuses: LinkyFacetEntry[]
+  assignees: LinkyFacetEntry[]
+}
+
+export interface LinkyImportResult {
+  batch_id: string
+  requested: number
+  inserted: number
+  updated: number
+  attachments: number
+  attachments_missing: number
 }
 
 export interface ImportFileRecord {
@@ -416,18 +535,6 @@ export interface BatchOperationLogWithBatch extends BatchOperationLog {
  * 所以这里刻意不再包含 application_name / cloud_name —— 应用和云这两个维度都已下线，
  * 映射界面也不该给出这些项。
  */
-export interface SourceStoryInput {
-  story_code: string
-  story_name: string
-  owners_text: string
-  requirement_handlers: string | null
-  test_handlers: string | null
-  project_name: string | null
-  release_window: string | null
-  source_status: string | null
-  source_data: Record<string, unknown>
-}
-
 export interface AiResultInput {
   story_code: string
   verdict: AiVerdict | null
@@ -1234,6 +1341,24 @@ export interface SkillReviewEvidenceSample {
 }
 
 /**
+ * 引用过这个技能的一个 Job 及其所属批次。
+ *
+ * 展示的是**批次身份**（名称 + 周次）而不是 Job id：后者对管理员没有意义，他记得的是
+ * "第 39 周那个批次评得不准"。同一批次可能因为重跑出现多条。
+ */
+export interface SkillEvidenceBatch {
+  batch_id: string
+  batch_name: string
+  week_code: string | null
+  job_id: string
+  job_status: string | null
+  job_created_at: string | null
+  /** 这个 Job 冻结的是技能的哪一版。 */
+  skill_version: number | null
+  result_count: number
+}
+
+/**
  * 技能的历史评审证据聚合（`admin_get_skill_review_evidence`）。
  *
  * `referenced_job_count === 0` 是一个**功能状态**，不是错误：它意味着这个技能还没被任何
@@ -1242,6 +1367,8 @@ export interface SkillReviewEvidenceSample {
 export interface SkillReviewEvidence {
   skill_id: string
   referenced_job_count: number
+  /** 引用过它的 Job 属于哪些评审批次。升级前的历史数据可能缺这个字段。 */
+  referenced_batches?: SkillEvidenceBatch[]
   verdict_counts: Record<SkillVerdictKey, number>
   human_review_counts: Record<SkillHumanReviewKey, number>
   sample_findings: SkillReviewEvidenceSample[]
@@ -1263,6 +1390,8 @@ export interface SkillAiOptimizationTask {
   result_upload_id: string | null
   changed_paths: string[]
   ai_summary: string | null
+  /** 调用模型的次数。>1 表示结构自检没过、AI 自己重写过。 */
+  model_attempts: number
   error_code: string | null
   error_message: string | null
   created_at: string
@@ -1270,17 +1399,23 @@ export interface SkillAiOptimizationTask {
   finished_at: string | null
 }
 
-/** 一个被改动文件的两侧正文。`before === null` 表示新增文件。 */
+/** 一个被改动文件的两侧正文。`before === null` 新增，`after === null` 删除。 */
 export interface SkillFileDiff {
   path: string
   before: string | null
   after: string | null
+  /** 图片等二进制文件：只可能被新增/删除，没有逐行 diff。 */
+  binary?: boolean
 }
 
 export interface SkillOptimizationDiff {
   request_id: string
   skill_name: string
   ai_summary: string | null
+  model_attempts: number
+  /** 这份草稿含 `scripts/` 下的可执行资源，发布时必须额外确认。 */
+  contains_scripts: boolean
+  file_count: number | null
   files: SkillFileDiff[]
 }
 

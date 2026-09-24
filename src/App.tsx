@@ -6,6 +6,7 @@ import {
   App as AntApp,
   Button,
   Card,
+  Checkbox,
   Col,
   Descriptions,
   Divider,
@@ -24,7 +25,6 @@ import {
   Space,
   Spin,
   Statistic,
-  Steps,
   Switch,
   Table,
   Tabs,
@@ -35,6 +35,8 @@ import {
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { LinkyStoryPicker } from './components/linky/LinkyStoryPicker'
+import { StoryBoardPage } from './pages/StoryBoardPage'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   adminDeleteUser,
@@ -54,7 +56,9 @@ import {
   completeBatch,
   consumeWechatAuthError,
   confirmAiResultImport,
-  confirmSourceImport,
+  describeLinkyError,
+  importLinkyStoriesFromCatalog,
+  listReviewStoryAttachments,
   createBatch,
   deleteBatch,
   enqueueAnalysisJob,
@@ -69,7 +73,6 @@ import {
   listAnalysisStoryTasks,
   listBatches,
   listEnabledModelConfigs,
-  listImportFiles,
   listModelDisplayNames,
   listOperationLogs,
   listRepositorySnapshots,
@@ -90,8 +93,7 @@ import {
   wechatLoginEnabled,
 } from './lib/api'
 import type { CreateBatchInput, ModelConfigInput } from './lib/api'
-import { downloadAiTemplate, inferFieldMapping, parseAiWorkbook, parseSourceRows, readFirstSheet, sourceFieldLabels, templateVersion } from './lib/excel'
-import type { FieldMapping, SourceFieldKey } from './lib/excel'
+import { downloadAiTemplate, parseAiWorkbook, templateVersion } from './lib/excel'
 import { parseBaselineCommit } from './lib/baseline'
 import { hashFile } from './lib/hash'
 import { aiVerdictLabels, aiVerdictOptions, analysisJobStatusLabels, batchStatusLabels, humanReviewLabels, humanReviewOptions, resolveAnalysisError, storyTaskStatusLabels } from './lib/labels'
@@ -126,7 +128,6 @@ import type {
   ReviewBatch,
   ReviewBatchListItem,
   ReviewStory,
-  SourceStoryInput,
   UserRole,
   ValidationIssue,
 } from './types'
@@ -591,6 +592,8 @@ function Shell({ session }: { session: Session }) {
                   : '/batches'
   const menuItems = [
     { key: '/batches', label: <Link to="/batches">代码评审</Link> },
+    // V1.20：用户故事看板。三种角色都能看（VIEWER 只读），刷新与导入由 RPC 门禁裁决。
+    { key: '/stories', label: <Link to="/stories">用户故事</Link> },
     {
       key: '/operation-logs',
       label: '操作日志',
@@ -646,6 +649,7 @@ function Shell({ session }: { session: Session }) {
           <Routes>
             <Route path="/" element={<Navigate to="/batches" replace />} />
             <Route path="/batches" element={<BatchesPage canCreateBatch={canCreateBatch} canManageBatch={canManageBatch} />} />
+            <Route path="/stories" element={<StoryBoardPage role={role} userId={session.user.id} />} />
             <Route path="/operation-log" element={<OperationLogPage scope="batch" />} />
             <Route path="/model-operation-log" element={<OperationLogPage scope="model" isAdmin={isAdmin} />} />
             <Route
@@ -1465,168 +1469,127 @@ function BatchPage({ canManageBatch }: { canManageBatch: (batch: ReviewBatch) =>
   )
 }
 
+/**
+ * 批次内的需求导入页（V1.20 起直连 Linky）。
+ *
+ * 换掉的不只是入口：原来是「上传 Excel → 把中文列名一列一列对到平台字段 → 校验 → 入库」，
+ * 现在是「选项目组与发布窗口 → 勾需求 → 导入」。字段映射整页删除，因为接口给的是结构化
+ * 数据，需求正文与附件也一起进来了 —— 那两样正是 Excel 时代拿不到、而 AI 判一致性最需要的。
+ */
 function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batch: ReviewBatch; canManage: boolean }) {
-  const [file, setFile] = useState<File | null>(null)
-  const [headers, setHeaders] = useState<string[]>([])
-  const [rows, setRows] = useState<Record<string, unknown>[]>([])
-  const [firstDataRowNumber, setFirstDataRowNumber] = useState(2)
-  const [mapping, setMapping] = useState<FieldMapping>({})
+  const [selected, setSelected] = useState<string[]>([])
+  const [allowMissingAttachments, setAllowMissingAttachments] = useState(false)
   const { message } = AntApp.useApp()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const readOnly = !canManage || batch.status === 'COMPLETED'
   const storiesQuery = useQuery({ queryKey: ['stories', batchId], queryFn: () => listStories(batchId) })
-  const sourceFilesQuery = useQuery({ queryKey: ['import-files', batchId, 'SOURCE'], queryFn: () => listImportFiles(batchId, 'SOURCE') })
-  const alreadyImported = Boolean(storiesQuery.data?.length)
-  const parsed = useMemo(() => parseSourceRows(rows, mapping, firstDataRowNumber), [rows, mapping, firstDataRowNumber])
+  const importedStories = storiesQuery.data ?? []
+  const attachmentsQuery = useQuery({
+    queryKey: ['review-story-attachments', batchId, importedStories.length],
+    queryFn: () => listReviewStoryAttachments(importedStories.map((story) => story.id)),
+    enabled: importedStories.length > 0,
+  })
   const importMutation = useMutation({
-    mutationFn: async () => {
-      if (!file) throw new Error('请先选择文件')
-      const fileHash = await hashFile(file)
-      const existingFile = await findImportFileByHash(batchId, 'SOURCE', fileHash)
-      if (existingFile) throw new Error('该原始需求文件已导入，请不要重复上传')
-      const storagePath = await uploadBatchFile(batchId, 'SOURCE', file)
-      return confirmSourceImport({ batchId, fileName: file.name, storagePath, fileHash, stories: parsed.stories, fieldMapping: mapping })
-    },
-    onSuccess: () => {
-      message.success('原始需求已导入')
-      setFile(null)
-      setHeaders([])
-      setRows([])
-      setFirstDataRowNumber(2)
+    mutationFn: () =>
+      importLinkyStoriesFromCatalog({ batchId, issueIds: selected, allowMissingAttachments }),
+    onSuccess: (result) => {
+      message.success(`已导入 ${result.inserted} 条新需求、更新 ${result.updated} 条，附件 ${result.attachments} 个`)
+      setSelected([])
       queryClient.invalidateQueries({ queryKey: ['stories', batchId] })
-      queryClient.invalidateQueries({ queryKey: ['import-files', batchId, 'SOURCE'] })
+      queryClient.invalidateQueries({ queryKey: ['review-story-attachments', batchId] })
       queryClient.invalidateQueries({ queryKey: ['batch', batchId] })
       queryClient.invalidateQueries({ queryKey: ['batch-workspace', batchId] })
       queryClient.invalidateQueries({ queryKey: ['batches'] })
       navigate(`/batches/${batchId}/ai-result`)
     },
-    onError: (error) => message.error(error.message),
+    onError: (error) => message.error(describeLinkyError(error)),
   })
 
   return (
     <Space direction="vertical" size="large" className="page-stack">
-      {readOnly ? <Alert type="warning" showIcon title={canManage ? '批次已完成' : '无管理权限'} description={canManage ? '批次完成后默认只读，如需继续导入请先在统计看板重新打开批次。' : '只有管理员或该批次的创建者可以导入文件。'} /> : null}
-      {alreadyImported ? (
+      {readOnly ? (
+        <Alert
+          type="warning"
+          showIcon
+          title={canManage ? '批次已完成' : '无管理权限'}
+          description={canManage ? '批次完成后默认只读，如需继续导入请先在统计看板重新打开批次。' : '只有管理员或该批次的创建者可以导入需求。'}
+        />
+      ) : null}
+      {importedStories.length > 0 ? (
+        <Card title={`本批次已导入 ${importedStories.length} 条需求`}>
+          <Space direction="vertical" size="small" className="full-width">
+            <Text type="secondary">
+              附件 {attachmentsQuery.data?.length ?? 0} 个已随批次冻结；分析时会物化到 Agent 的
+              workspace（requirements/ 目录），并按 sha256 校验。
+            </Text>
+            <Table
+              rowKey="id"
+              size="small"
+              pagination={{ pageSize: 10 }}
+              dataSource={importedStories}
+              columns={[
+                { title: '编码', dataIndex: 'story_code', width: 150 },
+                { title: '名称', dataIndex: 'story_name', ellipsis: true },
+                { title: '开发人员', dataIndex: 'owners_text', width: 140 },
+                { title: '发布窗口', dataIndex: 'release_window', width: 120 },
+                {
+                  title: '正文',
+                  width: 90,
+                  render: (_: unknown, row: ReviewStory) =>
+                    row.requirement_detail && row.requirement_detail.trim() !== '' ? (
+                      <Tag color="green">有</Tag>
+                    ) : (
+                      <Tag color="orange">无</Tag>
+                    ),
+                },
+                {
+                  title: '来源',
+                  dataIndex: 'source_system',
+                  width: 90,
+                  render: (value: string) => <Tag>{value}</Tag>,
+                },
+              ]}
+            />
+          </Space>
+        </Card>
+      ) : null}
+      {readOnly ? null : (
         <>
           <Alert
             type="info"
             showIcon
-            title="本批次已完成原始需求导入"
-            description={`已导入 ${storiesQuery.data?.length ?? 0} 条需求，一个批次只能导入一份原始需求文件。如需重新导入，请创建新批次。`}
+            title="从 Linky 直接导入"
+            description="勾选需求后导入即可；正文、关联特性、迭代、发布窗口与需求/开发/测试负责人全部按结构化字段落库，附件字节随批次冻结。重复导入同一条需求是更新而不是新增。"
           />
-          <MappingForm headers={[]} mapping={sourceFilesQuery.data?.[0]?.field_mapping ?? {}} onChange={() => {}} readOnly />
-        </>
-      ) : (
-        <>
-          <Steps current={rows.length ? (hasErrors(parsed.issues) ? 2 : 3) : 0} items={[{ title: '选择文件' }, { title: '字段映射' }, { title: '数据校验' }, { title: '确认导入' }]} />
-          <Upload.Dragger
-            accept=".xlsx,.xls"
-            maxCount={1}
-            disabled={readOnly}
-            beforeUpload={async (selectedFile) => {
-              const workbookRows = await readFirstSheet(selectedFile)
-              setFile(selectedFile)
-              setHeaders(workbookRows.headers)
-              setRows(workbookRows.rows)
-              setFirstDataRowNumber(workbookRows.firstDataRowNumber)
-              setMapping(inferFieldMapping(workbookRows.headers))
-              return false
-            }}
-            onRemove={() => {
-              setFile(null)
-              setHeaders([])
-              setRows([])
-              setFirstDataRowNumber(2)
-              setMapping({})
-            }}
-          >
-            <p>点击或拖拽上传原始需求 Excel</p>
-            <Text type="secondary">平台会先解析预览，不会立即入库。</Text>
-          </Upload.Dragger>
-          {headers.length ? <MappingForm headers={headers} mapping={mapping} onChange={setMapping} /> : null}
-          {rows.length ? <SourcePreview parsed={parsed} /> : null}
-          <Button type="primary" disabled={readOnly || !file || !parsed.stories.length || hasErrors(parsed.issues)} loading={importMutation.isPending} onClick={() => importMutation.mutate()}>
-            确认导入
-          </Button>
+          <LinkyStoryPicker
+            canSync={canManage}
+            selectable
+            selectedIssueIds={selected}
+            onSelectionChange={setSelected}
+            actions={
+              <Space>
+                <Checkbox
+                  checked={allowMissingAttachments}
+                  onChange={(event) => setAllowMissingAttachments(event.target.checked)}
+                >
+                  允许缺少附件
+                </Checkbox>
+                <Text type="secondary">已选 {selected.length} 条</Text>
+                <Button
+                  type="primary"
+                  disabled={selected.length === 0}
+                  loading={importMutation.isPending}
+                  onClick={() => importMutation.mutate()}
+                >
+                  导入到本批次
+                </Button>
+              </Space>
+            }
+          />
         </>
       )}
-      <Card title="原始文件历史">
-        <List
-          dataSource={sourceFilesQuery.data ?? []}
-          locale={{ emptyText: '暂无原始需求文件' }}
-          renderItem={(item) => (
-            <List.Item actions={[<Button key="download" size="small" onClick={() => downloadStorageFile(item.storage_path)}>下载</Button>]}>
-              <List.Item.Meta title={item.file_name} description={new Date(item.created_at).toLocaleString()} />
-            </List.Item>
-          )}
-        />
-      </Card>
     </Space>
-  )
-}
-
-function MappingForm({ headers, mapping, onChange, readOnly }: { headers: string[]; mapping: FieldMapping; onChange: (mapping: FieldMapping) => void; readOnly?: boolean }) {
-  const fields = Object.keys(sourceFieldLabels) as SourceFieldKey[]
-  const title = readOnly ? '本次导入使用的字段映射' : '字段映射'
-
-  return (
-    <Card
-      title={
-        <Tooltip title="用于将导入 Excel 中的列对应到系统模板的实体字段，确认后平台会按此映射解析需求数据。">
-          <span className="field-mapping-title">{title}<span className="field-mapping-help">?</span></span>
-        </Tooltip>
-      }
-    >
-      <Row gutter={[16, 12]}>
-        {fields.map((field) => (
-          <Col xs={24} md={12} lg={8} key={field}>
-            <Text strong>{sourceFieldLabels[field]}</Text>
-            {readOnly ? (
-              <div className="select-with-margin">
-                <Text type={mapping[field] ? undefined : 'secondary'}>{mapping[field] || '未映射'}</Text>
-              </div>
-            ) : (
-              <Select
-                allowClear
-                className="full-width select-with-margin"
-                value={mapping[field]}
-                placeholder="选择 Excel 列"
-                options={headers.map((header) => ({ value: header, label: header }))}
-                onChange={(value) => onChange({ ...mapping, [field]: value })}
-              />
-            )}
-          </Col>
-        ))}
-      </Row>
-    </Card>
-  )
-}
-
-function SourcePreview({ parsed }: { parsed: { stories: SourceStoryInput[]; issues: ValidationIssue[] } }) {
-  return (
-    <Row gutter={[16, 16]}>
-      <Col span={24} lg={10}>
-        <IssuesCard issues={parsed.issues} />
-      </Col>
-      <Col span={24} lg={14}>
-        <Card title={`预览 ${parsed.stories.length} 条有效需求`}>
-          <Table
-            rowKey="story_code"
-            size="small"
-            pagination={{ pageSize: 5 }}
-            dataSource={parsed.stories.slice(0, 20)}
-            columns={[
-              { title: '编码', dataIndex: 'story_code' },
-              { title: '名称', dataIndex: 'story_name' },
-              { title: '开发人员', dataIndex: 'owners_text' },
-              { title: '需求人员', dataIndex: 'requirement_handlers' },
-              { title: '测试人员', dataIndex: 'test_handlers' },
-            ]}
-          />
-        </Card>
-      </Col>
-    </Row>
   )
 }
 

@@ -12,6 +12,9 @@ import {
   canOptimizeFromEvidence,
   collapseUnchanged,
   describeOptimizationError,
+  fileChangeKind,
+  FILE_CHANGE_LABELS,
+  groupEvidenceBatches,
   isOptimizationInFlight,
   optimizationStepIndex,
   renderFileDiff,
@@ -178,6 +181,38 @@ function evidence(overrides: Partial<SkillReviewEvidence> = {}): SkillReviewEvid
   return {
     skill_id: 'skill-1',
     referenced_job_count: 2,
+    referenced_batches: [
+      {
+        batch_id: 'b1',
+        batch_name: '第 39 周评审',
+        week_code: '2026-W39',
+        job_id: 'j1',
+        job_status: 'SUCCEEDED',
+        job_created_at: '2026-09-20T02:00:00.000Z',
+        skill_version: 1,
+        result_count: 12,
+      },
+      {
+        batch_id: 'b1',
+        batch_name: '第 39 周评审',
+        week_code: '2026-W39',
+        job_id: 'j2',
+        job_status: 'FAILED',
+        job_created_at: '2026-09-21T02:00:00.000Z',
+        skill_version: 2,
+        result_count: 12,
+      },
+      {
+        batch_id: 'b2',
+        batch_name: '第 38 周评审',
+        week_code: '2026-W38',
+        job_id: 'j3',
+        job_status: 'SUCCEEDED',
+        job_created_at: '2026-09-14T02:00:00.000Z',
+        skill_version: 1,
+        result_count: 5,
+      },
+    ],
     verdict_counts: { IMPLEMENTED: 3, PARTIAL: 1, NOT_IMPLEMENTED: 0, UNCERTAIN: 2 },
     human_review_counts: {
       CORRECT: 2,
@@ -189,6 +224,35 @@ function evidence(overrides: Partial<SkillReviewEvidence> = {}): SkillReviewEvid
     ...overrides,
   }
 }
+
+describe('groupEvidenceBatches', () => {
+  it('同一批次的多次重跑归并成一行，按最近一次时间倒序', () => {
+    const groups = groupEvidenceBatches(evidence())
+    expect(groups).toHaveLength(2)
+    expect(groups[0]!.batch_name).toBe('第 39 周评审')
+    expect(groups[0]!.job_count).toBe(2)
+    expect(groups[0]!.latest_job_at).toBe('2026-09-21T02:00:00.000Z')
+    // 同一批次用过技能的两个版本，都要列出来。
+    expect(groups[0]!.skill_versions).toEqual([1, 2])
+    expect(groups[1]!.batch_name).toBe('第 38 周评审')
+  })
+
+  it('没有批次投影（历史数据）时返回空数组而不是抛错', () => {
+    expect(groupEvidenceBatches(evidence({ referenced_batches: undefined }))).toEqual([])
+    expect(groupEvidenceBatches(null)).toEqual([])
+  })
+})
+
+describe('fileChangeKind', () => {
+  it('按两侧是否存在与是否二进制判定改动性质', () => {
+    expect(fileChangeKind({ before: 'a', after: 'b' })).toBe('MODIFIED')
+    expect(fileChangeKind({ before: null, after: 'b' })).toBe('ADDED')
+    expect(fileChangeKind({ before: 'a', after: null })).toBe('DELETED')
+    // 二进制优先：一张被删掉的图片没有逐行 diff，标成 DELETED 会让人以为能展开看。
+    expect(fileChangeKind({ before: null, after: null, binary: true })).toBe('BINARY')
+    expect(FILE_CHANGE_LABELS.BINARY).toContain('二进制')
+  })
+})
 
 describe('canOptimizeFromEvidence / summarizeEvidence', () => {
   it('被引用过就可以优化；不要求一定有人工复核', () => {
@@ -214,8 +278,9 @@ describe('canOptimizeFromEvidence / summarizeEvidence', () => {
     expect(canOptimizeFromEvidence(null)).toBe(false)
   })
 
-  it('摘要用服务端口径计数，不重新加总人工复核里的「对」', () => {
+  it('摘要用服务端口径计数，不重新加总人工复核里的「对」，并带上批次数量', () => {
     const text = summarizeEvidence(evidence())
+    expect(text).toContain('来自 2 个评审批次')
     expect(text).toContain('被 2 个分析任务引用过')
     expect(text).toContain('共 6 条评审结论')
     // 错 1 + 部分对 1 + 需讨论 0 = 2

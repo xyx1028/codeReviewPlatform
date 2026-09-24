@@ -3,6 +3,11 @@
 #
 # 只需执行一次。之后登录 Mac 即自动启动，异常退出由 launchd 重启。
 # 代理凭据随机生成，写入 launchd plist（0600）与 .docker/worker.env（Git 已忽略）。
+#
+# 端口白名单默认 80,443,2055,90（V1.20）。
+# 2055 与 90 是 Linky 取数接口的两个入口端口。默认只有 80,443 时，容器经代理访问
+# 它会被代理拒成 `CONNECT tunnel failed, 403` —— 这是本地实测出来的，不是推断：
+# 该接口的域名在内网 DNS 下解析到 172.18.x.x，容器没有那条 VPN 路由，只能走这里。
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -51,7 +56,7 @@ cat >"$PLIST" <<PLIST_EOF
   <dict>
     <key>MODEL_VPN_PROXY_BIND</key><string>127.0.0.1</string>
     <key>MODEL_VPN_PROXY_PORT</key><string>$PROXY_PORT</string>
-    <key>MODEL_VPN_PROXY_ALLOWED_PORTS</key><string>${MODEL_VPN_PROXY_ALLOWED_PORTS:-80,443}</string>
+    <key>MODEL_VPN_PROXY_ALLOWED_PORTS</key><string>${MODEL_VPN_PROXY_ALLOWED_PORTS:-80,443,2055,90}</string>
     <key>MODEL_VPN_PROXY_USERNAME</key><string>$PROXY_USERNAME</string>
     <key>MODEL_VPN_PROXY_PASSWORD</key><string>$PROXY_PASSWORD</string>
   </dict>
@@ -95,6 +100,6 @@ launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$UID" "$PLIST"
 launchctl enable "gui/$UID/$LABEL"
 
-echo "installed $LABEL on 127.0.0.1:$PROXY_PORT (allowed ports: ${MODEL_VPN_PROXY_ALLOWED_PORTS:-80,443})"
+echo "installed $LABEL on 127.0.0.1:$PROXY_PORT (allowed ports: ${MODEL_VPN_PROXY_ALLOWED_PORTS:-80,443,2055,90})"
 echo "worker config updated: $WORKER_ENV"
 echo "logs: $LOG_DIR/model-vpn-proxy.log"

@@ -13,6 +13,7 @@ import type { RepositoryName } from '../git/repositories.js'
 import { Logger } from '../logger.js'
 import { prepareJob } from '../pipeline/prepare-job.js'
 import { buildStoryScopes } from '../pipeline/story-scope.js'
+import { DISABLED_LINKY_CONFIG } from './helpers/worker-config.js'
 
 const roots: string[] = []
 const silentLogger = new Logger({ sink: () => undefined, minLevel: 'error' })
@@ -46,6 +47,7 @@ function config(root: string): WorkerConfig {
     modelConnectivityTestLeaseSeconds: 90,
     gitEmailDiscoveryLeaseSeconds: 90,
     modelConnectivityProxy: null,
+    linky: DISABLED_LINKY_CONFIG,
     agentAttemptsRoot: join(root, 'attempts'),
     skillCacheRoot: join(root, 'skills'),
     skillCacheMaxBytes: 1024 * 1024,

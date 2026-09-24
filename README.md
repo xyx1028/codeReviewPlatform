@@ -168,6 +168,40 @@ SKILL_CACHE_MAX_BYTES=4294967296
 上传服务的安全模型见
 [`supabase/functions/skill-bundle-admin/README.md`](supabase/functions/skill-bundle-admin/README.md)。
 
+## 用户故事直连 Linky（V1.20）
+
+需求不再靠上传 Excel + 字段映射。链路是：
+
+```text
+Linky 取数接口（内网/VPN 专属）
+  → Worker 第 5 条轮询按「项目组 + 发布窗口」同步
+  → 平台镜像 linky_story_catalog(+_attachment) + 私有 bucket story-attachments
+  → 看板 /stories 勾选需求，一键导入批次（可顺手开跑 AI 分析）
+  → review_story(+_attachment) 按批次冻结
+  → 分析时附件物化到 attempt workspace 的 requirements/<story>/，Agent 用 read/grep 直接看
+```
+
+它解决的是三个具体缺陷，不是"换个入口"：
+
+- **AI 之前经常看不到需求正文。** 冻结需求快照时取的是 Excel 行里字面叫「详细描述」的那一列，
+  列名一变模型拿到的就只有标题加项目名。现在正文来自结构化字段（Linky 的
+  `field_values.gf_description`），关联特性、迭代、发布窗口、需求/开发/测试负责人同样是字段而非猜测。
+- **附件之前完全拿不到。** 验收口径大量躺在 `.docx` / `.html` / `.md` 附件里。现在附件字节随批次
+  冻结（sha256 对账），分析时物化进 workspace 让 Agent 自己读。
+- **字段映射页整页删除。** 接口给的就是结构化数据，没有可映射的东西。
+
+两条边界值得单独记住：
+
+- **看板不直连 Linky。** 那个接口只在公司内网可达（域名在内网 DNS 下解析到 `172.18.x.x`），
+  而页面是从公网加载的；所以前端读平台镜像，「刷新」是给内网侧 Worker 下一张同步单子。
+  好处是 Linky 挂掉或人不在内网时，看板照常用。
+- **容器化 Worker 必须经宿主机代理**（与 V1.7 内网模型同一条链路），且代理要放开 Linky 的
+  2055/90 端口 —— 默认只有 `80,443` 时表现为 `CONNECT tunnel failed, 403`。
+- **能力契约没动**：附件走 workspace 文件而不是新工具，manifest revision 仍是 3，新旧 Worker 可混跑。
+
+运维面（env 清单、代理端口、同步队列 SQL、错误码表、清理归属、回滚、复跑验证命令）见
+`worker/OPERATIONS.md` 第 21 节。
+
 ## 微信扫码登录与账号绑定
 
 登录页支持微信开放平台网站应用扫码登录，邮箱老用户可在“个人中心”绑定微信并继续使用原账号。部署前需要应用 `0013_wechat_identity.sql`、配置微信服务端 Secrets，并以公开回调模式部署 Edge Function。

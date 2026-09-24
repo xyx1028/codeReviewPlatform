@@ -15,7 +15,36 @@
  *
  * 因此：**任何"看起来该拒绝"的情况，这里都只返回空值，绝不抛错、绝不阻止提交。**
  * 真正的拒绝发生在服务端校验那一步，错误信息也来自那里。
+ *
+ * ## 为什么用 fflate 而不是 `DecompressionStream`
+ *
+ * 曾经这里用 `new DecompressionStream('deflate-raw')` 解压入口文件。它的代价是：
+ * `deflate-raw` 要 Chrome/Edge ≥103、Firefox ≥113、Safari ≥16.4，低于此版本构造器直接抛
+ * `TypeError`，被下面的 `catch` 吞掉后表现为"这个 ZIP 里没有 SKILL.md" —— 同一个包在一台
+ * 电脑上能自动填名字、在另一台上不能，而错误信息完全指不到浏览器。
+ *
+ * 换成纯 JS 的 `inflateSync` 后解析结果只由字节决定，不再由浏览器版本决定。fflate 已经是
+ * `read-excel-file` / `write-excel-file` 的传递依赖（同一个 0.8.3），提成直接依赖不增加
+ * 安装面。
+ *
+ * ## `issue` 存在的理由
+ *
+ * 读不出来时仍然只是"留空让人手敲"，但**必须说清是哪一种读不出来**：不是 ZIP、SKILL.md
+ * 被多包了一层目录、还是入口解压失败。原来四种情况共用一句话，远程排查时无法区分。
  */
+
+import { inflateSync } from 'fflate'
+
+/** 预填失败的原因。仅用于措辞，不参与任何拒绝。 */
+export type SkillBundlePreviewIssue =
+  /** 连中央目录都读不出来：不是 ZIP、被截断，或加了密。 */
+  | 'archive-unreadable'
+  /** 是 ZIP，但根目录和任何子目录里都没有 SKILL.md。 */
+  | 'entry-missing'
+  /** SKILL.md 在子目录里 —— 通常是"压缩了外层文件夹"这个经典错误。 */
+  | 'entry-nested'
+  /** 根部有 SKILL.md，但解压或 UTF-8 解码失败。 */
+  | 'entry-unreadable'
 
 export interface SkillBundlePreview {
   /** ZIP 根部 SKILL.md 的 frontmatter `name`，取不到则为 null。 */
@@ -26,6 +55,10 @@ export interface SkillBundlePreview {
   containsScripts: boolean
   /** 根部是否存在 SKILL.md。false 时上面几项必然为空。 */
   hasEntry: boolean
+  /** null 表示 frontmatter 读取正常（字段仍可能为空）。 */
+  issue: SkillBundlePreviewIssue | null
+  /** 仅 `entry-nested` 时非空：SKILL.md 实际所在的归档内路径。 */
+  nestedEntryPath: string | null
 }
 
 const EMPTY: SkillBundlePreview = {
@@ -34,6 +67,8 @@ const EMPTY: SkillBundlePreview = {
   whenToUse: null,
   containsScripts: false,
   hasEntry: false,
+  issue: null,
+  nestedEntryPath: null,
 }
 
 const ENTRY_PATH = 'SKILL.md'
@@ -45,23 +80,37 @@ const MAX_ENTRY_BYTES = 1024 * 1024
 /**
  * 读取 ZIP 中央目录，找到根部 `SKILL.md` 并解析出 frontmatter。
  *
- * 失败一律返回空预览（见文件头说明）。
+ * 失败一律返回空预览 + `issue`（见文件头说明），永不抛错。
  */
 export async function readSkillBundlePreview(file: Blob): Promise<SkillBundlePreview> {
+  // 提到 try 外面：入口解压失败时这条提示仍然有效，不该跟着一起丢。
+  let containsScripts = false
+  let reachedEntry = false
   try {
     const buffer = await file.arrayBuffer()
     const view = new DataView(buffer)
     const entries = readCentralDirectory(view)
-    if (entries === null) return EMPTY
+    if (entries === null) return { ...EMPTY, issue: 'archive-unreadable' }
 
-    const containsScripts = entries.some(
+    containsScripts = entries.some(
       (entry) => entry.path.startsWith('scripts/') && !entry.path.endsWith('/'),
     )
     const entry = entries.find((candidate) => candidate.path === ENTRY_PATH)
-    if (entry === undefined) return { ...EMPTY, containsScripts }
+    if (entry === undefined) {
+      const nested = entries.find((candidate) => candidate.path.endsWith(`/${ENTRY_PATH}`))
+      return {
+        ...EMPTY,
+        containsScripts,
+        issue: nested === undefined ? 'entry-missing' : 'entry-nested',
+        nestedEntryPath: nested?.path ?? null,
+      }
+    }
 
-    const text = await readEntryText(buffer, view, entry)
-    if (text === null) return { ...EMPTY, containsScripts, hasEntry: true }
+    reachedEntry = true
+    const text = readEntryText(buffer, view, entry)
+    if (text === null) {
+      return { ...EMPTY, containsScripts, hasEntry: true, issue: 'entry-unreadable' }
+    }
 
     const fields = readFrontmatterFields(text)
     return {
@@ -70,9 +119,16 @@ export async function readSkillBundlePreview(file: Blob): Promise<SkillBundlePre
       whenToUse: fields.get('whenToUse') ?? fields.get('when-to-use') ?? null,
       containsScripts,
       hasEntry: true,
+      issue: null,
+      nestedEntryPath: null,
     }
   } catch {
-    return EMPTY
+    return {
+      ...EMPTY,
+      containsScripts,
+      hasEntry: reachedEntry,
+      issue: reachedEntry ? 'entry-unreadable' : 'archive-unreadable',
+    }
   }
 }
 
@@ -122,11 +178,11 @@ function findEndOfCentralDirectory(view: DataView): number | null {
   return null
 }
 
-async function readEntryText(
+function readEntryText(
   buffer: ArrayBuffer,
   view: DataView,
   entry: CentralEntry,
-): Promise<string | null> {
+): string | null {
   if (entry.uncompressedSize > MAX_ENTRY_BYTES) return null
 
   const header = entry.localHeaderOffset
@@ -137,14 +193,16 @@ async function readEntryText(
   const end = start + entry.compressedSize
   if (end > view.byteLength) return null
 
-  const raw = buffer.slice(start, end)
-  if (entry.compressionMethod === 0) return decodeUtf8(raw, 0, raw.byteLength)
+  const raw = new Uint8Array(buffer, start, entry.compressedSize)
+  if (entry.compressionMethod === 0) return decodeUtf8(buffer, start, entry.compressedSize)
+  // ZIP 的 method 8 是裸 deflate 流（没有 zlib 头），对应 fflate 的 inflateSync。
   if (entry.compressionMethod !== 8) return null
+  // 中央目录里的 uncompressedSize 即使用了 data descriptor 也是真值；拿它预分配输出缓冲，
+  // 顺带把浏览器端的 Zip Bomb 上限钉在 MAX_ENTRY_BYTES。
+  if (entry.uncompressedSize === 0) return null
 
-  // deflate-raw：ZIP 的 method 8 是裸 deflate 流，没有 zlib 头。
-  const stream = new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'))
-  const inflated = await new Response(stream).arrayBuffer()
-  return decodeUtf8(inflated, 0, inflated.byteLength)
+  const inflated = inflateSync(raw, { out: new Uint8Array(entry.uncompressedSize) })
+  return decodeUtf8(inflated.buffer, inflated.byteOffset, inflated.byteLength)
 }
 
 function decodeUtf8(buffer: ArrayBufferLike, offset: number, length: number): string | null {

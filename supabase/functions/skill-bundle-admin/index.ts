@@ -598,6 +598,9 @@ async function handleOptimizationDiff(
     skill_name: string
     changed_paths: string[] | null
     ai_summary: string | null
+    model_attempts: number | null
+    contains_scripts: boolean | null
+    after_file_count: number | null
     before_bucket: string
     before_object_key: string
     after_bucket: string
@@ -629,8 +632,8 @@ async function handleOptimizationDiff(
     )
   }
 
-  let before: Map<string, string>
-  let after: Map<string, string>
+  let before: { texts: Map<string, string>; binary: Set<string> }
+  let after: { texts: Map<string, string>; binary: Set<string> }
   try {
     before = await readArchiveTextEntries(
       new Uint8Array(await beforeBlob.data.arrayBuffer()),
@@ -654,15 +657,22 @@ async function handleOptimizationDiff(
     userId,
     request_id: payload.request_id,
     changed_path_count: changedPaths.length,
+    contains_scripts: row.contains_scripts ?? false,
   })
   return json({
     request_id: payload.request_id,
     skill_name: row.skill_name,
     ai_summary: row.ai_summary,
+    model_attempts: row.model_attempts ?? 1,
+    // 发布前就要知道：含脚本的版本必须额外确认，撞 SKILL_SCRIPTS_NOT_ACKNOWLEDGED 才知道太晚。
+    contains_scripts: row.contains_scripts ?? false,
+    file_count: row.after_file_count ?? null,
     files: changedPaths.map((path) => ({
       path,
-      before: before.get(path) ?? null,
-      after: after.get(path) ?? null,
+      before: before.texts.get(path) ?? null,
+      after: after.texts.get(path) ?? null,
+      // 图片只可能被删除/新增，没有逐行 diff；前端据此显示"二进制文件"而不是一个空 diff。
+      binary: before.binary.has(path) || after.binary.has(path),
     })),
   })
 }

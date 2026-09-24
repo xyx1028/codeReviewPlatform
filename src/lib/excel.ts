@@ -10,7 +10,6 @@ import type {
   EvidenceType,
   ReviewBatch,
   ReviewStory,
-  SourceStoryInput,
   ValidationIssue,
 } from '../types'
 
@@ -22,54 +21,6 @@ import type {
  * 「不支持的模板版本」并重新下载。
  */
 export const templateVersion = '1.2'
-
-/**
- * 映射界面的字段顺序与显示名，key 的顺序就是界面上的排列顺序。也是校验提示里的字段名。
- *
- * owners_text 对外一律叫「开发人员」（列表列头、看板分组、需求详情都用这个名字）。
- * 底层列名 owners_text 是 0001 建表时的历史命名，不跟着改，语义见 types.ts 的注释。
- */
-export const sourceFieldLabels: Record<SourceFieldKey, string> = {
-  story_code: '用户故事编码',
-  story_name: '用户故事名称',
-  owners_text: '开发人员',
-  requirement_handlers: '需求人员',
-  test_handlers: '测试人员',
-  project_name: '关联特性',
-  release_window: '发布窗口',
-  source_status: '需求状态',
-}
-
-/**
- * 每个实体字段的候选列名，**顺序即优先级**：越靠前越精确。
- *
- * 需求平台的导出有两代格式，列名口径不一样，所以同一个字段要挂多个别名：
- * - 旧格式（单表头）：用户故事编码 / 用户故事名称 / 负责人 / 所属项目 / 所属云 / 所属应用
- *   （「所属云」「所属应用」这两个维度已下线，不再有任何实体字段认领它们的列）
- * - 新格式（双表头，第一行是 gf_*、tf_* 字段码，第二行才是中文名）：
- *   编码 / 名称 / 处理人 / 需求人员 / 开发人员 / 测试人员 / 关联特性
- *
- * 新格式的中文名比旧格式短（「编码」而不是「用户故事编码」），所以必须放在旧格式别名后面：
- * 万一某份文件两种列名都在，要优先认更精确的那个。字段码放最后兜底，应付只导出了字段码行的变体。
- *
- * 新格式的四个人员列各归各位，互不抢占：
- * - 开发人员 → owners_text（负责人 = 交付负责人）
- * - 需求人员 → requirement_handlers
- * - 测试人员 → test_handlers
- * - 处理人 是当前流程节点的处理人，会随流程流转而变，不稳定，任何字段都不认它，留给用户手工选。
- */
-const sourceAliases: Record<SourceFieldKey, string[]> = {
-  story_code: ['用户故事编码', '需求编号', '故事编码', '编码', 'story_code', 'story code', 'gf_number'],
-  story_name: ['用户故事名称', '需求标题', '需求名称', '故事名称', '名称', 'story_name', 'title', 'gf_name'],
-  owners_text: ['负责人', '责任人', '需求负责人', '开发人员', 'owner', 'owners', 'tf_dev_handlers'],
-  requirement_handlers: ['需求人员', 'tf_req_handlers'],
-  test_handlers: ['测试人员', 'tf_test_handlers'],
-  // 平台口径跟随新格式叫「关联特性」（FT-xxxx），它是需求的上层业务归属。
-  // 旧格式的「所属项目」是同一个维度的老叫法，作为兼容别名留在后面。
-  project_name: ['关联特性', 'tf_subject', '所属项目', '项目', '项目名称', 'project'],
-  release_window: ['发布窗口', '发布时间', 'release', 'tf_release_window'],
-  source_status: ['需求状态', '原始需求状态', '状态', 'status'],
-}
 
 const reviewSheetName = '需求评审'
 const evidenceSheetName = '代码证据'
@@ -115,25 +66,9 @@ const verdictByLabel: Record<string, AiVerdict> = {
 
 const evidenceTypes = new Set<EvidenceType>(['现有实现', '缺失依据', '风险依据'])
 
-export type SourceFieldKey = keyof Omit<SourceStoryInput, 'source_data'>
-export type FieldMapping = Partial<Record<SourceFieldKey, string>>
-
-type CellValue = string | number | boolean | Date | null
-
 type SheetData = CellValue[][]
+type CellValue = string | number | boolean | Date | null
 type ExportCell = Exclude<Cell, undefined>
-
-export interface WorkbookRows {
-  headers: string[]
-  rows: Record<string, unknown>[]
-  /** 第一条数据在 Excel 里的 1-based 行号。双表头文件是 3，单表头是 2。校验提示靠它对齐行号。 */
-  firstDataRowNumber: number
-}
-
-export interface SourceParseResult {
-  stories: SourceStoryInput[]
-  issues: ValidationIssue[]
-}
 
 export interface AiParseResult {
   batchInfo: Record<string, string>
@@ -171,28 +106,6 @@ function confidenceNumber(value: unknown) {
   return !valueText.endsWith('%') && parsed > 0 && parsed <= 1 ? Math.round(parsed * 100) : parsed
 }
 
-const fieldCodePattern = /^[A-Za-z][A-Za-z0-9_]*$/
-const chinesePattern = /[\u4e00-\u9fff]/
-
-/**
- * 新格式的表头占两行：第一行是 `gf_name`、`tf_req_handlers` 这类字段码，第二行才是中文列名。
- * 直接把第一行当表头会有两个后果：映射下拉框里只有字段码，而中文表头那一行会被当成一条需求
- * 导入（编码=「编码」、名称=「名称」，两个都非空，连校验都拦不住）。
- *
- * 判定条件刻意收得很紧——第一行全是 ASCII 蛇形标识符，**并且**第二行含中文。只满足前一条不够：
- * 一份表头本来就是英文（story_code、story_name）的文件会被误判成字段码行而丢掉真表头。
- *
- * @returns 表头所在的下标（0 或 1）
- */
-export function detectHeaderRowIndex(rows: SheetData): number {
-  const first = rows[0]?.map((value) => cellText(value)).filter(Boolean) ?? []
-  const second = rows[1]?.map((value) => cellText(value)).filter(Boolean) ?? []
-  if (first.length < 3 || second.length === 0) return 0
-  const allFieldCodes = first.every((value) => fieldCodePattern.test(value))
-  const secondHasChinese = second.some((value) => chinesePattern.test(value))
-  return allFieldCodes && secondHasChinese ? 1 : 0
-}
-
 function rowsToObjects(rows: SheetData, headerRowIndex = 0): Record<string, unknown>[] {
   const headers = rows[headerRowIndex]?.map((value) => cellText(value)) ?? []
   return rows.slice(headerRowIndex + 1).map((row) => {
@@ -202,98 +115,6 @@ function rowsToObjects(rows: SheetData, headerRowIndex = 0): Record<string, unkn
     })
     return item
   })
-}
-
-export async function readFirstSheet(file: File): Promise<WorkbookRows> {
-  const rows = await readSheet(file) as unknown as SheetData
-  const headerRowIndex = detectHeaderRowIndex(rows)
-  const headers = rows[headerRowIndex]?.map((value) => cellText(value)).filter(Boolean) ?? []
-  return {
-    headers,
-    rows: rowsToObjects(rows, headerRowIndex),
-    // 1-based Excel 行号：表头下标 + 1 得到表头行号，再 +1 就是第一条数据的行号。
-    firstDataRowNumber: headerRowIndex + 2,
-  }
-}
-
-export function inferFieldMapping(headers: string[]): FieldMapping {
-  const mapping: FieldMapping = {}
-  for (const [field, aliases] of Object.entries(sourceAliases) as [SourceFieldKey, string[]][]) {
-    // 按别名顺序找列，而不是按表头顺序找别名：别名表是有优先级的，
-    // 反过来遍历会让「名称」在列顺序上碰巧靠前时盖掉更精确的「用户故事名称」。
-    for (const alias of aliases) {
-      const matched = headers.find((header) => header.toLowerCase() === alias.toLowerCase())
-      if (matched) {
-        mapping[field] = matched
-        break
-      }
-    }
-  }
-  return mapping
-}
-
-/**
- * 校验提示里同时点出实体字段名和它实际映射到的 Excel 列名。
- *
- * 两者经常不同名：旧版导出把「开发人员」映射到「负责人」列、「关联特性」映射到「所属项目」列。
- * 只报实体字段名的话，用户拿着提示回去翻自己的文件会找不到对应的列。
- * 两者同名时（旧版导出的多数列）就不重复说了。
- */
-function describeField(field: SourceFieldKey, mapping: FieldMapping): string {
-  const label = sourceFieldLabels[field]
-  const column = mapping[field]
-  if (!column) return `${label}（未映射任何 Excel 列）`
-  return column === label ? label : `${label}（对应列「${column}」）`
-}
-
-export function parseSourceRows(
-  rows: Record<string, unknown>[],
-  mapping: FieldMapping,
-  firstDataRowNumber = 2,
-): SourceParseResult {
-  const issues: ValidationIssue[] = []
-  const stories: SourceStoryInput[] = []
-  const seen = new Set<string>()
-
-  rows.forEach((row, index) => {
-    // 校验提示里的行号要能对上用户在 Excel 里看到的行，双表头文件的数据从第 3 行才开始。
-    const rowNumber = index + firstDataRowNumber
-    const hasValue = Object.values(row).some((value) => cellText(value))
-    if (!hasValue) {
-      issues.push({ level: 'info', row: rowNumber, message: '空白行已忽略' })
-      return
-    }
-
-    const mapped = (field: SourceFieldKey) => (mapping[field] ? row[mapping[field]!] : undefined)
-    const storyCode = cellText(mapped('story_code'))
-    const storyName = cellText(mapped('story_name'))
-    const ownersText = cellText(mapped('owners_text'))
-
-    if (!storyCode) issues.push({ level: 'error', row: rowNumber, message: `${describeField('story_code', mapping)}为空` })
-    if (!storyName) issues.push({ level: 'error', row: rowNumber, message: `${describeField('story_name', mapping)}为空` })
-    if (storyCode && seen.has(storyCode)) issues.push({ level: 'error', row: rowNumber, message: `当前文件内重复需求编码：${storyCode}` })
-    if (!ownersText) issues.push({ level: 'warning', row: rowNumber, message: `${describeField('owners_text', mapping)}为空` })
-    if (!cellText(mapped('project_name'))) {
-      issues.push({ level: 'warning', row: rowNumber, message: `${describeField('project_name', mapping)}为空` })
-    }
-
-    if (!storyCode || !storyName) return
-    seen.add(storyCode)
-
-    stories.push({
-      story_code: storyCode,
-      story_name: storyName,
-      owners_text: ownersText,
-      requirement_handlers: nullableText(mapped('requirement_handlers')),
-      test_handlers: nullableText(mapped('test_handlers')),
-      project_name: nullableText(mapped('project_name')),
-      release_window: nullableText(mapped('release_window')),
-      source_status: nullableText(mapped('source_status')),
-      source_data: row,
-    })
-  })
-
-  return { stories, issues }
 }
 
 function textCell(value: CellValue, bold = false): ExportCell {

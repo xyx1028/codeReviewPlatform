@@ -5,26 +5,52 @@
  * 于是它的全部行为都能用单测覆盖。真正危险的那一半（模型返回了什么、能不能信）在这里
  * 被收敛成一个 fail-closed 的解析函数。
  *
- * 为什么解析必须比"JSON.parse 成功"严格得多：
+ * ## 范围：整个技能包，不只是 SKILL.md
  *
- *   * 模型可以返回一个合法 JSON，却把 `files` 的 key 写成 `scripts/pwn.sh` —— 那会在下一步
- *     变成一个带可执行脚本的新版本，而管理员看到的 diff 只会多一个文件名。
- *   * 模型可以"顺手"把 frontmatter 的 `name` 改成别的技能名。发布链路会用 frontmatter 的
- *     name 做校验，但 dsh 侧的注册名与平台目录名分叉是最难诊断的一类故障，所以在这里就拒。
+ * 模型可以改写、新增、删除**任何文本文件**（`SKILL.md`、`references/`、`templates/`、
+ * `scripts/` 以及根目录下的普通文本文件）。放开到整包是产品决定：技能的知识不只写在入口
+ * 文件里，只让 AI 改一个文件等于让它把所有内容硬塞进 `SKILL.md`。
+ *
+ * 唯一不能被模型改动的是**图片资源**（`assets/` 下的 ASSET 角色）：它们是二进制，没法用
+ * 一个 JSON 字符串表达。它们的字节在重新打包时原样保留；模型只能**删除**它们。
+ *
+ * ## 为什么解析必须比"JSON.parse 成功"严格得多
+ *
+ *   * 路径是模型给的，所以 `../../etc/cron.d/x`、`a\b`、`.`/`..`、超深路径必须在**还只有
+ *     一个字符串**的时候被拒 —— 这里直接复用 `canonicalizeEntryPath`，不自己写一套。
+ *   * 角色与扩展名必须相符（一个躺在根目录的 `.sh` 会被归为 OTHER，然后被扩展名允许表拒掉）。
+ *     这保证"脚本必须显式放进 `scripts/`"这条既有约定不会被 AI 绕过，从而必然带上
+ *     `contains_scripts=true` 与发布页的额外确认。
+ *   * 模型可以"顺手"把 frontmatter 的 `name` 改成别的技能名。dsh 侧注册名与平台目录名分叉
+ *     是最难诊断的一类故障，所以在这里就拒。
  *   * 模型可以返回一份与原文完全相同的正文。那种"优化"没有发布价值，把它当成成功会让
  *     管理员对着一个空 diff 猜哪里变了。
- *
- * 所以这里的规则是：**只接受白名单路径上的、真的变了的、仍然合法的文本**，其余一律
- * `SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID`。
+ *   * 删除 `SKILL.md` 等于删掉整个技能的入口，dsh 会静默忽略它 —— 一律拒。
  */
 
+import { canonicalizeEntryPath } from './skill-paths.js'
 import { parseSkillEntryFrontmatter, SkillFrontmatterError } from './skill-frontmatter.js'
-import { SKILL_ENTRY_FILE } from './skill-manifest.js'
-
-/** 首版白名单：只允许改入口文件本体。 */
-export const OPTIMIZABLE_PATHS: readonly string[] = [SKILL_ENTRY_FILE]
+import {
+  isExtensionAllowedForRole,
+  mediaTypeForPath,
+  requiresUtf8,
+  roleForPath,
+  SKILL_ENTRY_FILE,
+} from './skill-manifest.js'
+import type { SkillBundleLimits } from './skill-limits.js'
 
 export const SKILL_OPTIMIZATION_OUTPUT_INVALID = 'SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID'
+
+/**
+ * 模型可以写的文件 = 一切"要求严格 UTF-8"的角色。
+ *
+ * 等价于"除图片以外的全部"。用角色判定而不是维护一张路径白名单：新增一个
+ * `references/x.md` 也必须落在同一套规则里，而路径白名单管不到还不存在的文件。
+ */
+export function isModelWritablePath(path: string): boolean {
+  const role = roleForPath(path)
+  return requiresUtf8(role)
+}
 
 export interface SkillEvidenceSample {
   story_code: string
@@ -34,20 +60,49 @@ export interface SkillEvidenceSample {
   human_review_comment: string | null
 }
 
+export interface SkillEvidenceBatch {
+  batch_id: string
+  batch_name: string
+  week_code: string | null
+  job_id: string
+  job_status: string | null
+  job_created_at: string | null
+  result_count: number
+}
+
 export interface SkillReviewEvidenceSnapshot {
   referenced_job_count: number
   verdict_counts: Record<string, number>
   human_review_counts: Record<string, number>
   sample_findings: SkillEvidenceSample[]
+  /** 引用过这个技能的 Job 属于哪些批次。空数组 = 升级前的历史数据或确实没有引用。 */
+  referenced_batches?: SkillEvidenceBatch[]
+}
+
+/** 当前包里的一个文件。文本文件带正文，图片只带元信息。 */
+export interface SkillBundleFileView {
+  path: string
+  /** 文本文件的正文；图片为 null。 */
+  text: string | null
+  sizeBytes: number
+  role: string
 }
 
 export interface SkillOptimizationPromptInput {
   skillName: string
-  /** 当前已发布版本里各白名单文件的正文。 */
-  currentFiles: ReadonlyMap<string, string>
+  /** 当前已发布版本的全部文件。 */
+  files: readonly SkillBundleFileView[]
   evidence: SkillReviewEvidenceSnapshot
-  /** `SKILL.md` 的字节上限，原样告诉模型，避免它写出一份必然被拒的长文。 */
-  entryFileBytes: number
+  limits: SkillBundleLimits
+  /**
+   * 上一轮自检失败的原因。
+   *
+   * 它的存在就是"AI 改完必须自检、不过要继续改"的实现方式：把拒绝原因原样回灌给模型，
+   * 让它自己修，而不是让管理员看着一个失败弹窗手动重试。
+   */
+  previousRejection?: string | null
+  attempt?: number
+  maxAttempts?: number
 }
 
 export interface SkillOptimizationPrompt {
@@ -71,12 +126,21 @@ function reject(message: string): never {
 /**
  * 把证据摘要渲染成模型能用的文本。
  *
- * 只渲染统计与抽样文本，不渲染 story_id / job_id / 仓库路径：模型这一次的任务是改一份
- * markdown，给它主键除了增加提示词长度没有任何用处。
+ * 只渲染统计、批次身份与抽样文本，不渲染 story_id / job_id / 仓库路径：模型这一次的任务是
+ * 改一份技能包，给它主键除了增加提示词长度没有任何用处。
  */
 export function renderEvidenceDigest(evidence: SkillReviewEvidenceSnapshot): string {
   const lines: string[] = []
   lines.push(`引用过本技能的 Analysis Job 数量：${evidence.referenced_job_count}`)
+  const batches = evidence.referenced_batches ?? []
+  if (batches.length > 0) {
+    lines.push('')
+    lines.push('这些 Job 属于以下评审批次：')
+    for (const batch of batches) {
+      const week = batch.week_code === null ? '' : `（${batch.week_code}）`
+      lines.push(`  - ${batch.batch_name}${week}：${batch.result_count} 条评审结论`)
+    }
+  }
   lines.push('')
   lines.push('AI 评审结论分布：')
   for (const key of ['IMPLEMENTED', 'PARTIAL', 'NOT_IMPLEMENTED', 'UNCERTAIN']) {
@@ -107,54 +171,111 @@ export function renderEvidenceDigest(evidence: SkillReviewEvidenceSnapshot): str
   return lines.join('\n')
 }
 
+/** 给模型看的当前包结构。图片只列身份，不列正文。 */
+export function renderBundleInventory(files: readonly SkillBundleFileView[]): string {
+  const sorted = [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+  return sorted
+    .map((file) =>
+      file.text === null
+        ? `- ${file.path}（${file.role}，二进制，${file.sizeBytes} 字节，只能删除、不能改写）`
+        : `- ${file.path}（${file.role}，${file.sizeBytes} 字节，可改写）`,
+    )
+    .join('\n')
+}
+
+function languageFence(path: string): string {
+  const extension = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
+  if (extension === 'md') return 'markdown'
+  if (extension === 'json') return 'json'
+  if (extension === 'yaml' || extension === 'yml') return 'yaml'
+  if (extension === 'sh') return 'bash'
+  if (extension === 'js' || extension === 'mjs' || extension === 'cjs') return 'javascript'
+  return 'text'
+}
+
 /**
- * 组装一次性优化请求。
+ * 组装一次优化请求。
  *
- * 这是一次 `chat/completions`，不是一棵 Agent 树：任务是"读一份 markdown 与一份统计，
- * 写回一份 markdown"，没有工具调用、没有代码检索，也就没有理由付多 Agent 编排的代价。
+ * 这是一次 `chat/completions`，不是一棵 Agent 树：任务是"读一份技能包与一份统计，写回
+ * 改动后的文件"，没有工具调用、没有代码检索，也就没有理由付多 Agent 编排的代价。
  */
 export function buildSkillOptimizationPrompt(
   input: SkillOptimizationPromptInput,
 ): SkillOptimizationPrompt {
-  const allowed = OPTIMIZABLE_PATHS.filter((path) => input.currentFiles.has(path))
-  if (allowed.length === 0) {
-    // 白名单里一个文件都没拿到 = 上游解包出了问题，不该把这种输入送去模型。
-    reject('no optimizable file content was supplied')
+  const entry = input.files.find((file) => file.path === SKILL_ENTRY_FILE)
+  if (entry === undefined || entry.text === null) {
+    // 拿不到入口正文 = 上游解包出了问题，不该把这种输入送去模型。
+    reject(`no readable ${SKILL_ENTRY_FILE} content was supplied`)
   }
 
   const system = [
     '你是代码评审平台的技能维护助手。',
-    '你的任务是根据一个技能在历史评审中的真实表现，改写它的 SKILL.md 正文，让后续评审少出错。',
+    '你的任务是根据一个技能在历史评审中的真实表现，改写它的技能包内容，让后续评审少出错。',
     '',
-    '硬性规则：',
-    `1. 只输出一个 JSON 对象，不要加 markdown 代码块以外的任何解释性文字。`,
-    '2. JSON 形状固定为 {"summary": string, "files": {"<路径>": "<新正文>"}}。',
-    `3. files 的 key 只能出现在这个白名单里：${allowed.join(', ')}。不得新增、删除或重命名任何文件。`,
-    '4. 必须保留 YAML frontmatter，并且 frontmatter 的 name 字段必须与原文完全一致。',
-    '5. description 与 whenToUse 可以改写，但要保持一句话可读、不要写成清单。',
-    '6. summary 用中文写清楚你改了什么、依据哪些评审证据，不要复述规则本身。',
-    '7. 不要编造证据里没有的业务事实；证据不足时宁可少改。',
+    '你可以改写、新增、删除技能包里的任何**文本**文件；图片资源只能删除，不能改写。',
+    '',
+    '硬性规则（任何一条不满足，整次输出都会被拒绝）：',
+    '1. 只输出一个 JSON 对象，不要在 JSON 之外写解释。',
+    '2. JSON 形状：{"summary": string, "files": {"<路径>": "<新正文>"}, "deletedFiles": ["<路径>"]}。',
+    '   files 只放你**改写或新增**的文件；没动的文件不要出现。deletedFiles 可以省略。',
+    `3. ${SKILL_ENTRY_FILE} 必须保留，且它的 YAML frontmatter 里的 name 必须与原文完全一致。`,
+    '4. 路径只能用 `/` 分隔的相对路径，每段只允许字母、数字、`.`、`_`、`-`；',
+    `   不得出现 \`..\`、绝对路径、反斜杠；层数不超过 ${input.limits.pathDepth}。`,
+    '5. 文件类型按目录约定：references/ 与 templates/ 放文本资料（md/txt/json/yaml/csv/xml），',
+    '   scripts/ 放脚本（sh/js/mjs/cjs），assets/ 放图片。根目录只允许文本类。',
+    '   放错目录或用了该目录不允许的扩展名会被拒。',
+    `6. 单个文件不超过 ${input.limits.fileBytes} 字节，${SKILL_ENTRY_FILE} 不超过 ` +
+      `${input.limits.entryFileBytes} 字节，整包展开后不超过 ${input.limits.expandedBytes} 字节，` +
+      `文件总数不超过 ${input.limits.entryCount}。`,
+    '7. 新增 scripts/ 下的文件会让这个版本被标记为「含可执行脚本」，管理员发布时必须额外确认；',
+    '   只有确实需要可执行步骤时才这么做。',
+    '8. summary 用中文写清楚你改了什么、依据哪些评审证据，不要复述这些规则。',
+    '9. 不要编造证据里没有的业务事实；证据不足时宁可少改。',
   ].join('\n')
 
-  const fileSections = allowed
-    .map((path) => `### ${path}\n\n\`\`\`markdown\n${input.currentFiles.get(path) ?? ''}\n\`\`\``)
+  const textSections = input.files
+    .filter((file) => file.text !== null)
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    .map(
+      (file) =>
+        `### ${file.path}\n\n\`\`\`${languageFence(file.path)}\n${file.text ?? ''}\n\`\`\``,
+    )
     .join('\n\n')
 
+  const rejectionSection =
+    input.previousRejection === undefined ||
+    input.previousRejection === null ||
+    input.previousRejection === ''
+      ? ''
+      : [
+          '',
+          '## 上一次的输出被结构检查拒绝了，请修正后重新输出完整结果',
+          '',
+          `拒绝原因：${input.previousRejection}`,
+          '',
+          '不要只解释原因，直接给出修正后的 JSON。',
+          `这是第 ${input.attempt ?? 2} 次尝试，最多 ${input.maxAttempts ?? 3} 次。`,
+        ].join('\n')
+
   const user = [
-    `技能名（frontmatter 的 name 必须保持这个值）：${input.skillName}`,
-    `SKILL.md 的字节上限：${input.entryFileBytes}`,
+    `技能名（${SKILL_ENTRY_FILE} 的 frontmatter name 必须保持这个值）：${input.skillName}`,
     '',
-    '## 当前内容',
+    '## 当前技能包结构',
     '',
-    fileSections,
+    renderBundleInventory(input.files),
+    '',
+    '## 当前文本内容',
+    '',
+    textSections,
     '',
     '## 历史评审证据',
     '',
     renderEvidenceDigest(input.evidence),
+    rejectionSection,
     '',
     '## 输出',
     '',
-    '只输出 JSON。files 里只放你确实改过的文件；没改的文件不要出现在 files 里。',
+    '只输出 JSON。',
   ].join('\n')
 
   return { system, user }
@@ -162,15 +283,20 @@ export function buildSkillOptimizationPrompt(
 
 export interface ParsedSkillOptimization {
   summary: string
-  /** 路径 → 新正文。只含真的变了的文件。 */
+  /** 路径 → 新正文。含改写与新增。 */
   files: Map<string, string>
+  /** 要从包里移除的路径。 */
+  deletedPaths: string[]
+  /** 改动路径的并集（改写 + 新增 + 删除），排序后用于写回 `changed_paths`。 */
+  changedPaths: string[]
 }
 
 export interface ParseSkillOptimizationInput {
   raw: string
   skillName: string
-  currentFiles: ReadonlyMap<string, string>
-  entryFileBytes: number
+  /** 当前包的全部文件（含图片）。 */
+  currentFiles: readonly SkillBundleFileView[]
+  limits: SkillBundleLimits
 }
 
 /**
@@ -189,6 +315,33 @@ export function extractJsonObject(raw: string): string {
     reject('the model output contains no JSON object')
   }
   return candidate.slice(start, end + 1)
+}
+
+function assertWritablePath(path: string, limits: SkillBundleLimits): void {
+  let canonical: { path: string; isDirectory: boolean }
+  try {
+    canonical = canonicalizeEntryPath(path, limits)
+  } catch (error) {
+    reject(`the model used an unacceptable file path "${path}": ${(error as Error).message}`)
+  }
+  if (canonical.isDirectory) {
+    reject(`the model wrote to a directory path: ${path}`)
+  }
+  if (canonical.path !== path) {
+    // 归一化后不等于原样 = 模型给了一个"看起来一样但不是"的路径。不静默采用归一化结果：
+    // 那会让 diff 里显示的路径与它声明的路径不同。
+    reject(`the model used a non-canonical file path: ${path}`)
+  }
+  const role = roleForPath(path)
+  if (!requiresUtf8(role)) {
+    reject(`the model cannot write binary content; refusing ${path} (role ${role})`)
+  }
+  if (!isExtensionAllowedForRole(path, role)) {
+    reject(`file type is not allowed for its role (${role}): ${path}`)
+  }
+  if (mediaTypeForPath(path) === null) {
+    reject(`unknown media type: ${path}`)
+  }
 }
 
 export function parseSkillOptimizationOutput(
@@ -226,14 +379,11 @@ export function parseSkillOptimizationOutput(
     reject('the model output has no files object')
   }
 
+  const current = new Map(input.currentFiles.map((file) => [file.path, file]))
   const files = new Map<string, string>()
+
   for (const [path, value] of Object.entries(filesRaw as Record<string, unknown>)) {
-    if (!OPTIMIZABLE_PATHS.includes(path)) {
-      reject(`the model tried to write a file outside the allow list: ${path}`)
-    }
-    if (!input.currentFiles.has(path)) {
-      reject(`the model tried to write a file that the bundle does not contain: ${path}`)
-    }
+    assertWritablePath(path, input.limits)
     if (typeof value !== 'string') {
       reject(`the model wrote a non-string body for ${path}`)
     }
@@ -243,41 +393,96 @@ export function parseSkillOptimizationOutput(
     if (value.includes('\u0000')) {
       reject(`the model wrote a NUL byte into ${path}`)
     }
+    // 孤立代理项会被 Buffer 静默替换成 U+FFFD，于是落盘内容与模型说的不一致。
+    if (/[\uD800-\uDFFF]/.test(value.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, ''))) {
+      reject(`the model wrote an unpaired surrogate into ${path}`)
+    }
     const bytes = Buffer.byteLength(value, 'utf8')
-    if (path === SKILL_ENTRY_FILE && bytes > input.entryFileBytes) {
+    if (bytes > input.limits.fileBytes) {
+      reject(`the model wrote ${bytes} bytes into ${path}, over the per-file limit`)
+    }
+    if (path === SKILL_ENTRY_FILE && bytes > input.limits.entryFileBytes) {
       reject(
-        `the model wrote ${bytes} bytes into ${path}, over the ${input.entryFileBytes} byte limit`,
+        `the model wrote ${bytes} bytes into ${path}, over the ${input.limits.entryFileBytes} byte limit`,
       )
     }
-    if (value === input.currentFiles.get(path)) {
-      // 逐字节相同 = 什么都没改。当成成功会让管理员对着一个空 diff 找不同。
-      reject(`the model returned ${path} unchanged`)
+    const existing = current.get(path)
+    if (existing !== undefined && existing.text === value) {
+      // 逐字节相同 = 什么都没改。当成改动会让管理员对着一个空 diff 找不同。
+      reject(`the model returned ${path} unchanged; omit unchanged files from "files"`)
     }
     files.set(path, value)
   }
 
-  if (files.size === 0) {
+  const deletedRaw = record.deletedFiles ?? record.deleted_files ?? []
+  if (!Array.isArray(deletedRaw)) {
+    reject('the model output has a non-array deletedFiles')
+  }
+  const deletedPaths: string[] = []
+  for (const entry of deletedRaw) {
+    if (typeof entry !== 'string') {
+      reject('the model listed a non-string path in deletedFiles')
+    }
+    if (entry === SKILL_ENTRY_FILE) {
+      // 删掉入口 = dsh 静默忽略整个技能，磁盘上文件都在但模型看不见它。
+      reject(`refusing to delete ${SKILL_ENTRY_FILE}; it is the skill entry point`)
+    }
+    if (!current.has(entry)) {
+      reject(`the model tried to delete a file the bundle does not contain: ${entry}`)
+    }
+    if (files.has(entry)) {
+      reject(`the model both rewrote and deleted ${entry}`)
+    }
+    if (deletedPaths.includes(entry)) {
+      reject(`the model listed ${entry} twice in deletedFiles`)
+    }
+    deletedPaths.push(entry)
+  }
+
+  if (files.size === 0 && deletedPaths.length === 0) {
     reject('the model changed nothing')
+  }
+
+  // 容量：按改动后的最终集合算，而不是只看单个文件。
+  let expanded = 0
+  let count = 0
+  for (const file of input.currentFiles) {
+    if (deletedPaths.includes(file.path)) continue
+    if (files.has(file.path)) continue
+    expanded += file.sizeBytes
+    count += 1
+  }
+  for (const [, value] of files) {
+    expanded += Buffer.byteLength(value, 'utf8')
+    count += 1
+  }
+  if (count > input.limits.entryCount) {
+    reject(`the resulting bundle would contain ${count} files, over the limit`)
+  }
+  if (expanded > input.limits.expandedBytes) {
+    reject(`the resulting bundle would expand to ${expanded} bytes, over the limit`)
   }
 
   /*
    * 入口文件的 frontmatter 在这里就校验，而不是等打包后的归档校验。
    *
    * 两处都会校验（归档校验是最终闸门），但先在这里拒能给出一条明确的错误码 ——
-   * "模型输出不合规"与"归档结构不合规"是两种完全不同的处置：前者重试也许有用，
+   * "模型输出不合规"与"归档结构不合规"是两种完全不同的处置：前者回灌原因让模型自己修，
    * 后者说明我们的打包器坏了。
    */
-  const entry = files.get(SKILL_ENTRY_FILE)
-  if (entry !== undefined) {
-    try {
-      parseSkillEntryFrontmatter(entry, input.skillName)
-    } catch (error) {
-      if (error instanceof SkillFrontmatterError) {
-        reject(`the rewritten ${SKILL_ENTRY_FILE} frontmatter is invalid: ${error.message}`)
-      }
-      throw error
+  const entryText = files.get(SKILL_ENTRY_FILE) ?? current.get(SKILL_ENTRY_FILE)?.text ?? null
+  if (entryText === null) {
+    reject(`the resulting bundle has no ${SKILL_ENTRY_FILE}`)
+  }
+  try {
+    parseSkillEntryFrontmatter(entryText, input.skillName)
+  } catch (error) {
+    if (error instanceof SkillFrontmatterError) {
+      reject(`the rewritten ${SKILL_ENTRY_FILE} frontmatter is invalid: ${error.message}`)
     }
+    throw error
   }
 
-  return { summary: summaryRaw.trim().slice(0, 4000), files }
+  const changedPaths = [...new Set([...files.keys(), ...deletedPaths])].sort()
+  return { summary: summaryRaw.trim().slice(0, 4000), files, deletedPaths, changedPaths }
 }

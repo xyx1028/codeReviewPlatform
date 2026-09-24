@@ -33,6 +33,8 @@ interface PlannedEntry {
   content: string
   /** true 时存储为 method 0（stored），否则 method 8（deflate）。 */
   stored?: boolean
+  /** true 时头里声明 deflate，实际写入不是 deflate 流的字节 —— 模拟损坏的入口。 */
+  corruptPayload?: boolean
 }
 
 async function buildZip(entries: PlannedEntry[]): Promise<Blob> {
@@ -45,7 +47,12 @@ async function buildZip(entries: PlannedEntry[]): Promise<Blob> {
     const nameBytes = encoder.encode(entry.path)
     const raw = encoder.encode(entry.content)
     const method = entry.stored === true ? 0 : 8
-    const payload = method === 0 ? raw : await deflateRaw(raw)
+    const payload =
+      entry.corruptPayload === true
+        ? encoder.encode('这不是 deflate 流')
+        : method === 0
+          ? raw
+          : await deflateRaw(raw)
     const checksum = crc32(raw)
 
     const local = new Uint8Array(30 + nameBytes.length + payload.length)
@@ -135,6 +142,42 @@ describe('readSkillBundlePreview', () => {
     const preview = await readSkillBundlePreview(zip)
     expect(preview.hasEntry).toBe(false)
     expect(preview.name).toBeNull()
+    // 「压缩了外层文件夹」是最常见的一次性错误，提示里要能指出它在哪。
+    expect(preview.issue).toBe('entry-nested')
+    expect(preview.nestedEntryPath).toBe('bundle/SKILL.md')
+  })
+
+  /*
+   * 这条锁住线上遇到的真实故障：`DecompressionStream('deflate-raw')` 要 Chrome/Edge ≥103、
+   * Firefox ≥113、Safari ≥16.4，低于此版本时同一个合规的包在别人电脑上会被提示"读不到
+   * SKILL.md"。解压换成纯 JS 后，结果必须只由字节决定。
+   */
+  it('reads a deflated entry on browsers without the Compression Streams API', async () => {
+    const zip = await buildZip([{ path: 'SKILL.md', content: VALID_ENTRY }])
+    const stashed = Reflect.get(globalThis, 'DecompressionStream')
+    Reflect.deleteProperty(globalThis, 'DecompressionStream')
+    try {
+      expect(Reflect.get(globalThis, 'DecompressionStream')).toBeUndefined()
+      const preview = await readSkillBundlePreview(zip)
+      expect(preview.issue).toBeNull()
+      expect(preview.hasEntry).toBe(true)
+      expect(preview.name).toBe('bos-bill-review')
+    } finally {
+      Reflect.set(globalThis, 'DecompressionStream', stashed)
+    }
+  })
+
+  it('still reports scripts/ when the entry itself cannot be inflated', async () => {
+    const zip = await buildZip([
+      { path: 'SKILL.md', content: VALID_ENTRY, corruptPayload: true },
+      { path: 'scripts/run.sh', content: 'echo 1\n' },
+    ])
+    const preview = await readSkillBundlePreview(zip)
+    expect(preview.issue).toBe('entry-unreadable')
+    expect(preview.hasEntry).toBe(true)
+    expect(preview.name).toBeNull()
+    // 解不开入口不该顺手丢掉"这个包里有脚本"这件已经读到的事。
+    expect(preview.containsScripts).toBe(true)
   })
 
   /*
@@ -149,7 +192,16 @@ describe('readSkillBundlePreview', () => {
       whenToUse: null,
       containsScripts: false,
       hasEntry: false,
+      issue: 'archive-unreadable',
+      nestedEntryPath: null,
     })
+  })
+
+  it('separates "no SKILL.md anywhere" from "not a ZIP"', async () => {
+    const zip = await buildZip([{ path: 'references/rules.md', content: '# 规则\n' }])
+    const preview = await readSkillBundlePreview(zip)
+    expect(preview.issue).toBe('entry-missing')
+    expect(preview.nestedEntryPath).toBeNull()
   })
 
   it('returns empty fields, not an error, when the frontmatter block is missing', async () => {

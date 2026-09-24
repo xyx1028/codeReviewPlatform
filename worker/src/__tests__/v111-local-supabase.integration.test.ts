@@ -15,6 +15,7 @@ import { collectRepositoryHistory } from '../git/story-history.js'
 import { runCommand } from '../git/run.js'
 import { Logger } from '../logger.js'
 import { prepareJob } from '../pipeline/prepare-job.js'
+import { DISABLED_LINKY_CONFIG } from './helpers/worker-config.js'
 
 const runPreparationOnly = process.env.RUN_LOCAL_SUPABASE_INTEGRATION === '1'
 const runFullE2e = process.env.RUN_V111_FULL_E2E === '1'
@@ -163,6 +164,7 @@ function workerConfig(root: string): WorkerConfig {
     modelConnectivityTestLeaseSeconds: 90,
     gitEmailDiscoveryLeaseSeconds: 90,
     modelConnectivityProxy: null,
+    linky: DISABLED_LINKY_CONFIG,
     agentAttemptsRoot: join(root, 'attempts'),
     skillCacheRoot: join(root, 'skills'),
     skillCacheMaxBytes: 256 * 1024 * 1024,

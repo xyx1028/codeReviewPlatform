@@ -32,6 +32,29 @@ interface FormValues {
   display_name: string
 }
 
+const MANUAL_FALLBACK = '请手动填写技能编码；服务端仍会独立校验'
+
+/**
+ * 把预填失败的原因翻成一句能照着改的话。返回 null 表示读取正常，不提示。
+ *
+ * 分四句而不是一句"没读到 SKILL.md"：这几种情况的下一步动作完全不同（换包 / 重新压缩 /
+ * 手敲名字），合成一句话时远程排查只能靠猜 —— 线上真的因此耽误过一次。
+ */
+function previewIssueHint(preview: SkillBundlePreview): string | null {
+  switch (preview.issue) {
+    case 'archive-unreadable':
+      return '这个文件不是有效的 ZIP，或已损坏 / 被加密，读不出归档目录。请重新打包后再上传。'
+    case 'entry-nested':
+      return `SKILL.md 在子目录 ${preview.nestedEntryPath} 里。平台要求它在 ZIP 根目录：请进入技能目录内部打包（zip -r ../<name>.zip .），不要压缩外层文件夹。`
+    case 'entry-missing':
+      return `ZIP 根目录没有 SKILL.md。${MANUAL_FALLBACK}`
+    case 'entry-unreadable':
+      return `读到了 SKILL.md 但解不开（压缩方式不支持或不是 UTF-8 文本）。${MANUAL_FALLBACK}`
+    default:
+      return null
+  }
+}
+
 /**
  * 「新增技能」向导：上传 ZIP → 服务端检测 → 发布。
  *
@@ -106,9 +129,8 @@ export function SkillCreateWizard({
       name: parsed.name ?? form.getFieldValue('name') ?? '',
       display_name: form.getFieldValue('display_name') || parsed.name || '',
     })
-    if (!parsed.hasEntry) {
-      message.warning('没能在 ZIP 根目录读到 SKILL.md，请手动填写技能名称；服务端仍会独立校验')
-    }
+    const hint = previewIssueHint(parsed)
+    if (hint !== null) message.warning(hint)
   }
 
   /** 第一步的「下一步」：建技能 → 传 staging → 服务端校验。失败则回滚草稿。 */

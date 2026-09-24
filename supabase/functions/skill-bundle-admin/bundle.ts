@@ -668,21 +668,26 @@ export async function validateSkillArchive(
  * 即便如此仍然保留三道闸门，因为"已经校验过"是一个关于过去的判断，而字节是现在读的：
  * 路径规范化、严格 UTF-8、以及只读白名单请求的那几个路径。绝不遍历整档解码 —— 一个
  * 带 200 个文件的包不该因为要看一行 diff 就被全解一遍。
+ *
+ * 图片（ASSET 角色）**不解码也不报错**，只记进 `binary` 集合：AI 可以删除一张图片，那时
+ * 它的路径会出现在 `changed_paths` 里；为此让整个 diff 请求失败是错的处置 —— 正确的做法是
+ * 告诉前端"这一条是二进制，没有逐行 diff"。
  */
 export async function readArchiveTextEntries(
   archive: Uint8Array,
   wantedPaths: readonly string[],
-): Promise<Map<string, string>> {
+): Promise<{ texts: Map<string, string>; binary: Set<string> }> {
   if (archive.length === 0) invalid('the archive is empty')
   if (archive.length > LIMITS.archiveBytes) {
     overLimit(`the archive is larger than ${LIMITS.archiveBytes} bytes`)
   }
   const wanted = new Set(wantedPaths)
-  if (wanted.size === 0) return new Map()
+  const texts = new Map<string, string>()
+  const binary = new Set<string>()
+  if (wanted.size === 0) return { texts, binary }
 
   const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength)
   const central = readCentralDirectory(view, archive)
-  const texts = new Map<string, string>()
 
   for (const entry of central) {
     if ((entry.flags & 0x1) !== 0) invalid('encrypted archives are not accepted')
@@ -692,6 +697,10 @@ export async function readArchiveTextEntries(
     const canonical = canonicalizeEntryPath(entry.rawName)
     if (canonical.isDirectory) continue
     if (!wanted.has(canonical.path)) continue
+    if (roleForPath(canonical.path) === 'ASSET') {
+      binary.add(canonical.path)
+      continue
+    }
     if (entry.uncompressedSize > LIMITS.fileBytes) {
       overLimit(`entry exceeds the ${LIMITS.fileBytes} byte per-file limit`)
     }
@@ -699,14 +708,9 @@ export async function readArchiveTextEntries(
     if (crc32(bytes) !== (entry.crc >>> 0)) {
       invalid('entry CRC32 does not match the archive header')
     }
-    const role = roleForPath(canonical.path)
-    if (role === 'ASSET') {
-      // 图片没有"逐行 diff"这回事，请求它只能是调用方传错了路径。
-      invalid(`refusing to render a binary asset as text: ${canonical.path}`)
-    }
     assertStrictUtf8(bytes, canonical.path)
     texts.set(canonical.path, new TextDecoder('utf-8', { fatal: true }).decode(bytes))
   }
 
-  return texts
+  return { texts, binary }
 }

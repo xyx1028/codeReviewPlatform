@@ -121,7 +121,9 @@ begin
       'authenticated', 'public.claim_next_skill_ai_optimization_task(text)', 'execute')
     and not has_function_privilege(
       'authenticated',
-      'public.submit_skill_ai_optimization_result(uuid, text, uuid, uuid, text[], text)',
+      -- 20260924050153 之后签名多了 p_model_attempts；断言必须跟着走，
+      -- 否则它会因为"函数不存在"而报错，看起来像权限出了问题。
+      'public.submit_skill_ai_optimization_result(uuid, text, uuid, uuid, text[], text, integer)',
       'execute')
     and not has_function_privilege(
       'authenticated',

@@ -37,6 +37,9 @@ import {
 } from '../../monitoring/runtime-event-reporter.js'
 
 /** Environment variable through which one attempt receives its model key. */
+import type { StoryAttachmentStorage } from '../../linky/attachment-storage.js'
+import { parseFrozenRequirementAttachments } from '../requirements/attachment-materializer.js'
+
 export const AGENT_MODEL_API_KEY_ENV = 'REVIEW_MODEL_API_KEY'
 
 export interface BuildDeepSeekHarnessReviewInput {
@@ -90,6 +93,13 @@ export interface BuildDeepSeekHarnessReviewInput {
    * `resolveModelNetworkRoute` 里，与连接测试链路共用。
    */
   hostProxy?: HostProxySettings | null
+  /**
+   * V1.20：需求附件的 service-role 对象通道。
+   *
+   * 缺省时附件不物化，提示词里也不会出现附件段 —— 单测与"这台 Worker 还没接 Linky"
+   * 走的就是这条路。附件清单本身来自**冻结的** requirement_context，不在这里查库。
+   */
+  requirementAttachmentStorage?: StoryAttachmentStorage
 }
 
 /** Coverage required before an attempt may claim a story is not implemented. */
@@ -299,8 +309,25 @@ export async function buildDeepSeekHarnessReview(
     via_host_proxy: networkRoute.proxy !== null,
   })
 
+  /*
+   * 需求附件（V1.20）。
+   *
+   * 只认冻结 scope 里的那一份清单：一次分析期间需求内容必须不变，否则"AI 当时看到的
+   * 需求"无法复现。没有 scope（legacy v1）就没有附件 —— 那条路径本来也没有冻结语义。
+   */
+  const frozenRequirementAttachments = analysisScope
+    ? parseFrozenRequirementAttachments(analysisScope.requirement_context ?? null)
+    : []
+
   return new DeepSeekHarnessAcpEngine({
     taskId: input.task.id,
+    requirementAttachments:
+      input.requirementAttachmentStorage && frozenRequirementAttachments.length > 0
+        ? {
+            items: frozenRequirementAttachments,
+            storage: input.requirementAttachmentStorage,
+          }
+        : undefined,
     agentAttempt: input.task.agent_attempt,
     branch: input.branch,
     story: {

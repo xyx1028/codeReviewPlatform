@@ -30,6 +30,7 @@ import {
   workerDrainSentinel,
   type WorkerRuntime,
 } from '../index.js'
+import { DISABLED_LINKY_CONFIG } from './helpers/worker-config.js'
 
 const SHA = 'c'.repeat(40)
 
@@ -150,6 +151,7 @@ function buildConfig(root: string): WorkerConfig {
     modelConnectivityTestLeaseSeconds: 90,
     gitEmailDiscoveryLeaseSeconds: 90,
     modelConnectivityProxy: null,
+    linky: DISABLED_LINKY_CONFIG,
     agentAttemptsRoot: join(root, 'attempts'),
     skillCacheRoot: join(root, 'skill-cache'),
     skillCacheMaxBytes: 256 * 1024 * 1024,

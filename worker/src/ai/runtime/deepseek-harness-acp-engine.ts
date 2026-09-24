@@ -88,6 +88,12 @@ import {
   type AgentReviewStory,
 } from '../prompts/agent-review-v1.js'
 import { AGENT_REVIEW_V2_PROMPT_VERSION, buildAgentReviewV2Prompt } from '../prompts/agent-review-v2.js'
+import {
+  materializeRequirementAttachments,
+  type FrozenRequirementAttachment,
+  type MaterializedRequirementAttachment,
+} from '../requirements/attachment-materializer.js'
+import type { StoryAttachmentStorage } from '../../linky/attachment-storage.js'
 import type { StoryAnalysisScope } from '../../db/jobs.js'
 import type { CommitRelevanceOutput } from '../../analysis/commit-relevance-contract.js'
 import type {
@@ -190,6 +196,15 @@ export interface DeepSeekHarnessAcpEngineOptions {
   story: AgentReviewStory
   /** V1.11 冻结范围；缺省表示 legacy v1。 */
   analysisScope?: StoryAnalysisScope
+  /**
+   * V1.20：随快照冻结的需求附件，以及取字节用的 service-role 通道。
+   *
+   * 缺省表示这条故事没有附件（或这台 Worker 还没接 Linky）—— 行为与 V1.20 之前一致。
+   */
+  requirementAttachments?: {
+    items: readonly FrozenRequirementAttachment[]
+    storage: StoryAttachmentStorage
+  }
   analysisScopeIdentity?: string
   snapshots: SnapshotStore
   route: ModelRouteSpec
@@ -394,6 +409,17 @@ export interface DeepSeekHarnessAcpEngineOptions {
 }
 
 export class DeepSeekHarnessAcpEngine implements ReviewRunner {
+  /**
+   * 本次 attempt 实际物化成功的需求附件（V1.20）。
+   *
+   * 是运行期状态而不是构造参数：字节要等 workspace 建好才能落盘，而提示词在那之后才拼。
+   * 只列**确实写到磁盘上、且 sha256 校验通过**的那些 —— 提示词里出现一条模型读不到的
+   * 路径，比不提这个附件更糟。
+   */
+  private materializedRequirementAttachments: MaterializedRequirementAttachment[] = []
+  /** 取不到的附件数量，提示词里如实告知。 */
+  private missingRequirementAttachments = 0
+
   constructor(private readonly options: DeepSeekHarnessAcpEngineOptions) {}
 
   async runReview(input: ReviewRunInput): Promise<ReviewRunResult> {
@@ -596,6 +622,25 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
           workspace.materializeReadOnly(pin.repository, this.options.checkoutPinned)
         }
       }
+      /*
+       * 需求附件物化（V1.20）。
+       *
+       * 放在 WORKSPACE_READY 之前：附件属于"这次 attempt 的输入准备"，和只读仓库视图
+       * 同一阶段。取不到的附件不让 attempt 失败（提示词会如实说少了几个），但 sha256
+       * 不符会抛错 —— 那不是"少一份资料"，那是"资料和冻结时不是同一份"。
+       */
+      if (this.options.requirementAttachments && this.options.requirementAttachments.items.length > 0) {
+        const outcome = await materializeRequirementAttachments({
+          workspace,
+          storyCode: this.options.story.code,
+          attachments: this.options.requirementAttachments.items,
+          storage: this.options.requirementAttachments.storage,
+          logger: log,
+        })
+        this.materializedRequirementAttachments = outcome.materialized
+        this.missingRequirementAttachments = outcome.failures.length
+      }
+
       // 同步调用，没有 await 间隙可插"开始"，所以只报完成（方案 §6.3）。
       emit({
         type: 'WORKSPACE_READY',
@@ -1475,7 +1520,12 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
 
   private prompt(rootToolCount: number): string {
     const base = {
-      story: this.options.story,
+      story: {
+        ...this.options.story,
+        // 物化结果在 workspace 建好之后才有，所以这里取运行期字段而不是构造参数。
+        attachments: this.materializedRequirementAttachments,
+        missingAttachmentCount: this.missingRequirementAttachments,
+      },
       branch: this.options.branch,
       pins: this.options.snapshots.pins(),
       maxModelRequests: this.options.policy.modelBudget.maxRootRequests,

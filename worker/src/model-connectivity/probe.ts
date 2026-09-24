@@ -11,12 +11,20 @@ import http from 'node:http'
 import https from 'node:https'
 import type { ClientRequest, IncomingMessage } from 'node:http'
 import type { Socket } from 'node:net'
+import {
+  type HostProxySettings,
+  ProxyHttpError,
+  openProxyTunnel,
+  proxyAuthHeader,
+  urlPort as defaultPort,
+} from '../net/proxy-http.js'
 
-export interface ModelProxySettings {
-  url: string
-  username: string | null
-  password: string | null
-}
+/**
+ * V1.20：代理原语（CONNECT 隧道、Proxy-Authorization、默认端口）搬到
+ * `net/proxy-http.ts` 共用 —— Linky 取数接口要走同一条宿主机代理链路。
+ * 这里保留类型别名，调用方的 import 不受影响。
+ */
+export type ModelProxySettings = HostProxySettings
 
 export interface ModelConnectivityProbeInput {
   baseUrl: string
@@ -44,50 +52,26 @@ export class ModelConnectivityProbeError extends Error {
   }
 }
 
-function proxyAuthHeader(proxy: ModelProxySettings): Record<string, string> {
-  if (!proxy.username || !proxy.password) return {}
-  const encoded = Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64')
-  return { 'Proxy-Authorization': `Basic ${encoded}` }
-}
-
-function defaultPort(target: URL): number {
-  if (target.port !== '') return Number(target.port)
-  return target.protocol === 'https:' ? 443 : 80
-}
-
-/** 通过代理建立 CONNECT 隧道，用于 HTTPS 模型端点。 */
-function openTunnel(
+/** 经宿主机代理建立 CONNECT 隧道，并把共享原语的错误映射回模型侧错误码。 */
+async function openTunnel(
   proxy: ModelProxySettings,
   target: URL,
   timeoutMs: number,
 ): Promise<Socket> {
-  const proxyUrl = new URL(proxy.url)
-  return new Promise<Socket>((resolve, reject) => {
-    const request = http.request({
-      host: proxyUrl.hostname,
-      port: defaultPort(proxyUrl),
-      method: 'CONNECT',
-      path: `${target.hostname}:${defaultPort(target)}`,
-      headers: proxyAuthHeader(proxy),
-      timeout: timeoutMs,
-    })
-    request.once('connect', (response: IncomingMessage, socket: Socket) => {
-      if (response.statusCode !== 200) {
-        socket.destroy()
-        reject(
-          new ModelConnectivityProbeError(
-            `MODEL_PROXY_HTTP_${response.statusCode ?? 0}`,
-            `Mac 代理拒绝建立隧道（HTTP ${response.statusCode ?? 0}）`,
-          ),
-        )
-        return
+  try {
+    return await openProxyTunnel(proxy, target, timeoutMs)
+  } catch (error) {
+    if (error instanceof ProxyHttpError) {
+      if (error.code === 'PROXY_TUNNEL_TIMEOUT') {
+        throw new ModelConnectivityProbeError('MODEL_TIMEOUT', '模型连接测试超时')
       }
-      resolve(socket)
-    })
-    request.once('timeout', () => request.destroy(new ModelConnectivityProbeError('MODEL_TIMEOUT', '模型连接测试超时')))
-    request.once('error', reject)
-    request.end()
-  })
+      throw new ModelConnectivityProbeError(
+        `MODEL_PROXY_HTTP_${error.statusCode ?? 0}`,
+        `Mac 代理拒绝建立隧道（HTTP ${error.statusCode ?? 0}）`,
+      )
+    }
+    throw error
+  }
 }
 
 export async function probeModelConnectivity(

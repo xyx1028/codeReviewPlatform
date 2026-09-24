@@ -11,6 +11,10 @@ import type {
 } from '../git/gitlab-readonly-client.js'
 import type { DbClient } from './client.js'
 import type {
+  LinkySyncClaim,
+  LinkySyncPendingAttachment as LinkySyncPendingAttachmentRow,
+} from '../linky/sync-runner.js'
+import type {
   RuntimeEventBatchResult,
   RuntimeEventTarget,
   RuntimeEventWire,
@@ -281,11 +285,29 @@ export interface SkillEvidenceSampleRow {
   human_review_comment: string | null
 }
 
+/**
+ * 引用过这个技能的一个 Job 及其所属批次。
+ *
+ * 给模型与管理员的都是**批次身份**（名称 + 周次），不是 Job id：后者对人没有意义，
+ * 而管理员记得的是"第 39 周那个批次评得不准"。
+ */
+export interface SkillEvidenceBatchRow {
+  batch_id: string
+  batch_name: string
+  week_code: string | null
+  job_id: string
+  job_status: string | null
+  job_created_at: string | null
+  skill_version: number | null
+  result_count: number
+}
+
 export interface SkillReviewEvidenceSnapshot {
   referenced_job_count: number
   verdict_counts: Record<string, number>
   human_review_counts: Record<string, number>
   sample_findings: SkillEvidenceSampleRow[]
+  referenced_batches: SkillEvidenceBatchRow[]
 }
 
 export interface PreparationClaim {
@@ -1584,10 +1606,25 @@ export class JobsDb {
     })
     const row = unwrapMaybeObject<Record<string, unknown>>(data)
     const samples = Array.isArray(row?.sample_findings) ? row.sample_findings : []
+    const batches = Array.isArray(row?.referenced_batches) ? row.referenced_batches : []
     return {
       referenced_job_count: Number(row?.referenced_job_count ?? 0),
       verdict_counts: (row?.verdict_counts ?? {}) as Record<string, number>,
       human_review_counts: (row?.human_review_counts ?? {}) as Record<string, number>,
+      referenced_batches: batches.map((batch) => {
+        const entry = batch as Record<string, unknown>
+        return {
+          batch_id: String(entry.batch_id ?? ''),
+          batch_name: String(entry.batch_name ?? ''),
+          week_code: typeof entry.week_code === 'string' ? entry.week_code : null,
+          job_id: String(entry.job_id ?? ''),
+          job_status: typeof entry.job_status === 'string' ? entry.job_status : null,
+          job_created_at: typeof entry.job_created_at === 'string' ? entry.job_created_at : null,
+          skill_version:
+            typeof entry.skill_version === 'number' ? entry.skill_version : null,
+          result_count: Number(entry.result_count ?? 0),
+        }
+      }),
       sample_findings: samples.map((sample) => {
         const entry = sample as Record<string, unknown>
         return {
@@ -1673,6 +1710,8 @@ export class JobsDb {
       uploadId: string
       changedPaths: string[]
       aiSummary: string
+      /** 调用模型的次数（含自检不通过后的重写）。 */
+      modelAttempts: number
     },
   ): Promise<unknown> {
     return this.db.rpc<unknown>('submit_skill_ai_optimization_result', {
@@ -1682,11 +1721,16 @@ export class JobsDb {
       p_upload_id: input.uploadId,
       p_changed_paths: input.changedPaths,
       p_ai_summary: input.aiSummary,
+      p_model_attempts: input.modelAttempts,
     })
   }
 
   submitSkillAiOptimizationFailure(
-    input: SkillAiOptimizationClaimRef & { errorCode: string; errorMessage: string },
+    input: SkillAiOptimizationClaimRef & {
+      errorCode: string
+      errorMessage: string
+      modelAttempts: number
+    },
   ): Promise<unknown> {
     return this.db.rpc<unknown>('submit_skill_ai_optimization_failure', {
       p_request_id: input.requestId,
@@ -1694,11 +1738,219 @@ export class JobsDb {
       p_claim_token: input.claimToken,
       p_error_code: input.errorCode,
       p_error_message: input.errorMessage,
+      p_model_attempts: input.modelAttempts,
     })
   }
 
   async reclaimStaleSkillAiOptimizationLeases(): Promise<number> {
     const data = await this.db.rpc<number>('reclaim_stale_skill_ai_optimization_leases', {})
     return typeof data === 'number' ? data : 0
+  }
+
+  // --------------------------------------------------------------------------
+  // V1.20 Linky 同步队列。
+  //
+  // 与模型连接测试队列同一套形状：claim 拿到一次性 token，之后每一次写入都带
+  // token 过 fencing。镜像写入之所以也要 fencing，是因为一个丢了租约的 Worker
+  // 继续往镜像里写，会让页面上"上次同步"的时间与内容对不上。
+  // --------------------------------------------------------------------------
+
+  async claimNextLinkySync(
+    workerId: string,
+    leaseSeconds: number,
+  ): Promise<LinkySyncClaim | null> {
+    const data = await this.db.rpc<unknown>('claim_next_linky_sync', {
+      p_worker_id: workerId,
+      p_lease_seconds: leaseSeconds,
+    })
+    const row = unwrapMaybeObject<Record<string, unknown>>(data)
+    if (!row?.id) return null
+    const claimToken = row.claim_token
+    if (typeof claimToken !== 'string' || claimToken.length === 0) {
+      throw new Error('claim_next_linky_sync returned no claim token')
+    }
+    const depth = row.depth === 'FULL' ? 'FULL' : 'LIST'
+    return {
+      id: String(row.id),
+      depth,
+      workspace_id: typeof row.workspace_id === 'string' ? row.workspace_id : null,
+      workspace_name: typeof row.workspace_name === 'string' ? row.workspace_name : null,
+      release_window: typeof row.release_window === 'string' ? row.release_window : null,
+      claim_token: claimToken,
+      attempt: typeof row.attempt === 'number' ? row.attempt : 0,
+    }
+  }
+
+  async heartbeatLinkySync(input: {
+    syncId: string
+    workerId: string
+    claimToken: string
+    leaseSeconds: number
+  }): Promise<boolean> {
+    const data = await this.db.rpc<unknown>('heartbeat_linky_sync', {
+      p_sync_id: input.syncId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_lease_seconds: input.leaseSeconds,
+    })
+    return data === true
+  }
+
+  async upsertLinkyStoryCatalog(input: {
+    syncId: string
+    workerId: string
+    claimToken: string
+    items: unknown[]
+  }): Promise<number> {
+    const data = await this.db.rpc<unknown>('upsert_linky_story_catalog', {
+      p_sync_id: input.syncId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_items: input.items,
+    })
+    return typeof data === 'number' ? data : 0
+  }
+
+  async upsertLinkyStoryDetail(input: {
+    syncId: string
+    workerId: string
+    claimToken: string
+    issueId: string
+    detail: Record<string, unknown>
+    attachments: unknown[]
+  }): Promise<LinkySyncPendingAttachmentRow[]> {
+    const data = await this.db.rpc<unknown>('upsert_linky_story_detail', {
+      p_sync_id: input.syncId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_issue_id: input.issueId,
+      p_detail: input.detail,
+      p_attachments: input.attachments,
+    })
+    const row = unwrapMaybeObject<Record<string, unknown>>(data)
+    const pending = row?.pending_attachments
+    if (!Array.isArray(pending)) return []
+    return pending.flatMap((entry) => {
+      if (typeof entry !== 'object' || entry === null) return []
+      const record = entry as Record<string, unknown>
+      if (typeof record.id !== 'string' || typeof record.filename !== 'string') return []
+      if (typeof record.linky_attachment_id !== 'string') return []
+      return [
+        {
+          id: record.id,
+          linky_attachment_id: record.linky_attachment_id,
+          filename: record.filename,
+          content_type: typeof record.content_type === 'string' ? record.content_type : null,
+          size_bytes:
+            typeof record.size_bytes === 'number'
+              ? record.size_bytes
+              : typeof record.size_bytes === 'string' && record.size_bytes !== ''
+                ? Number(record.size_bytes)
+                : null,
+        },
+      ]
+    })
+  }
+
+  async recordLinkyCatalogAttachment(input: {
+    syncId: string
+    workerId: string
+    claimToken: string
+    attachmentId: string
+    status: 'STORED' | 'SKIPPED' | 'FAILED'
+    storagePath?: string | null
+    sha256?: string | null
+    sizeBytes?: number | null
+    error?: string | null
+  }): Promise<boolean> {
+    const data = await this.db.rpc<unknown>('record_linky_catalog_attachment', {
+      p_sync_id: input.syncId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_attachment_id: input.attachmentId,
+      p_status: input.status,
+      p_storage_path: input.storagePath ?? null,
+      p_sha256: input.sha256 ?? null,
+      p_size: input.sizeBytes ?? null,
+      p_error: input.error ?? null,
+    })
+    return data === true
+  }
+
+  async completeLinkySync(input: {
+    syncId: string
+    workerId: string
+    claimToken: string
+    storiesSynced: number
+    detailsSynced: number
+    attachmentsStored: number
+    attachmentsFailed: number
+    bytesDownloaded: number
+  }): Promise<boolean> {
+    const data = await this.db.rpc<unknown>('complete_linky_sync', {
+      p_sync_id: input.syncId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_stories_synced: input.storiesSynced,
+      p_details_synced: input.detailsSynced,
+      p_attachments_stored: input.attachmentsStored,
+      p_attachments_failed: input.attachmentsFailed,
+      p_bytes_downloaded: input.bytesDownloaded,
+    })
+    return data === true
+  }
+
+  async failLinkySync(input: {
+    syncId: string
+    workerId: string
+    claimToken: string
+    errorCode: string
+    errorMessage: string
+  }): Promise<boolean> {
+    const data = await this.db.rpc<unknown>('fail_linky_sync', {
+      p_sync_id: input.syncId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_error_code: input.errorCode,
+      p_error_message: input.errorMessage,
+    })
+    return data === true
+  }
+
+  async releaseLinkySyncClaim(input: {
+    syncId: string
+    workerId: string
+    claimToken: string
+  }): Promise<boolean> {
+    const data = await this.db.rpc<unknown>('release_linky_sync_claim', {
+      p_sync_id: input.syncId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+    })
+    return data === true
+  }
+
+  async listLinkyCatalogAttachmentsForCleanup(input: {
+    retentionDays: number
+    limit: number
+  }): Promise<Array<{ id: string; storage_path: string }>> {
+    const data = await this.db.rpc<unknown>('list_linky_catalog_attachments_for_cleanup', {
+      p_retention_days: input.retentionDays,
+      p_limit: input.limit,
+    })
+    if (!Array.isArray(data)) return []
+    return data.flatMap((entry) => {
+      if (typeof entry !== 'object' || entry === null) return []
+      const record = entry as Record<string, unknown>
+      if (typeof record.id !== 'string' || typeof record.storage_path !== 'string') return []
+      return [{ id: record.id, storage_path: record.storage_path }]
+    })
+  }
+
+  async markLinkyCatalogAttachmentPurged(attachmentId: string): Promise<boolean> {
+    const data = await this.db.rpc<unknown>('mark_linky_catalog_attachment_purged', {
+      p_attachment_id: attachmentId,
+    })
+    return data === true
   }
 }

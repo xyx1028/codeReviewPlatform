@@ -28,6 +28,32 @@ export interface WorkerConfig {
   /** V1.13：Git 提交邮箱反查任务的租约秒数。 */
   gitEmailDiscoveryLeaseSeconds: number
   /**
+   * V1.20：Linky 用户故事取数接口。
+   *
+   * `baseUrl` 为 null 时**整条同步循环不启动** —— 老部署升级后行为不变，
+   * 也不会出现"队列里的请求永远 QUEUED 而没人告诉你为什么"。
+   *
+   * `networkAccessMode` 与模型侧同一套语义：
+   *   DIRECT     —— 直连。只有 Worker 本身就在能解析并路由到内网 DNS 的网络里才成立。
+   *   HOST_PROXY —— 经 Mac 宿主机代理（复用 modelConnectivityProxy，那本质是"宿主机代理"）。
+   *                 容器化部署必须用这个：实测容器直连 feature.kingdee.com:2055 超时。
+   *                 设了 HOST_PROXY 却没配代理时，同步以 LINKY_PROXY_NOT_CONFIGURED
+   *                 明确失败，绝不静默直连。
+   */
+  linky: {
+    baseUrl: string | null
+    /** Linky web 前端地址，仅用于拼"回到 Linky 看原文"的链接；没配就不产出链接。 */
+    webBaseUrl: string | null
+    networkAccessMode: 'DIRECT' | 'HOST_PROXY'
+    httpTimeoutMs: number
+    syncLeaseSeconds: number
+    configId: string | null
+    attachmentMaxBytes: number
+    storyAttachmentMaxBytes: number
+    maxDetailsPerSync: number
+    catalogAttachmentRetentionDays: number
+  }
+  /**
    * 模型请求的 Mac 宿主机代理。
    *
    * 只作用于模型端点：公司内网模型只能经宿主机的公司网络/VPN 访问，而 Docker 拿不到那条
@@ -192,8 +218,32 @@ function validModelProxyUrl(value: string): string {
   return `${url.protocol}//${url.host}`
 }
 
-function validGitLabBaseUrl(value: string): string {
+/**
+ * V1.20：Linky 接口 base URL。
+ *
+ * 允许带路径（真实 base 是 `https://host:2055/quality-platform/api/linky`），
+ * 但不允许 query / hash / 内嵌凭据 —— base 后面要由代码拼 `/stories/...`。
+ */
+function validLinkyBaseUrl(value: string, name = 'LINKY_API_BASE_URL'): string {
+  let url: URL
   try {
+    url = new URL(value)
+  } catch {
+    throw new ConfigError(`environment variable ${name} must be a valid URL`)
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new ConfigError(`${name} must use http or https`)
+  }
+  if (url.username !== '' || url.password !== '') {
+    throw new ConfigError(`${name} must not embed credentials`)
+  }
+  if (url.search !== '' || url.hash !== '') {
+    throw new ConfigError(`${name} must not carry a query string or fragment`)
+  }
+  return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, '')}`
+}
+
+function validGitLabBaseUrl(value: string): string {  try {
     return normalizeGitLabBaseUrl(value)
   } catch {
     throw new ConfigError(
@@ -294,6 +344,37 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     )
   }
 
+  /*
+   * V1.20 Linky 取数接口。
+   *
+   * base URL 只从这里来，代码里再拼路径 —— Worker 不接受任何来自数据库或前端的 host，
+   * 否则它就成了一个可被指向任意内网地址的 SSRF 跳板。
+   */
+  const linkyBaseUrlRaw = optStr(env, 'LINKY_API_BASE_URL', null)
+  const linkyBaseUrl = linkyBaseUrlRaw === null ? null : validLinkyBaseUrl(linkyBaseUrlRaw)
+  const linkyWebBaseUrlRaw = optStr(env, 'LINKY_WEB_BASE_URL', null)
+  const linkyWebBaseUrl =
+    linkyWebBaseUrlRaw === null ? null : validLinkyBaseUrl(linkyWebBaseUrlRaw, 'LINKY_WEB_BASE_URL')
+  const linkyModeRaw = (optStr(env, 'LINKY_NETWORK_ACCESS_MODE', 'DIRECT') ?? 'DIRECT')
+    .trim()
+    .toUpperCase()
+  if (linkyModeRaw !== 'DIRECT' && linkyModeRaw !== 'HOST_PROXY') {
+    throw new ConfigError('LINKY_NETWORK_ACCESS_MODE must be DIRECT or HOST_PROXY')
+  }
+  const linkyNetworkAccessMode = linkyModeRaw as 'DIRECT' | 'HOST_PROXY'
+  if (
+    linkyBaseUrl !== null &&
+    linkyNetworkAccessMode === 'HOST_PROXY' &&
+    modelConnectivityProxy === null
+  ) {
+    // 明确失败而不是静默直连：直连会把请求发到容器 DNS 解析出来的那个地址上，
+    // 实测那是一个容器根本路由不到的内网 IP，表现为整批同步超时。
+    throw new ConfigError(
+      'LINKY_NETWORK_ACCESS_MODE=HOST_PROXY requires MODEL_CONNECTIVITY_PROXY_URL '
+        + '(LINKY_PROXY_NOT_CONFIGURED)',
+    )
+  }
+
   return {
     supabaseUrl,
     supabaseServiceRoleKey,
@@ -312,6 +393,38 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     modelConnectivityTestLeaseSeconds,
     gitEmailDiscoveryLeaseSeconds,
     modelConnectivityProxy,
+    linky: {
+      baseUrl: linkyBaseUrl,
+      webBaseUrl: linkyWebBaseUrl,
+      networkAccessMode: linkyNetworkAccessMode,
+      httpTimeoutMs: intInRange(env, 'LINKY_HTTP_TIMEOUT_MS', 15000, 2000, 120000),
+      syncLeaseSeconds: intInRange(env, 'LINKY_SYNC_LEASE_SECONDS', 600, 60, 3600),
+      configId: optStr(env, 'LINKY_CONFIG_ID', null) ?? null,
+      // 10 MiB：实测附件是 16 KB~380 KB 的 md / html / docx，留两个数量级的余量。
+      attachmentMaxBytes: intInRange(
+        env,
+        'LINKY_ATTACHMENT_MAX_BYTES',
+        10 * 1024 * 1024,
+        64 * 1024,
+        200 * 1024 * 1024,
+      ),
+      storyAttachmentMaxBytes: intInRange(
+        env,
+        'LINKY_STORY_ATTACHMENT_MAX_BYTES',
+        30 * 1024 * 1024,
+        64 * 1024,
+        512 * 1024 * 1024,
+      ),
+      // 安全阀：一次 FULL 同步最多拉多少条详情。默认 300 足够覆盖一个组一个发布窗口。
+      maxDetailsPerSync: intInRange(env, 'LINKY_MAX_DETAILS_PER_SYNC', 300, 1, 2000),
+      catalogAttachmentRetentionDays: intInRange(
+        env,
+        'LINKY_CATALOG_ATTACHMENT_RETENTION_DAYS',
+        30,
+        1,
+        365,
+      ),
+    },
     agentAttemptsRoot: optStr(env, 'AGENT_ATTEMPTS_ROOT', '/workspace/agent-attempts')!,
     skillCacheRoot: optStr(env, 'SKILL_CACHE_ROOT', '/workspace/skill-cache')!,
     modelImageInputEnabled: boolFlag(env, 'MODEL_IMAGE_INPUT_ENABLED', false),
