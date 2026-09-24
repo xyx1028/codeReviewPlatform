@@ -2120,3 +2120,75 @@ docker exec -i supabase_db_codeReviewPlatform psql -U postgres -d postgres -c \
   "select jsonb_pretty(public.review_story_requirement_context(s.*)) from public.review_story s
    where s.source_system='LINKY' order by s.created_at desc limit 1;"
 ```
+
+---
+
+# 23. V1.22 技能 AI 优化：证据门禁与"一次写对"
+
+## 23.1 先知道这两条
+
+**1）`SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID` 不等于"AI 写得不符合规范"。**
+线上那次失败的真实原因是 `the model changed nothing`：技能被 1 个 Job 引用过但**0 条评审结论**，
+提示词要求"证据不足宁可少改"，模型照做返回空改动集，而解析器把空改动判成输出不合规并重试 3 次。
+V1.22 起这种输入在入队阶段就被拒，页面也会显示服务端原文。
+
+**2）"AI 判断不需要改"是正常终态，不是故障。** 错误码
+`SKILL_OPTIMIZATION_NO_CHANGE_NEEDED`，`model_attempts = 1`，不产草稿，`error_message`
+里是模型给的理由。页面按 warning 渲染。
+
+## 23.2 错误码
+
+| 错误码 | 含义 | 处置 |
+|---|---|---|
+| `SKILL_OPTIMIZATION_NO_EVIDENCE` | 没被引用过，**或**引用过但没有任何 `ai_review_result` | 让技能参与几次评审并产出结论后再优化 |
+| `SKILL_OPTIMIZATION_NO_CHANGE_NEEDED` | 模型判断当前证据不足以支撑修改 | 看 `error_message` 里的理由；补人工复核意见后再试 |
+| `SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID` | 3 次重写后仍不合规 | 看 `error_message` 原文再定性：路径/容量/frontmatter 是模型能力问题，其它先怀疑提示词与校验器分叉 |
+
+新日志事件：`skill_ai_optimization_no_evidence`（带 `referenced_job_count` 与
+`review_result_count`）、`skill_ai_optimization_no_change_needed`。
+
+## 23.3 诊断一次失败
+
+```sql
+-- 先看真实原因，不要只看前端文案
+select id, status, error_code, error_message, model_attempts, created_at
+from public.skill_ai_optimization_request
+order by created_at desc limit 5;
+
+-- 再看这个技能到底有没有可学习的证据（口径与入队门禁一致）
+select (public.admin_get_skill_review_evidence('<skill_id>') -> 'review_result_count') as results,
+       (public.admin_get_skill_review_evidence('<skill_id>') -> 'referenced_job_count') as jobs;
+```
+
+`jobs > 0` 而 `results = 0` 就是本节开头那种情况：优化没有输入，不是模型的问题。
+
+## 23.4 判断提示词是否真的生效
+
+看 `model_attempts`：
+
+- `1` = 一次写对（目标状态）；
+- `2`/`3` = 仍靠回灌重写收敛，查 Worker 日志 `skill_ai_optimization_self_check_rejected`
+  的 `error_code`，若反复是同一类拒绝，说明提示词里那条规则还没说清；
+- `3` + `MODEL_OUTPUT_INVALID` = 模型满足不了这个结构要求，换模型或缩小技能包再试。
+
+## 23.5 回滚
+
+```sql
+-- 需要退回 V1.19 行为时，写一个新迁移把这三个函数覆盖回 20260924050153 的版本
+--   admin_get_skill_review_evidence / get_skill_review_evidence_for_optimization
+--   admin_enqueue_skill_ai_optimization
+```
+
+Worker 与前端各自回滚上一版即可；三者互不依赖（`review_result_count` 缺席时两端都回退到
+结论分布求和）。
+
+## 23.6 怎么复跑验证
+
+```bash
+docker exec -i supabase_db_codeReviewPlatform psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  < supabase/tests/20260924095026_skill_ai_optimization_require_review_results_test.sql
+
+npx vitest run worker/src/__tests__/v122-skill-optimization-guidance.test.ts \
+  worker/src/__tests__/v119-skill-ai-optimizer.test.ts
+npx vitest run -c vitest.web.config.ts src/lib/__tests__/skill-ai-optimization.test.ts
+```

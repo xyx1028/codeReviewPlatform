@@ -40,6 +40,7 @@ import { getSkillBundleDownloadUrl } from '../lib/skill-download-url'
 import { formatSkillVersion } from '../lib/skill-version'
 import {
   canOptimizeFromEvidence,
+  describeEvidenceUnavailable,
   collapseUnchanged,
   describeOptimizationError,
   fileChangeKind,
@@ -288,14 +289,8 @@ export function SkillReviewEvidenceBlock({
   if (loading) return <Text type="secondary">正在汇总历史评审证据…</Text>
   if (evidence === null) return <Text type="secondary">暂无历史评审证据。</Text>
   if (!canOptimizeFromEvidence(evidence)) {
-    return (
-      <Alert
-        type="info"
-        showIcon
-        message="还没有历史评审证据，暂不建议 AI 优化"
-        description="这个技能还没有被任何分析任务引用过。先让它参与几次评审，累积到 AI 结论与人工复核之后，再用这些结果来优化它的内容。"
-      />
-    )
+    const unavailable = describeEvidenceUnavailable(evidence)
+    return <Alert type="info" showIcon message={unavailable.title} description={unavailable.detail} />
   }
 
   return (
@@ -1419,9 +1414,21 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
               <Space direction="vertical" size="small" className="full-width">
                 {task?.status === 'FAILED' ? (
                   <Alert
-                    type="error"
+                    /*
+                     * 「AI 判断不需要改」是一次正常的终态，不是故障：用 warning 而不是 error，
+                     * 否则管理员会去排查一个不存在的问题。
+                     */
+                    type={
+                      task.error_code === 'SKILL_OPTIMIZATION_NO_CHANGE_NEEDED'
+                        ? 'warning'
+                        : 'error'
+                    }
                     showIcon
-                    message={`上次优化失败（${task.error_code ?? '未知错误码'}）`}
+                    message={
+                      task.error_code === 'SKILL_OPTIMIZATION_NO_CHANGE_NEEDED'
+                        ? '上次优化没有产出草稿：AI 判断当前证据不足以支撑修改'
+                        : `上次优化失败（${task.error_code ?? '未知错误码'}）`
+                    }
                     description={describeOptimizationError(task.error_code, task.error_message)}
                   />
                 ) : null}

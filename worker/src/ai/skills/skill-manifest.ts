@@ -117,7 +117,7 @@ const MEDIA_TYPES: Readonly<Record<string, string>> = {
  * SVG、HTML、Office、可执行二进制、动态库、未知格式全部落在"不在表里"，默认拒绝。
  */
 const TEXTUAL_EXTENSIONS = ['md', 'txt', 'json', 'yaml', 'yml', 'csv', 'xml'] as const
-const ROLE_EXTENSIONS: Readonly<Record<SkillFileRole, readonly string[]>> = {
+export const SKILL_ROLE_EXTENSIONS: Readonly<Record<SkillFileRole, readonly string[]>> = {
   ENTRY: ['md'],
   REFERENCE: TEXTUAL_EXTENSIONS,
   TEMPLATE: TEXTUAL_EXTENSIONS,
@@ -163,7 +163,7 @@ export function mediaTypeForPath(path: string): string | null {
 export function isExtensionAllowedForRole(path: string, role: SkillFileRole): boolean {
   const extension = fileExtension(path)
   if (extension === '') return false
-  return ROLE_EXTENSIONS[role].includes(extension)
+  return SKILL_ROLE_EXTENSIONS[role].includes(extension)
 }
 
 export function sha256Hex(bytes: Uint8Array): string {

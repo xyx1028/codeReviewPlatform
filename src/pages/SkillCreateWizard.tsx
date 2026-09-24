@@ -311,32 +311,6 @@ export function SkillCreateWizard({
                 )}
               </Upload.Dragger>
             </Form.Item>
-
-            {/*
-              * 解析失败时把证据摆在屏幕上。
-              *
-              * 原来只有一条 message.warning：它会自己消失、没法复制，远程排查时对方只能
-              * 转述"说不是有效 ZIP"。这块 Alert 里的一行摘要（字节数 / sha256 / EOCD 位置 /
-              * 解析到第几条）截图就能对账，不必让对方开 DevTools。
-              */}
-            {preview !== null && preview.issue !== null ? (
-              <Alert
-                className="mt-md"
-                type="warning"
-                showIcon
-                title={previewIssueHint(preview) ?? '技能包预填失败'}
-                description={
-                  <Space direction="vertical" size={4} className="full-width">
-                    <Text type="secondary">
-                      这只影响自动填表，不阻止上传：可以手填技能编码后继续，服务端校验才是权威判定。
-                    </Text>
-                    <Text code copyable className="skill-create-modal__diagnostics">
-                      {formatBundleDiagnostics(preview.diagnostics)}
-                    </Text>
-                  </Space>
-                }
-              />
-            ) : null}
           </Col>
 
           <Col xs={24} md={15} className="skill-create-modal__details-column">
@@ -385,6 +359,35 @@ export function SkillCreateWizard({
 
             </Form>
           </Col>
+
+          {/*
+            * 解析失败时把证据摆在屏幕上，整行宽度。
+            *
+            * 放在两列之外而不是塞进左边那一列：上传列是 `display: flex` 的窄列，
+            * 一块 Alert 挤进去会跟右侧表单卡片叠在一起（2026-09-24 同事的截图里就是这样，
+            * 提示被表单盖掉一半）。这行摘要本来就是给人截图对账的，宽度不能省。
+            *
+            * message.warning 仍然保留，但它会自己消失也没法复制，所以真正的证据在这里。
+            */}
+          {preview !== null && preview.issue !== null ? (
+            <Col xs={24}>
+              <Alert
+                type="warning"
+                showIcon
+                title={previewIssueHint(preview) ?? '技能包预填失败'}
+                description={
+                  <Space direction="vertical" size={4} className="full-width">
+                    <Text type="secondary">
+                      这只影响自动填表，不阻止上传：可以手填技能编码后继续，服务端校验才是权威判定。
+                    </Text>
+                    <Text code copyable>
+                      {formatBundleDiagnostics(preview.diagnostics)}
+                    </Text>
+                  </Space>
+                }
+              />
+            </Col>
+          ) : null}
         </Row>
       ) : null}
 

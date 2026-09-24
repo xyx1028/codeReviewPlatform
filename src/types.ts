@@ -1305,6 +1305,12 @@ export interface SkillEvidenceBatch {
 export interface SkillReviewEvidence {
   skill_id: string
   referenced_job_count: number
+  /**
+   * 可依据的评审结论条数（V1.22）。
+   *
+   * 「能不能优化」的真实判据。缺席 = 后端还没升到 V1.22，前端回退到结论分布求和。
+   */
+  review_result_count?: number
   /** 引用过它的 Job 属于哪些评审批次。升级前的历史数据可能缺这个字段。 */
   referenced_batches?: SkillEvidenceBatch[]
   verdict_counts: Record<SkillVerdictKey, number>

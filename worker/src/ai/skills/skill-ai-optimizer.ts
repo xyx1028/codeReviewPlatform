@@ -35,6 +35,7 @@ import { requiresUtf8, roleForPath, SKILL_ENTRY_FILE } from './skill-manifest.js
 import {
   buildSkillOptimizationPrompt,
   parseSkillOptimizationOutput,
+  SkillOptimizationNoChangeError,
   SkillOptimizationOutputError,
   type ParsedSkillOptimization,
   type SkillBundleFileView,
@@ -72,6 +73,8 @@ export const SKILL_OPTIMIZATION_ERROR_CODES = {
   ARCHIVE_UNREADABLE: 'SKILL_OPTIMIZATION_SOURCE_UNREADABLE',
   NO_EVIDENCE: 'SKILL_OPTIMIZATION_NO_EVIDENCE',
   MODEL_OUTPUT_INVALID: 'SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID',
+  /** 模型看完证据后判断不该改。终态，但不是"模型写错了"。 */
+  NO_CHANGE_NEEDED: 'SKILL_OPTIMIZATION_NO_CHANGE_NEEDED',
   REPACK_REJECTED: 'SKILL_OPTIMIZATION_REPACK_REJECTED',
   FAILED: 'SKILL_OPTIMIZATION_FAILED',
 } as const
@@ -114,6 +117,9 @@ function reason(error: unknown): string {
  * 技能根本没有可用证据。这四种处置完全不同。
  */
 export function classifySkillOptimizationError(error: unknown): string {
+  if (error instanceof SkillOptimizationNoChangeError) {
+    return SKILL_OPTIMIZATION_ERROR_CODES.NO_CHANGE_NEEDED
+  }
   if (error instanceof SkillOptimizationOutputError) {
     return SKILL_OPTIMIZATION_ERROR_CODES.MODEL_OUTPUT_INVALID
   }
@@ -224,14 +230,38 @@ export async function runSkillAiOptimization(
       )
     }
 
-    // 2. 证据。空证据在入队时已被拒，这里是二次确认（技能可能在排队期间被清空引用）。
+    /*
+     * 2. 证据。
+     *
+     * 门禁是"有几条可学习的评审结论"，不是"被几个 Job 引用过"（V1.22）。线上实测过引用
+     * 数为 1、结论数为 0 的技能：旧口径放行，然后把一份全 0 的统计递给模型，模型按"证据
+     * 不足别乱改"返回空改动集，解析器判为输出不合规，重试三次全烧掉。
+     *
+     * `review_result_count` 缺席 = 数据库还没升到 V1.22，此时回退到"结论分布求和"，
+     * 口径一致，不需要两端同时发布。
+     */
     const evidence: SkillReviewEvidenceSnapshot =
       await deps.jobsDb.getSkillReviewEvidenceForOptimization(claimRef)
-    if (evidence.referenced_job_count === 0) {
+    const resultCount =
+      typeof evidence.review_result_count === 'number'
+        ? evidence.review_result_count
+        : Object.values(evidence.verdict_counts ?? {}).reduce(
+            (sum, value) => sum + (typeof value === 'number' ? value : 0),
+            0,
+          )
+    if (evidence.referenced_job_count === 0 || resultCount === 0) {
+      log.info('skill_ai_optimization_no_evidence', {
+        event: 'skill_ai_optimization_no_evidence',
+        referenced_job_count: evidence.referenced_job_count,
+        review_result_count: resultCount,
+      })
       await deps.jobsDb.submitSkillAiOptimizationFailure({
         ...claimRef,
         errorCode: SKILL_OPTIMIZATION_ERROR_CODES.NO_EVIDENCE,
-        errorMessage: '这个技能没有任何历史评审证据可用',
+        errorMessage:
+          evidence.referenced_job_count === 0
+            ? '这个技能没有任何历史评审证据可用'
+            : '这个技能被分析任务引用过，但还没有任何评审结论可以作为优化依据',
         modelAttempts: 0,
       })
       return {
@@ -305,6 +335,19 @@ export async function runSkillAiOptimization(
         validated = candidateValidated
         break
       } catch (error) {
+        if (error instanceof SkillOptimizationNoChangeError) {
+          /*
+           * 模型走了"不需要改"出口：终态，不重试。
+           *
+           * 重试没有意义 —— 证据这一轮不会变，同一个模型对同一份证据只会给同一个答案。
+           * 这里直接往外抛，由外层 catch 写回 NO_CHANGE_NEEDED 与模型给的理由。
+           */
+          log.info('skill_ai_optimization_no_change_needed', {
+            event: 'skill_ai_optimization_no_change_needed',
+            attempt: attempts,
+          })
+          throw error
+        }
         if (
           error instanceof SkillOptimizationOutputError ||
           error instanceof SkillBundleInvalidError ||

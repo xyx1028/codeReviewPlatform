@@ -212,9 +212,11 @@ export function isOptimizationInFlight(status: SkillAiOptimizationStatus | null)
  */
 const OPTIMIZATION_ERROR_TEXT: Record<string, string> = {
   SKILL_OPTIMIZATION_NO_EVIDENCE:
-    '这个技能还没有被任何分析任务引用过，没有可依据的历史评审证据。先让它参与几次评审，再来优化。',
+    '没有可依据的历史评审证据：这个技能要么还没被分析任务引用过，要么引用它的任务还没产出任何评审结论。先让它参与几次评审并产出结论，再来优化。',
   SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID:
-    'AI 连续几次写出的技能包都没通过结构检查（路径不合规、放错目录、frontmatter 的 name 被改、文件或整包超出容量上限之类）。没有产出任何草稿，可以直接重试。',
+    'AI 写出的技能包没有通过结构检查，已经把原因回灌给它重写过，仍然不合规。没有产出任何草稿。下面括号里是最后一次被拒的原文，按它判断是模型能力问题还是平台规则太紧。',
+  SKILL_OPTIMIZATION_NO_CHANGE_NEEDED:
+    'AI 读完这份技能包与历史评审证据后，判断当前证据不足以支撑具体修改，因此没有改动。这不是失败，下面是它给出的理由。',
   SKILL_OPTIMIZATION_SOURCE_UNREADABLE:
     '当前已发布版本的技能包读不出可优化的 SKILL.md 正文。请先确认这个版本能正常下载。',
   SKILL_OPTIMIZATION_REPACK_REJECTED:
@@ -239,6 +241,21 @@ const OPTIMIZATION_ERROR_TEXT: Record<string, string> = {
   SKILL_OPTIMIZATION_FAILED: '优化过程中出现未归类的失败，需要查看 Worker 日志。',
 }
 
+/**
+ * 已登记文案后面附上服务端原文。
+ *
+ * V1.22 之前这里把 `errorMessage` 丢掉了，只显示一句罐头文案。真实后果：线上失败原因是
+ * "the model changed nothing"（模型按提示词要求没改），而页面上写的是"路径不合规、放错
+ * 目录、frontmatter name 被改、超容量之类" —— 四条猜测没有一条命中，管理员据此去查的方向
+ * 全是错的。罐头文案负责"该我做什么"，原文负责"到底发生了什么"，两者都要显示。
+ */
+function withServerMessage(text: string, errorMessage: string | null): string {
+  const raw = errorMessage === null ? '' : errorMessage.trim()
+  if (raw === '') return text
+  const capped = raw.length > 400 ? `${raw.slice(0, 400)}…` : raw
+  return `${text}（服务端原文：${capped}）`
+}
+
 export function describeOptimizationError(
   errorCode: string | null,
   errorMessage: string | null,
@@ -247,9 +264,12 @@ export function describeOptimizationError(
     return errorMessage ?? '优化失败，但没有返回错误码。这需要查看 Worker 日志。'
   }
   const known = OPTIMIZATION_ERROR_TEXT[errorCode]
-  if (known !== undefined) return known
+  if (known !== undefined) return withServerMessage(known, errorMessage)
   if (/^MODEL_HTTP_\d+$/.test(errorCode)) {
-    return `模型端点返回 ${errorCode.replace('MODEL_HTTP_', 'HTTP ')}。请检查模型配置与配额。`
+    return withServerMessage(
+      `模型端点返回 ${errorCode.replace('MODEL_HTTP_', 'HTTP ')}。请检查模型配置与配额。`,
+      errorMessage,
+    )
   }
   return `未登记的错误码 ${errorCode}${errorMessage === null ? '' : `：${errorMessage}`}。这需要运维查看 Worker 日志。`
 }
@@ -267,8 +287,42 @@ const VERDICT_ORDER: SkillVerdictKey[] = [
  * 判据只有一条：有没有被 Job 引用过。刻意**不**要求"必须有人工复核" —— 人工复核率低是
  * 常态，而 AI 结论分布本身（尤其 UNCERTAIN 的比例）已经是有用的信号。
  */
+/**
+ * 能不能用这些证据做优化。
+ *
+ * V1.22：判据是"有没有评审结论"，不是"被几个分析任务引用过"。引用发生在 Job 冻结阶段，
+ * 与那个 Job 是否产出过结论无关 —— 线上真实出现过"被 1 个任务引用、0 条结论"的技能，
+ * 旧判据放行之后，AI 对着一份全 0 的统计只能回答"不该改"，然后被结构检查判成输出不合规。
+ *
+ * `review_result_count` 缺席 = 后端还没升到 V1.22，回退到结论分布求和（同源口径）。
+ */
+export function reviewResultCount(evidence: SkillReviewEvidence): number {
+  if (typeof evidence.review_result_count === 'number') return evidence.review_result_count
+  return VERDICT_ORDER.reduce((sum, key) => sum + (evidence.verdict_counts[key] ?? 0), 0)
+}
+
 export function canOptimizeFromEvidence(evidence: SkillReviewEvidence | null): boolean {
-  return evidence !== null && evidence.referenced_job_count > 0
+  return evidence !== null && evidence.referenced_job_count > 0 && reviewResultCount(evidence) > 0
+}
+
+/** 不能优化时，说清是"没被引用过"还是"引用过但还没有结论"—— 两者的下一步不同。 */
+export function describeEvidenceUnavailable(evidence: SkillReviewEvidence | null): {
+  title: string
+  detail: string
+} {
+  if (evidence === null || evidence.referenced_job_count === 0) {
+    return {
+      title: '还没有历史评审证据，暂不能 AI 优化',
+      detail:
+        '这个技能还没有被任何分析任务引用过。先让它参与几次评审，累积到 AI 结论与人工复核之后，再用这些结果来优化它的内容。',
+    }
+  }
+  return {
+    title: '被引用过，但还没有评审结论，暂不能 AI 优化',
+    detail:
+      `这个技能被 ${evidence.referenced_job_count} 个分析任务引用过，但那些任务还没有产出任何评审结论`
+      + '（可能仍在运行，或者失败了）。优化的输入是结论与人工复核意见，没有结论时 AI 没有任何可依据的信号。',
+  }
 }
 
 /** 顶部一行摘要。计数用服务端口径，前端不重新加总。 */

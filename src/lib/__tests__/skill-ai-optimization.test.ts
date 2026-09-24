@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest'
 import {
   canOptimizeFromEvidence,
   collapseUnchanged,
+  describeEvidenceUnavailable,
   describeOptimizationError,
   fileChangeKind,
   FILE_CHANGE_LABELS,
@@ -150,10 +151,42 @@ describe('describeOptimizationError', () => {
     expect(describeOptimizationError(null, null)).toContain('没有返回错误码')
   })
 
+  /*
+   * V1.22：服务端原文必须显示。
+   *
+   * 线上真实失败原因是 "the model changed nothing"，而旧文案写的是"路径不合规、放错目录、
+   * frontmatter name 被改、超容量之类"—— 四条猜测一条都没命中。罐头文案回答"该我做什么"，
+   * 原文回答"到底发生了什么"，缺一个就会把人引到错误的排查方向。
+   */
+  it('已登记的码也要带上服务端原文', () => {
+    const text = describeOptimizationError(
+      'SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID',
+      'the model changed nothing',
+    )
+    expect(text).toContain('结构检查')
+    expect(text).toContain('the model changed nothing')
+  })
+
+  it('「不需要改」不被描述成写错了', () => {
+    const text = describeOptimizationError(
+      'SKILL_OPTIMIZATION_NO_CHANGE_NEEDED',
+      '缺少人工复核意见，暂不改。',
+    )
+    expect(text).toContain('不是失败')
+    expect(text).toContain('缺少人工复核意见')
+  })
+
+  it('原文过长时截断，不把整份模型输出灌进弹窗', () => {
+    const text = describeOptimizationError('SKILL_OPTIMIZATION_FAILED', 'x'.repeat(900))
+    expect(text).toContain('…')
+    expect(text.length).toBeLessThan(600)
+  })
+
   it('每一个 Worker 侧会产出的码都有对应文案（漏一个就会显示成「未登记」）', () => {
     const workerCodes = [
       'SKILL_OPTIMIZATION_NO_EVIDENCE',
       'SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID',
+      'SKILL_OPTIMIZATION_NO_CHANGE_NEEDED',
       'SKILL_OPTIMIZATION_SOURCE_UNREADABLE',
       'SKILL_OPTIMIZATION_REPACK_REJECTED',
       'SKILL_OPTIMIZATION_UPLOAD_INVALID',
@@ -224,6 +257,55 @@ function evidence(overrides: Partial<SkillReviewEvidence> = {}): SkillReviewEvid
     ...overrides,
   }
 }
+
+/*
+ * V1.22：可用性判据从"被引用过"改成"有评审结论"。
+ *
+ * 旧判据放行过一个真实案例：被 1 个分析任务引用、0 条结论。页面把按钮点亮，模型对着一份
+ * 全 0 的统计只能回答"不该改"，然后被结构检查判成输出不合规并重试三次。
+ */
+describe('canOptimizeFromEvidence', () => {
+  it('有引用也有结论时可以优化', () => {
+    expect(canOptimizeFromEvidence(evidence())).toBe(true)
+  })
+
+  it('引用过但 0 条结论时不可优化', () => {
+    expect(
+      canOptimizeFromEvidence(
+        evidence({
+          review_result_count: 0,
+          verdict_counts: { IMPLEMENTED: 0, PARTIAL: 0, NOT_IMPLEMENTED: 0, UNCERTAIN: 0 },
+        }),
+      ),
+    ).toBe(false)
+  })
+
+  it('后端还没升到 V1.22 时按结论分布求和判定', () => {
+    const legacy = evidence()
+    delete legacy.review_result_count
+    expect(canOptimizeFromEvidence(legacy)).toBe(true)
+    const legacyEmpty = evidence({
+      verdict_counts: { IMPLEMENTED: 0, PARTIAL: 0, NOT_IMPLEMENTED: 0, UNCERTAIN: 0 },
+    })
+    delete legacyEmpty.review_result_count
+    expect(canOptimizeFromEvidence(legacyEmpty)).toBe(false)
+  })
+
+  it('两种不可用原因给的下一步不同', () => {
+    expect(describeEvidenceUnavailable(evidence({ referenced_job_count: 0 })).title).toContain(
+      '还没有历史评审证据',
+    )
+    const referencedButEmpty = describeEvidenceUnavailable(
+      evidence({
+        referenced_job_count: 3,
+        review_result_count: 0,
+        verdict_counts: { IMPLEMENTED: 0, PARTIAL: 0, NOT_IMPLEMENTED: 0, UNCERTAIN: 0 },
+      }),
+    )
+    expect(referencedButEmpty.title).toContain('还没有评审结论')
+    expect(referencedButEmpty.detail).toContain('3 个分析任务')
+  })
+})
 
 describe('groupEvidenceBatches', () => {
   it('同一批次的多次重跑归并成一行，按最近一次时间倒序', () => {
