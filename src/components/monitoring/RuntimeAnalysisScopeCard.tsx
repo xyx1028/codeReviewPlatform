@@ -13,6 +13,11 @@ import {
   type RuntimeScopeMode,
   type RuntimeScopeStatus,
 } from '../../hooks/useRuntimeAnalysisScope'
+import {
+  REASON_CODE_LABELS,
+  SCOPE_ERROR_META,
+  SCOPE_METRIC_HINTS,
+} from './runtime-scope-labels'
 
 const { Text } = Typography
 
@@ -58,23 +63,22 @@ const RELATION_STATUS_LABELS: Record<string, string> = {
   AI_UNCERTAIN: 'AI 不确定',
   EXCLUDED: '已排除',
 }
-// 归因规则可由管理员在「归因规则」页自定义 reason_code，这里只翻译系统预置的规则；
-// 未命中的自定义代码原样展示，不猜测含义——鼠标悬停可以看到原始代码。
-const REASON_CODE_LABELS: Record<string, string> = {
-  EXPLICIT_STORY_ID: '提交说明明确标注需求号',
-  EXPLICIT_MR_STORY_ID: '合并请求明确标注需求号',
-  SAME_EXPLICIT_MR: '同一明确合并请求内的提交',
-  STORY_CODE_WITH_SUPPORT: '标题/分支命中需求号且有辅助线索',
-  OWNER_WINDOW_MODULE: '开发人员 + 时间窗 + 模块重合',
-  UNSTRUCTURED_STORY_MENTION: '正文提及需求号',
-  OTHER_STORY_EXPLICIT: '明确属于其它需求',
-  REVERT_OF_RELATED_COMMIT: '回滚了关联提交',
-  BOT_OR_GENERATED: '机器人或生成文件',
-  IDENTITY_AMBIGUOUS: '开发人员身份冲突',
-  RANGE_INCOMPLETE: '范围不完整降级',
-  NO_CANDIDATE: '无候选降级',
-  RULE_CONFLICT: '规则冲突降级',
+
+
+/**
+ * 指标标题 + 悬停解释。
+ *
+ * `tabIndex={0}` 不是装饰：antd Tooltip 只在可聚焦元素上响应键盘焦点，
+ * 不加的话只能用鼠标看到解释。
+ */
+function MetricTitle({ text, hint }: { text: string; hint: string }) {
+  return (
+    <Tooltip title={hint}>
+      <span tabIndex={0} className="scope-metric-title">{text}</span>
+    </Tooltip>
+  )
 }
+
 function translatedLabel(map: Record<string, string>, value: string): string {
   return map[value] ?? value
 }
@@ -150,19 +154,39 @@ export function RuntimeAnalysisScopeCard({
       title="分析范围"
       extra={<Space><Tag color={status.color}>{status.label}</Tag><Tooltip title={summary.current_scope_level}><Tag color={LEVEL_COLORS[summary.current_scope_level]}>{SCOPE_LEVEL_LABELS[summary.current_scope_level]}</Tag></Tooltip></Space>}
     >
-      {summary.error_code === null ? null : <Alert style={{ marginBottom: 12 }} type={summary.status === 'FAILED' ? 'error' : 'warning'} showIcon title={summary.error_code} description="这是后端冻结的降级或失败原因，不根据前端活动推断。" />}
+      {summary.error_code === null ? null : (
+        <Alert
+          style={{ marginBottom: 12 }}
+          type={summary.status === 'FAILED' ? 'error' : 'warning'}
+          showIcon
+          title={
+            <Space size={6} wrap>
+              <Text strong>{SCOPE_ERROR_META[summary.error_code]?.label ?? summary.error_code}</Text>
+              {/* 原始码保留：和日志、SQL、文档里出现的是同一个字符串，便于检索与沟通。 */}
+              <Text type="secondary" code>{summary.error_code}</Text>
+            </Space>
+          }
+          description={
+            <>
+              {SCOPE_ERROR_META[summary.error_code]?.hint ?? '未收录的原因码，请按原始码检索后端日志。'}
+              <br />
+              <Text type="secondary">这是后端冻结的降级或失败原因，不根据前端活动推断。</Text>
+            </>
+          }
+        />
+      )}
       <Descriptions size="small" column={{ xs: 1, md: 3 }}>
         <Descriptions.Item label="范围模式">{MODE_LABELS[summary.mode]}</Descriptions.Item>
         <Descriptions.Item label="时间窗">{summary.window_days === null ? <Text type="secondary">服务端未返回</Text> : <Tooltip title={summary.repositories.map((repository) => `${repository.repository_name}: ${utcRange(repository)}`).join('\n')}><Text>{`各仓冻结时刻向前 ${String(summary.window_days)} 天`}</Text></Tooltip>}</Descriptions.Item>
         <Descriptions.Item label="算法 / Manifest"><Text code>{summary.algorithm_version} · {shortHash(summary.manifest_hash)}</Text></Descriptions.Item>
       </Descriptions>
       <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
-        <Col xs={12} md={4}><Statistic title="候选" value={summary.candidate_count} /></Col>
-        <Col xs={12} md={4}><Statistic title="强关联" value={summary.strong_count} /></Col>
-        <Col xs={12} md={4}><Statistic title="AI 相关" value={summary.ai_related_count} /></Col>
-        <Col xs={12} md={4}><Statistic title="AI 不确定" value={summary.ai_uncertain_count} /></Col>
-        <Col xs={12} md={4}><Statistic title="已读" value={summary.read_count} /></Col>
-        <Col xs={12} md={4}><Statistic title="已回滚" value={summary.reverted_count} /></Col>
+        <Col xs={12} md={4}><Statistic title={<MetricTitle text="候选" hint={SCOPE_METRIC_HINTS.candidate} />} value={summary.candidate_count} /></Col>
+        <Col xs={12} md={4}><Statistic title={<MetricTitle text="强关联" hint={SCOPE_METRIC_HINTS.strong} />} value={summary.strong_count} /></Col>
+        <Col xs={12} md={4}><Statistic title={<MetricTitle text="AI 相关" hint={SCOPE_METRIC_HINTS.aiRelated} />} value={summary.ai_related_count} /></Col>
+        <Col xs={12} md={4}><Statistic title={<MetricTitle text="AI 不确定" hint={SCOPE_METRIC_HINTS.aiUncertain} />} value={summary.ai_uncertain_count} /></Col>
+        <Col xs={12} md={4}><Statistic title={<MetricTitle text="已读" hint={SCOPE_METRIC_HINTS.read} />} value={summary.read_count} /></Col>
+        <Col xs={12} md={4}><Statistic title={<MetricTitle text="已回滚" hint={SCOPE_METRIC_HINTS.reverted} />} value={summary.reverted_count} /></Col>
       </Row>
       <Text strong>仓库范围</Text>
       <Table<RuntimeRepositoryScope>

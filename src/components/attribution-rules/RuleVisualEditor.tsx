@@ -78,7 +78,13 @@ function RuleReadOnlyList({
       className="attribution-rule-list"
       bordered
       dataSource={rules}
-      pagination={{ pageSize: 10, hideOnSinglePage: true, align: 'center' }}
+      // 与「技能」页保持一致：右下角「共 N 条 + 页码 + 每页条数」。
+      pagination={{
+        pageSize: 10,
+        showSizeChanger: true,
+        showTotal: (total) => `共 ${String(total)} 条`,
+        align: 'end',
+      }}
       renderItem={(rule) => (
         <List.Item
           key={rule.id}

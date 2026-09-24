@@ -2025,6 +2025,17 @@ a.dashboard-distribution-item:focus-visible {
   }
 }
 
+/* 有解释的指标标题：虚线下划线 + help 光标，否则没人知道可以悬停。 */
+.scope-metric-title {
+  border-bottom: 1px dashed #cbd5e1;
+  cursor: help;
+}
+
+.scope-metric-title:focus-visible {
+  outline: 2px solid #1677ff;
+  outline-offset: 2px;
+}
+
 .attribution-rule-list {
   border-radius: 10px;
   background: #ffffff;
