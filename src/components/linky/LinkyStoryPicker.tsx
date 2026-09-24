@@ -70,6 +70,14 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
   const [assigneeName, setAssigneeName] = useState<string | null>(null)
   const [keyword, setKeyword] = useState('')
   const [detailCode, setDetailCode] = useState<string | null>(null)
+  /**
+   * 分页受控。
+   *
+   * 不能交给 antd 自己记：`dataSource` 的引用一变（刷新、窗口重新聚焦触发的重取都会变），
+   * 它就把 current 重置回第 1 页 —— 表现就是"点了第 2 页又跳回来，像翻不动"。
+   */
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
 
   /**
    * 一次把范围内的故事全取回来。
@@ -81,6 +89,9 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
     queryKey: ['linky-live-stories', workspaceName],
     queryFn: ({ signal }) => fetchLinkyStories({ workspaceName, signal }),
     staleTime: 30_000,
+    // 关掉窗口聚焦重取：这个页面有显式「刷新」按钮，而自动重取会在用户切回标签页时
+    // 换掉 dataSource，把翻页、勾选的位置一起冲掉。
+    refetchOnWindowFocus: false,
     retry: false,
   })
 
@@ -112,6 +123,11 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
   const iterations = useMemo(() => facet(scoped.map((story) => story.iteration)), [scoped])
   const statuses = useMemo(() => facet(scoped.map((story) => story.statusLabel)), [scoped])
   const assignees = useMemo(() => facet(scoped.map((story) => story.assigneeName)), [scoped])
+
+  // 筛选条件变了就回第 1 页：否则会停在一个已经没有数据的页码上。
+  useEffect(() => {
+    setPage(1)
+  }, [workspaceName, releaseWindow, iteration, statusLabel, assigneeName, keyword])
 
   const filtered = useMemo(() => {
     const needle = keyword.trim().toLowerCase()
@@ -145,6 +161,23 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
       { title: '发布窗口', dataIndex: 'releaseWindow', width: 120 },
       { title: '迭代', dataIndex: 'iteration', width: 170, ellipsis: true },
       { title: '关联特性', dataIndex: 'subjectName', width: 200, ellipsis: true },
+      {
+        title: '',
+        width: 72,
+        fixed: 'right',
+        render: (_, row) => (
+          <Button
+            size="small"
+            type="link"
+            onClick={(event) => {
+              event.stopPropagation()
+              setDetailCode(row.storyCode)
+            }}
+          >
+            详情
+          </Button>
+        ),
+      },
     ],
     [],
   )
@@ -275,7 +308,16 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
           loading={storiesQuery.isLoading}
           dataSource={filtered}
           columns={columns}
-          pagination={{ pageSize: 20, showSizeChanger: true }}
+          pagination={{
+            current: page,
+            pageSize,
+            showSizeChanger: true,
+            showTotal: (total) => `共 ${total} 条`,
+            onChange: (nextPage, nextSize) => {
+              setPage(nextPage)
+              if (nextSize !== pageSize) setPageSize(nextSize)
+            },
+          }}
           locale={{
             emptyText: loadError ? (
               <Empty description="Linky 取数失败，见上方提示" />
@@ -296,7 +338,6 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
                 }
               : undefined
           }
-          onRow={(row) => ({ onClick: () => setDetailCode(row.storyCode) })}
         />
       </Card>
 
