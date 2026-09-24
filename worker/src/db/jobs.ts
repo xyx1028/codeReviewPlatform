@@ -268,6 +268,14 @@ export interface SkillAiOptimizationClaim {
   model_name_snapshot: string
   request_timeout_ms_snapshot: number
   network_access_mode_snapshot?: string
+  /**
+   * 入队时冻结的模型输出上限（V1.22b）。
+   *
+   * 必须用它当 `max_tokens`，也必须把它当作"这次能写多少"告诉模型。线上踩过：三个模型
+   * 配置都是 8192，Worker 按 60000 发请求，端点静默截断，错误表现成"输出里没有 JSON"。
+   * `undefined` / null = 升级前的历史行，回退到编译默认。
+   */
+  max_output_tokens_snapshot?: number | null
 }
 
 /** claim 四要素里 Worker 每次都要带的那三个。 */

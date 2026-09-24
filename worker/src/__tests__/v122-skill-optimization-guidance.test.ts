@@ -16,9 +16,14 @@ import { describe, expect, it } from 'vitest'
 
 import {
   classifySkillOptimizationError,
+  resolveCompletionTokenBudget,
   runSkillAiOptimization,
   SKILL_OPTIMIZATION_ERROR_CODES,
 } from '../ai/skills/skill-ai-optimizer.js'
+import {
+  ChatCompletionError,
+  readCompletionContent,
+} from '../model-connectivity/chat-completion.js'
 import {
   buildSkillOptimizationPrompt,
   findFrontmatterNameLine,
@@ -93,10 +98,10 @@ describe('提示词把结构规范写成契约', () => {
     expect(spec).toContain('只能删除，不能改写或新增')
   })
 
-  it('贴出 frontmatter 的 name 行原文，要求逐字保留', () => {
+  it('贴出 frontmatter 的 name 行原文，要求保持不变', () => {
     expect(findFrontmatterNameLine(entryMarkdown('x'))).toBe(`name: ${SKILL_NAME}`)
     expect(findFrontmatterNameLine('# 没有 frontmatter')).toBeNull()
-    expect(prompt().system).toContain(`必须**逐字保留**：\`name: ${SKILL_NAME}\``)
+    expect(prompt().system).toContain(`必须**保持不变**：\`name: ${SKILL_NAME}\``)
   })
 
   it('容量给当前值而不只给上限（模型数不出字节）', () => {
@@ -106,12 +111,31 @@ describe('提示词把结构规范写成契约', () => {
     expect(prompt().system).toContain('## 容量')
   })
 
-  it('给出输出样例、完整全文要求与「不需要改」出口', () => {
+  it('给出输出样例、锚点编辑协议与「不需要改」出口', () => {
     const system = prompt().system
     expect(system).toContain('## 输出样例')
     expect(system).toContain('"noChangeNeeded": true')
-    expect(system).toContain('不允许出现"…（省略）…"这类占位')
-    expect(system).toContain('没动的文件不要出现')
+    expect(system).toContain('不允许"…（省略）…"这类占位')
+    expect(system).toContain('改动现有文件优先用 `edits`（锚点替换），不要整篇回写')
+    expect(system).toContain('"find"')
+  })
+
+  /*
+   * 输出预算（V1.22b）。
+   *
+   * 线上失败的直接原因：模型 max_output_tokens = 8192，而它把几份 4 KB 的资料整篇回写，
+   * 输出被端点截断在字符串中间。提示词必须说清这个上限。
+   */
+  it('把模型真实的输出上限写进提示词', () => {
+    const withBudget = buildSkillOptimizationPrompt({
+      skillName: SKILL_NAME,
+      files: views(),
+      evidence: evidence(),
+      limits: LIMITS,
+      maxOutputTokens: 8192,
+    })
+    expect(withBudget.system).toContain('最多只能输出约 8192 token')
+    expect(withBudget.system).toContain('不要**把一份几 KB 的资料整篇回写')
   })
 
   it('用户提示词末尾带逐条自检清单', () => {
@@ -157,15 +181,136 @@ describe('「不需要改」出口', () => {
   })
 })
 
+/*
+ * 锚点编辑（V1.22b）。
+ *
+ * 这是让 8192 输出上限下"改一份 6.8 KB 的 SKILL.md"变得可能的唯一办法：输出量与改动量
+ * 成正比。危险面也很清楚 —— 锚点不唯一时平台绝不能替模型猜改哪一处。
+ */
+describe('锚点编辑', () => {
+  function parse(raw: string) {
+    return parseSkillOptimizationOutput({
+      raw,
+      skillName: SKILL_NAME,
+      currentFiles: views(),
+      limits: LIMITS,
+    })
+  }
+
+  it('唯一锚点被替换，结果作为该文件的新全文参与后续校验', () => {
+    const parsed = parse(
+      JSON.stringify({
+        summary: 's',
+        edits: [{ path: 'references/domain-model.md', find: '# 领域模型', replace: '# 领域模型（已细化）' }],
+      }),
+    )
+    expect(parsed.files.get('references/domain-model.md')).toBe('# 领域模型（已细化）\n')
+    expect(parsed.changedPaths).toEqual(['references/domain-model.md'])
+  })
+
+  it('同一文件的多个 edits 按顺序叠加', () => {
+    const parsed = parse(
+      JSON.stringify({
+        summary: 's',
+        edits: [
+          { path: 'SKILL.md', find: '# 原正文', replace: '# 新正文' },
+          { path: 'SKILL.md', find: '# 新正文', replace: '# 更新后的正文\n\n补充：逐条核对数据权限。' },
+        ],
+      }),
+    )
+    expect(parsed.files.get('SKILL.md')).toContain('# 更新后的正文')
+    // frontmatter 仍在，name 没被动过 —— 否则这里会因 frontmatter 校验失败而抛错。
+    expect(parsed.files.get('SKILL.md')).toContain(`name: ${SKILL_NAME}`)
+  })
+
+  it('锚点不存在或出现多次都拒，绝不替模型猜改哪一处', () => {
+    expect(() =>
+      parse(JSON.stringify({ summary: 's', edits: [{ path: 'SKILL.md', find: '不存在的锚点', replace: 'x' }] })),
+    ).toThrow(/does not appear/)
+    expect(() =>
+      parse(
+        JSON.stringify({
+          summary: 's',
+          edits: [{ path: 'SKILL.md', find: '\n', replace: 'x' }],
+        }),
+      ),
+    ).toThrow(/appears more than once/)
+  })
+
+  it('只能改已存在的文本文件：新建走 files，图片一律不行', () => {
+    expect(() =>
+      parse(JSON.stringify({ summary: 's', edits: [{ path: 'references/new.md', find: 'a', replace: 'b' }] })),
+    ).toThrow(/does not contain as text/)
+    expect(() =>
+      parse(JSON.stringify({ summary: 's', edits: [{ path: 'assets/flow.png', find: 'a', replace: 'b' }] })),
+    ).toThrow(/cannot write binary content/)
+  })
+
+  it('同一路径不能既整篇回写又打补丁', () => {
+    expect(() =>
+      parse(
+        JSON.stringify({
+          summary: 's',
+          edits: [{ path: 'SKILL.md', find: '# 原正文', replace: '# 新正文' }],
+          files: { 'SKILL.md': entryMarkdown('# 另一个版本') },
+        }),
+      ),
+    ).toThrow(/both rewrote and edited/)
+  })
+
+  it('edits 存在时 files 可以缺席', () => {
+    const parsed = parse(
+      JSON.stringify({
+        summary: 's',
+        edits: [{ path: 'references/domain-model.md', find: '# 领域模型', replace: '# 模型' }],
+      }),
+    )
+    expect(parsed.files.size).toBe(1)
+  })
+})
+
+describe('输出 token 预算', () => {
+  it('用模型配置的上限，历史请求行回退到编译默认', () => {
+    expect(resolveCompletionTokenBudget(8192)).toBe(8192)
+    expect(resolveCompletionTokenBudget(null)).toBe(60000)
+    expect(resolveCompletionTokenBudget(undefined)).toBe(60000)
+    // 不允许被压到写不完一个 JSON，也不允许超过编译上限。
+    expect(resolveCompletionTokenBudget(16)).toBe(1024)
+    expect(resolveCompletionTokenBudget(999999)).toBe(60000)
+  })
+
+  it('截断被识别成独立错误码，而不是"输出里没有 JSON"', () => {
+    expect(() =>
+      readCompletionContent({
+        choices: [{ message: { content: '{"summary": "被截断的' }, finish_reason: 'length' }],
+        usage: { completion_tokens: 8192 },
+      }),
+    ).toThrow(/finish_reason=length/)
+    try {
+      readCompletionContent({
+        choices: [{ message: { content: 'x' }, finish_reason: 'length' }],
+      })
+      throw new Error('should have thrown')
+    } catch (error) {
+      expect((error as ChatCompletionError).code).toBe('MODEL_OUTPUT_TRUNCATED')
+    }
+  })
+
+  it('正常结束的响应照旧返回正文', () => {
+    expect(
+      readCompletionContent({ choices: [{ message: { content: '{}' }, finish_reason: 'stop' }] }),
+    ).toBe('{}')
+  })
+})
+
 interface FakeCalls {
   prompts: string[]
   failures: Array<Record<string, unknown>>
   uploads: number
-}
-
-function fakeDeps(options: {
-  completions: string[]
+}function fakeDeps(options: {
+  completions: Array<string | Error>
   evidenceOverride?: SkillReviewEvidenceSnapshot
+  maxOutputTokens?: number | null
 }): { calls: FakeCalls; deps: Parameters<typeof runSkillAiOptimization>[1] } {
   const calls: FakeCalls = { prompts: [], failures: [], uploads: 0 }
   const logger = {
@@ -211,6 +356,7 @@ function fakeDeps(options: {
         calls.prompts.push(input.userPrompt)
         const next = options.completions[Math.min(index, options.completions.length - 1)]!
         index += 1
+        if (next instanceof Error) throw next
         return { content: next, latencyMs: 1, promptTokens: 1, completionTokens: 1 }
       }) as never,
     },
@@ -279,5 +425,36 @@ describe('runSkillAiOptimization 的证据门禁与终态', () => {
     expect(outcome.errorCode).toBe(SKILL_OPTIMIZATION_ERROR_CODES.NO_CHANGE_NEEDED)
     expect(calls.uploads).toBe(0)
     expect(String(calls.failures[0]!.errorMessage)).toContain('缺少人工复核意见')
+  })
+
+  /*
+   * 截断可修：这是线上第二次失败的形态（三次都被截断，报"输出里没有 JSON 对象"）。
+   * 现在它变成一条带具体指令的重试，而不是一次不可理解的失败。
+   */
+  it('输出被截断时回灌"改用 edits 缩小输出"的指令并重试', async () => {
+    const { calls, deps } = fakeDeps({
+      completions: [
+        new ChatCompletionError('MODEL_OUTPUT_TRUNCATED', '模型输出达到 token 上限被截断'),
+        JSON.stringify({
+          summary: '只改了资料标题这一处，输出压到最小。',
+          edits: [{ path: 'references/domain-model.md', find: '# domain', replace: '# domain model' }],
+        }),
+      ],
+    })
+    const outcome = await runSkillAiOptimization(CLAIM, deps)
+    expect(calls.prompts).toHaveLength(2)
+    expect(calls.prompts[1]).toContain('请改用 edits 锚点替换')
+    expect(outcome.status).toBe('SUCCEEDED')
+    expect(outcome.changedPaths).toEqual(['references/domain-model.md'])
+  })
+
+  it('用尽次数仍被截断时终态失败，错误码如实是 MODEL_OUTPUT_TRUNCATED', async () => {
+    const { calls, deps } = fakeDeps({
+      completions: [new ChatCompletionError('MODEL_OUTPUT_TRUNCATED', '被截断')],
+    })
+    const outcome = await runSkillAiOptimization(CLAIM, deps)
+    expect(outcome.status).toBe('FAILED')
+    expect(outcome.errorCode).toBe('MODEL_OUTPUT_TRUNCATED')
+    expect(calls.prompts).toHaveLength(3)
   })
 })

@@ -58,8 +58,24 @@ import {
 } from '../../model-connectivity/network-mode.js'
 import type { ModelProxySettings } from '../../model-connectivity/probe.js'
 
-/** 输出上限。整包文本最多几十 KiB，按最坏情况 1 token ≈ 2 字节留足余量。 */
+/**
+ * 输出上限的兜底值。
+ *
+ * 真正生效的是**模型配置里的** `max_output_tokens`（V1.22b 起随请求冻结）：三个线上模型
+ * 都是 8192，而这里曾经硬编码 60000 发出去，端点按自己的上限静默截断，表现成"输出里没有
+ * JSON 对象"。只有历史请求行（没有快照）才会落到这个兜底值。
+ */
 const MAX_COMPLETION_TOKENS = 60000
+
+/** 别把上限压到连一个像样的 JSON 都写不完。 */
+const MIN_COMPLETION_TOKENS = 1024
+
+export function resolveCompletionTokenBudget(snapshot: number | null | undefined): number {
+  if (typeof snapshot !== 'number' || !Number.isFinite(snapshot) || snapshot <= 0) {
+    return MAX_COMPLETION_TOKENS
+  }
+  return Math.max(MIN_COMPLETION_TOKENS, Math.min(MAX_COMPLETION_TOKENS, Math.trunc(snapshot)))
+}
 
 /**
  * 自检不通过时最多让模型重写几次。
@@ -286,6 +302,7 @@ export async function runSkillAiOptimization(
     let repacked: Buffer | null = null
     let rejection: string | null = null
     let lastError: unknown = null
+    const tokenBudget = resolveCompletionTokenBudget(claim.max_output_tokens_snapshot)
 
     while (attempts < maxAttempts) {
       attempts += 1
@@ -294,27 +311,53 @@ export async function runSkillAiOptimization(
         files: views,
         evidence,
         limits,
+        maxOutputTokens: tokenBudget,
         previousRejection: rejection,
         attempt: attempts,
         maxAttempts,
       })
-      const completion = await callModel({
-        baseUrl: claim.base_url_snapshot,
-        modelName: claim.model_name_snapshot,
-        apiKey,
-        systemPrompt: prompt.system,
-        userPrompt: prompt.user,
-        timeoutMs: claim.request_timeout_ms_snapshot,
-        maxTokens: MAX_COMPLETION_TOKENS,
-        proxy: route.proxy,
-        ...(deps.signal ? { signal: deps.signal } : {}),
-      })
+      let completion: ChatCompletionResult
+      try {
+        completion = await callModel({
+          baseUrl: claim.base_url_snapshot,
+          modelName: claim.model_name_snapshot,
+          apiKey,
+          systemPrompt: prompt.system,
+          userPrompt: prompt.user,
+          timeoutMs: claim.request_timeout_ms_snapshot,
+          maxTokens: tokenBudget,
+          proxy: route.proxy,
+          ...(deps.signal ? { signal: deps.signal } : {}),
+        })
+      } catch (error) {
+        /*
+         * 输出被 token 上限截断：这是**可修的**，回灌一条具体指令让模型缩小输出量。
+         *
+         * 线上那次失败三次都栽在这里：模型把几份 4 KB 的资料整篇回写，端点截断，而平台
+         * 只报"输出里没有 JSON 对象"。截断不该当成模型不会写 JSON，也不该当成不可重试的
+         * 网络错误 —— 它是"这次写太多了"。
+         */
+        if (error instanceof ChatCompletionError && error.code === 'MODEL_OUTPUT_TRUNCATED') {
+          lastError = error
+          rejection =
+            `${reason(error)}；请改用 edits 锚点替换、只写要改的那几段，`
+            + `并把本次改动压缩到 ${tokenBudget} token 的输出预算之内`
+          log.warn('skill_ai_optimization_output_truncated', {
+            event: 'skill_ai_optimization_output_truncated',
+            attempt: attempts,
+            max_output_tokens: tokenBudget,
+          })
+          continue
+        }
+        throw error
+      }
       log.info('skill_ai_optimization_model_returned', {
         event: 'skill_ai_optimization_model_returned',
         attempt: attempts,
         latency_ms: completion.latencyMs,
         prompt_tokens: completion.promptTokens,
         completion_tokens: completion.completionTokens,
+        max_output_tokens: tokenBudget,
       })
 
       try {

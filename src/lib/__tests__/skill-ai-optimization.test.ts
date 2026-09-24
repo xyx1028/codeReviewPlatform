@@ -182,6 +182,13 @@ describe('describeOptimizationError', () => {
     expect(text.length).toBeLessThan(600)
   })
 
+  it('输出被截断有自己的文案（它是容量问题，不是模型不会写 JSON）', () => {
+    const text = describeOptimizationError('MODEL_OUTPUT_TRUNCATED', 'finish_reason=length')
+    expect(text).toContain('输出上限')
+    expect(text).toContain('finish_reason=length')
+    expect(text).not.toContain('未登记')
+  })
+
   it('每一个 Worker 侧会产出的码都有对应文案（漏一个就会显示成「未登记」）', () => {
     const workerCodes = [
       'SKILL_OPTIMIZATION_NO_EVIDENCE',
@@ -192,6 +199,7 @@ describe('describeOptimizationError', () => {
       'SKILL_OPTIMIZATION_UPLOAD_INVALID',
       'SKILL_OPTIMIZATION_ACTOR_MISSING',
       'SKILL_OPTIMIZATION_FAILED',
+      'MODEL_OUTPUT_TRUNCATED',
       'MODEL_CONFIG_NOT_FOUND',
       'MODEL_SECRET_MISSING',
       'MODEL_TIMEOUT',

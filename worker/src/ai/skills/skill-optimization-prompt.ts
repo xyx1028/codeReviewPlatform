@@ -115,6 +115,13 @@ export interface SkillOptimizationPromptInput {
   evidence: SkillReviewEvidenceSnapshot
   limits: SkillBundleLimits
   /**
+   * 本次能写多少 token（模型配置的 `max_output_tokens`，V1.22b 起随请求冻结）。
+   *
+   * 必须告诉模型：线上失败过一次就是因为它不知道预算 —— 8192 的上限下把两三份 4 KB 的
+   * 资料整篇回写，输出停在字符串中间，连一个 `}` 都没写出来。
+   */
+  maxOutputTokens?: number | null
+  /**
    * 上一轮自检失败的原因。
    *
    * 它的存在就是"AI 改完必须自检、不过要继续改"的实现方式：把拒绝原因原样回灌给模型，
@@ -310,9 +317,15 @@ export function buildSkillOptimizationPrompt(
 
   const example = JSON.stringify(
     {
-      summary: '依据 2 条人工标为「错」的结论，在 SKILL.md 里补充了判定口径，并新增一份检查清单。',
+      summary: '依据 2 条人工标为「错」的结论，收紧了 SKILL.md 里的判定口径，并新增一份检查清单。',
+      edits: [
+        {
+          path: SKILL_ENTRY_FILE,
+          find: '（原文里一段唯一出现的文本，照抄，不要改动它的空格与换行）',
+          replace: '（替换后的新文本）',
+        },
+      ],
       files: {
-        [SKILL_ENTRY_FILE]: `---\nname: ${input.skillName}\ndescription: …保持或改进这句描述…\n---\n\n# …完整正文…\n`,
         'references/checklist.md': '# 检查清单\n\n- …\n',
       },
       deletedFiles: [],
@@ -320,6 +333,11 @@ export function buildSkillOptimizationPrompt(
     null,
     2,
   )
+
+  const budgetTokens =
+    typeof input.maxOutputTokens === 'number' && input.maxOutputTokens > 0
+      ? input.maxOutputTokens
+      : null
 
   const system = [
     '你是代码评审平台的技能维护助手。',
@@ -330,12 +348,27 @@ export function buildSkillOptimizationPrompt(
     '## 输出契约（平台按这份契约机械校验，任何一条不满足整次输出都会被拒）',
     '',
     '1. 只输出一个 JSON 对象。JSON 之外不要写任何解释、前言或 Markdown 标题。',
-    '2. 形状：{"summary": string, "files": {"<路径>": "<该文件的完整新正文>"}, "deletedFiles": ["<路径>"]}',
-    '   - `files` 只放你**改写或新增**的文件；没动的文件不要出现（放进去会被判为"未改动"而拒绝）。',
-    '   - 每份正文必须是**整个文件的全文**，不是片段、不是 diff，不允许出现"…（省略）…"这类占位。',
-    '   - `deletedFiles` 可以省略；里面只能是当前包里真实存在的路径。',
-    '3. 至少要有一个改动。确实不该改时走下面的「不需要改」出口，不要返回空的 files。',
-    '4. `summary` 用中文写清楚改了什么、依据哪几条评审证据，不要复述这些规则。',
+    '2. 形状：{"summary": string, "edits": [...], "files": {...}, "deletedFiles": [...]}',
+    '   四个键里 `summary` 必填，`edits` / `files` / `deletedFiles` 至少要有一个非空。',
+    '3. **改动现有文件优先用 `edits`（锚点替换），不要整篇回写。**',
+    '   每个元素：{"path": "<已存在的文本文件>", "find": "<原文片段>", "replace": "<新文本>"}',
+    '   - `find` 必须是该文件当前正文里**逐字出现且只出现一次**的片段（含空格、换行照抄）；',
+    '     出现 0 次或多次都会被拒。想改的位置不唯一时，把 `find` 往前后多带几行让它唯一。',
+    '   - `replace` 可以是空字符串（表示删掉这一段）。',
+    '   - 同一个文件可以有多个 edits，按给出的顺序依次应用。',
+    '4. `files` 只用于**新建文件**或整篇重写**小文件**；同一个路径不能同时出现在 `files` 和 `edits` 里。',
+    '   `files` 里的正文必须是整个文件的全文，不是片段，不允许"…（省略）…"这类占位。',
+    '5. `deletedFiles` 里只能是当前包里真实存在的路径。',
+    '6. `summary` 用中文写清楚改了什么、依据哪几条评审证据，不要复述这些规则。',
+    '',
+    '## 输出预算（这是硬上限，超过会被端点截断，本次优化直接失败）',
+    '',
+    budgetTokens === null
+      ? '- 尽量把输出控制在几千 token 内：优先用 edits，一次只改真正需要改的几个位置。'
+      : `- 你这次最多只能输出约 ${budgetTokens} token（含 JSON 的转义字符）。`
+        + `中文按 1 字 ≈ 1 token 估算。`,
+    '- 因此：**不要**把一份几 KB 的资料整篇回写；用 edits 只写要改的那几段。',
+    '- 一次改不完就只改最关键的几处，在 summary 里说明还有什么建议留给下一轮优化。',
     '',
     '## 路径与文件类型（这张表由校验器生成，不是建议）',
     '',
@@ -346,7 +379,7 @@ export function buildSkillOptimizationPrompt(
     `- ${SKILL_ENTRY_FILE} 必须保留，不能删除、不能改名（删掉它 dsh 会静默忽略整个技能）。`,
     nameLine === null
       ? `- ${SKILL_ENTRY_FILE} 必须以 \`---\` 开头，YAML frontmatter 里 name 必须等于 ${input.skillName}，description 非空。`
-      : `- ${SKILL_ENTRY_FILE} 必须以 \`---\` 开头，frontmatter 里这一行必须**逐字保留**：\`${nameLine}\`；description 必须非空。`,
+      : `- ${SKILL_ENTRY_FILE} 的 frontmatter 里这一行必须**保持不变**：\`${nameLine}\`（不要把它放进 edits 的 replace 里改掉）。`,
     '- 新增 scripts/ 下的文件会让这个版本被标记为「含可执行脚本」，管理员发布时必须额外确认；',
     '  只有确实需要可执行步骤时才这么做。',
     '',
@@ -357,7 +390,7 @@ export function buildSkillOptimizationPrompt(
     '## 「不需要改」出口',
     '',
     '当证据不足以支撑任何具体修改时（例如没有人工复核意见、结论里看不出技能内容的问题），',
-    '输出这个形状，而不是返回空的 files：',
+    '输出这个形状，而不是返回空的改动：',
     '{"noChangeNeeded": true, "summary": "<中文说明为什么现在不该改，以及需要什么证据才能改>"}',
     '平台会把它作为一次明确的「本次不产出草稿」终态记录下来，不算失败重试。',
     '',
@@ -401,11 +434,12 @@ export function buildSkillOptimizationPrompt(
     '## 输出前逐条自检（不满足就先改，再输出）',
     '',
     '1. 只有一个 JSON 对象，它之外没有任何文字。',
-    '2. files 里每个路径都能在上面那张目录/扩展名表里找到对应行。',
-    '3. files 里每份正文都是完整全文，没有省略号占位，没有只给改动片段。',
-    '4. 没有把未改动的文件放进 files；deletedFiles 里的路径都真实存在。',
-    `5. 如果改了 ${SKILL_ENTRY_FILE}：第一行是 \`---\`，name 行逐字未变，description 非空。`,
-    '6. 至少有一个改动；否则改用「不需要改」出口。',
+    '2. 改现有文件用的是 edits，没有把几 KB 的资料整篇回写；输出总量在预算之内。',
+    '3. 每个 edits 的 `find` 都是原文里逐字出现且只出现一次的片段（空格、换行都照抄）。',
+    '4. files 里只有新建文件或小文件全文；同一路径没有同时出现在 files 和 edits。',
+    '5. 每个路径都能在上面那张目录/扩展名表里找到对应行；deletedFiles 里的路径都真实存在。',
+    `6. 如果改了 ${SKILL_ENTRY_FILE}：frontmatter 的 name 行没被动过，description 仍然非空。`,
+    '7. 至少有一个改动；否则改用「不需要改」出口。',
   ].join('\n')
 
   const user = [
@@ -537,19 +571,80 @@ export function parseSkillOptimizationOutput(
     throw new SkillOptimizationNoChangeError(summaryRaw.trim().slice(0, 1000))
   }
 
-  const filesRaw = record.files
+  /*
+   * `files` 可以缺席（V1.22b）：改现有文件的主路径是 `edits`，`files` 只用于新建或整篇
+   * 重写小文件。缺席与空对象等价，形状不对才拒。
+   */
+  const filesRaw = record.files ?? {}
   if (filesRaw === null || typeof filesRaw !== 'object' || Array.isArray(filesRaw)) {
-    reject('the model output has no files object')
+    reject('the model output has a non-object files')
   }
 
   const current = new Map(input.currentFiles.map((file) => [file.path, file]))
   const files = new Map<string, string>()
+  const editedPaths = new Set<string>()
+
+  /*
+   * 锚点编辑（V1.22b）。
+   *
+   * 先应用 edits、把结果塞进 `files`，后面所有校验（路径、角色、容量、frontmatter）
+   * 就只有一条通路 —— 两套并行的检查迟早会漂移，而漂移出来的漏洞正好在"模型写的内容"上。
+   *
+   * 这个协议存在的唯一理由是输出预算：模型的 `max_output_tokens` 是 8192，而一份资料
+   * 动辄 4 KB，整篇回写两三份就会被端点截断（线上发生过，错误表现成"输出里没有 JSON 对象"）。
+   * 锚点编辑让输出量与**改动量**成正比，而不是与文件大小成正比。
+   */
+  const editsRaw = record.edits ?? []
+  if (!Array.isArray(editsRaw)) {
+    reject('the model output has a non-array edits')
+  }
+  for (const entry of editsRaw) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      reject('an edit entry is not an object')
+    }
+    const edit = entry as Record<string, unknown>
+    const path = typeof edit.path === 'string' ? edit.path : ''
+    if (path === '') reject('an edit entry has no path')
+    assertWritablePath(path, input.limits)
+    const existing = current.get(path)
+    if (existing === undefined || existing.text === null) {
+      // 锚点编辑只能改**已经存在的文本文件**；新建文件走 files。
+      reject(`the model tried to edit a file the bundle does not contain as text: ${path}`)
+    }
+    const find = edit.find
+    const replace = edit.replace
+    if (typeof find !== 'string' || find === '') {
+      reject(`the edit for ${path} has an empty "find" anchor`)
+    }
+    if (typeof replace !== 'string') {
+      reject(`the edit for ${path} has a non-string "replace"`)
+    }
+    const base = files.get(path) ?? existing.text
+    const first = base.indexOf(find)
+    if (first < 0) {
+      reject(`the anchor for ${path} does not appear in the current file content`)
+    }
+    if (base.indexOf(find, first + 1) >= 0) {
+      // 出现多次就不知道改哪一处。让模型把锚点带上更多上下文，而不是平台替它猜第一处。
+      reject(`the anchor for ${path} appears more than once; make it unique`)
+    }
+    files.set(path, `${base.slice(0, first)}${replace}${base.slice(first + find.length)}`)
+    editedPaths.add(path)
+  }
 
   for (const [path, value] of Object.entries(filesRaw as Record<string, unknown>)) {
+    if (editedPaths.has(path)) {
+      // 既整篇回写又打锚点补丁：两者的先后会决定结果，含义不明确，一律拒。
+      reject(`the model both rewrote and edited ${path}; use one of them`)
+    }
     assertWritablePath(path, input.limits)
     if (typeof value !== 'string') {
       reject(`the model wrote a non-string body for ${path}`)
     }
+    files.set(path, value)
+  }
+
+  for (const [path, value] of files) {
     if (value.trim() === '') {
       reject(`the model wrote an empty body for ${path}`)
     }
@@ -574,7 +669,6 @@ export function parseSkillOptimizationOutput(
       // 逐字节相同 = 什么都没改。当成改动会让管理员对着一个空 diff 找不同。
       reject(`the model returned ${path} unchanged; omit unchanged files from "files"`)
     }
-    files.set(path, value)
   }
 
   const deletedRaw = record.deletedFiles ?? record.deleted_files ?? []

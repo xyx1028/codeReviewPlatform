@@ -103,7 +103,14 @@ async function openTunnel(
   }
 }
 
-/** 从 OpenAI 兼容响应里取出正文。形状不对就是"模型端点不兼容"，不是"内容不合规"。 */
+/**
+ * 从 OpenAI 兼容响应里取出正文。形状不对就是"模型端点不兼容"，不是"内容不合规"。
+ *
+ * `finish_reason` 必须读（V1.22b）。线上踩过：模型配置 `max_output_tokens = 8192`，而调用方
+ * 硬编码 `max_tokens: 60000`，端点按自己的上限截断，返回的 JSON 停在字符串中间。旧实现把
+ * 这段残缺正文原样交给解析器，于是错误码是"输出里没有 JSON 对象"——运维据此去查模型会不会
+ * 写 JSON，方向完全错了。截断是**容量问题**，必须有自己的错误码。
+ */
 export function readCompletionContent(payload: unknown): string {
   if (payload === null || typeof payload !== 'object') {
     throw new ChatCompletionError('MODEL_RESPONSE_INVALID', '模型响应不是 JSON 对象')
@@ -112,8 +119,19 @@ export function readCompletionContent(payload: unknown): string {
   if (!Array.isArray(choices) || choices.length === 0) {
     throw new ChatCompletionError('MODEL_RESPONSE_INVALID', '模型响应没有 choices')
   }
-  const message = (choices[0] as { message?: unknown }).message
+  const choice = choices[0] as { message?: unknown; finish_reason?: unknown }
+  const message = choice.message
   const content = (message as { content?: unknown } | undefined)?.content
+  const finishReason =
+    typeof choice.finish_reason === 'string' ? choice.finish_reason.toLowerCase() : null
+  if (finishReason === 'length' || finishReason === 'max_tokens') {
+    const completion = readUsage(payload).completion
+    throw new ChatCompletionError(
+      'MODEL_OUTPUT_TRUNCATED',
+      `模型输出达到 token 上限被截断（finish_reason=${finishReason}`
+        + `${completion === null ? '' : `, completion_tokens=${completion}`}）`,
+    )
+  }
   if (typeof content !== 'string' || content.trim() === '') {
     throw new ChatCompletionError('MODEL_RESPONSE_INVALID', '模型响应的正文为空')
   }

@@ -2142,10 +2142,36 @@ V1.22 起这种输入在入队阶段就被拒，页面也会显示服务端原�
 |---|---|---|
 | `SKILL_OPTIMIZATION_NO_EVIDENCE` | 没被引用过，**或**引用过但没有任何 `ai_review_result` | 让技能参与几次评审并产出结论后再优化 |
 | `SKILL_OPTIMIZATION_NO_CHANGE_NEEDED` | 模型判断当前证据不足以支撑修改 | 看 `error_message` 里的理由；补人工复核意见后再试 |
+| `MODEL_OUTPUT_TRUNCATED` | 模型输出达到 `max_output_tokens` 被截断（`finish_reason=length`） | 已自动回灌"改用 edits 缩小输出"重试过；仍失败就拆小技能资料，或换输出上限更高的模型 |
 | `SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID` | 3 次重写后仍不合规 | 看 `error_message` 原文再定性：路径/容量/frontmatter 是模型能力问题，其它先怀疑提示词与校验器分叉 |
 
 新日志事件：`skill_ai_optimization_no_evidence`（带 `referenced_job_count` 与
-`review_result_count`）、`skill_ai_optimization_no_change_needed`。
+`review_result_count`）、`skill_ai_optimization_no_change_needed`、
+`skill_ai_optimization_output_truncated`（带 `max_output_tokens`）。
+`skill_ai_optimization_model_returned` 也多了 `max_output_tokens`。
+
+## 23.2b 输出预算（V1.22b，线上第二次失败的根因）
+
+三个线上模型配置的 `max_output_tokens` **都是 8192**，而 Worker 曾经硬编码 `max_tokens: 60000`。
+一份 6.8 KB 的 `SKILL.md` 加两三份 4 KB 的 references 整篇回写必然超出，端点静默截断，
+平台报成"输出里没有 JSON 对象"。现在：
+
+- 入队时把 `max_output_tokens` 冻结进 `skill_ai_optimization_request.max_output_tokens_snapshot`，
+  claim 带给 Worker，Worker 按它发 `max_tokens`，并把预算写进提示词；
+- 改现有文件的主路径是**锚点编辑**（`edits`：`find` 必须唯一出现一次），输出量与改动量成正比；
+- 读 `finish_reason`，截断有自己的错误码。
+
+```sql
+-- 确认某个技能能不能在当前模型上改得动：看包大小与模型输出上限
+select v.expanded_size_bytes, v.file_count, c.model_name, c.max_output_tokens
+from public.review_skill s
+join public.review_skill_version v on v.id = s.current_version_id
+cross join public.ai_model_config c
+where s.name = '<skill name>' and c.enabled;
+```
+
+`max_output_tokens` 只有 8192 而技能包几十 KB 时，**只能**靠 edits 增量改；一次改不完是正常的，
+`summary` 里会写还剩什么建议。
 
 ## 23.3 诊断一次失败
 
@@ -2187,8 +2213,14 @@ Worker 与前端各自回滚上一版即可；三者互不依赖（`review_resul
 ```bash
 docker exec -i supabase_db_codeReviewPlatform psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
   < supabase/tests/20260924095026_skill_ai_optimization_require_review_results_test.sql
+docker exec -i supabase_db_codeReviewPlatform psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  < supabase/tests/20260924102123_skill_ai_optimization_output_budget_test.sql
 
 npx vitest run worker/src/__tests__/v122-skill-optimization-guidance.test.ts \
   worker/src/__tests__/v119-skill-ai-optimizer.test.ts
 npx vitest run -c vitest.web.config.ts src/lib/__tests__/skill-ai-optimization.test.ts
+
+# 全链路（本地 Supabase 必须在跑）
+RUN_V119_LOCAL_INTEGRATION=1 npx vitest run \
+  worker/src/__tests__/v119-skill-ai-optimization.integration.test.ts
 ```

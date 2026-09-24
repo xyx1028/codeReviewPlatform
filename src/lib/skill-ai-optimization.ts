@@ -234,6 +234,8 @@ const OPTIMIZATION_ERROR_TEXT: Record<string, string> = {
   MODEL_PROXY_UNREACHABLE: '宿主机代理不可用，请确认代理已启动。',
   MODEL_NETWORK_ERROR: '连不上模型端点，请确认运行 Worker 的机器已接入公司网络或 VPN。',
   MODEL_RESPONSE_INVALID: '模型端点返回的响应不是预期的 chat/completions 结构。',
+  MODEL_OUTPUT_TRUNCATED:
+    '模型这次要写的内容超过了它自己的输出上限（模型配置里的「最大输出 token」），输出被端点截断，因此拿不到完整结果。已经让它改用锚点替换、只写要改的那几段并重试过。仍然失败时：把这个技能的资料拆小、或换一个输出上限更高的模型。',
   MODEL_RESPONSE_TOO_LARGE: '模型响应超出可接受大小，已拒绝处理。',
   TASK_LEASE_LOST: '任务租约已失效（执行它的 Worker 失联）。稍后会自动重新排队，也可以直接重试。',
   SKILL_NOT_PUBLISHED: '这个技能还没有已发布版本，无法优化。',
