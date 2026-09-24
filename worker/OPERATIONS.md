@@ -1891,9 +1891,13 @@ RUN_V119_LOCAL_INTEGRATION=1 RUN_V119_WORKER_LOOP=1 npx vitest run \
 `REQUIREMENT_ATTACHMENT_DIGEST_MISMATCH` fail closed。一条故事提交失败时，它刚上传的对象会
 被立刻删掉（不留孤儿字节）。
 
-**导入门禁是「至少一个需求来源」**：正文或附件有其一即可。实测存在 `gf_description` 为 null、
-需求全写在 PRD 附件里的故事（`US-2026-010727`），把它整条挡掉等于这类团队没法用平台；
-两者都没有才以 `LINKY_IMPORT_STORY_NO_REQUIREMENT_SOURCE` 拒绝。
+**导入不设内容门禁**（2026-09-24 起）：正文、附件都可以为空，只有标题的需求同样冻结进批次。
+撤掉门禁是产品决定 —— 之前 `LINKY_IMPORT_STORY_NO_REQUIREMENT_SOURCE` 会整条挡掉
+（实测 `US-2026-009302` / `009306` / `009307` 就是标题-only），使用者每次导入都得先回 Linky 补。
+代价没有消失，只是转移给使用者：标题-only 的需求，Agent 只能按标题推断验收口径，结论必然更弱。
+平台不做任何补齐 —— `requirement_detail` 仍写 null，提示词上下文里 `detailed_description`
+这个键直接缺席，绝不用标题伪造一份正文。仍然保留的门禁只有编号必填
+（`LINKY_IMPORT_STORY_CODE_REQUIRED`）与必须在单子上（`LINKY_IMPORT_STORY_NOT_REQUESTED`）。
 
 ## 21.2 配置
 
@@ -1972,16 +1976,25 @@ select public.unreferenced_story_attachment_paths(array['batch/<batch>/<att>.md'
 | 码 | 含义 | 处置 |
 |---|---|---|
 | `LINKY_PROXY_PORT_BLOCKED` | 宿主机代理拒绝隧道（通常 403） | 放开代理的 2055/90 并重装服务 |
-| `LINKY_PROXY_UNREACHABLE` | 代理没起 | 查 `com.codereviewplatform.model-vpn-proxy` |
+| `LINKY_PROXY_UNREACHABLE` | 连代理那一跳本身失败（代理没起／端口写错） | 查 `com.codereviewplatform.model-vpn-proxy` |
 | `LINKY_TIMEOUT` / `LINKY_NETWORK_ERROR` | 上游或链路抖动 | 重试；持续失败先确认 Mac 还连着 VPN |
 | `LINKY_NOT_FOUND` | 编号在上游不存在（勾选后被删） | 刷新看板重新勾选 |
 | `LINKY_IMPORT_WORKSPACE_REQUIRED` | 没选项目组 | 项目组定义这批需求属于谁，必选 |
 | `LINKY_IMPORT_EMPTY_SELECTION` / `_TOO_MANY_STORIES` | 没勾选 / 超过 500 条 | 勾选或拆批次 |
-| `LINKY_IMPORT_STORY_NO_REQUIREMENT_SOURCE` | 该需求既无正文也无附件 | 去 Linky 补需求描述或附件 |
+| `LINKY_IMPORT_STORY_NO_REQUIREMENT_SOURCE` | **已废弃**（2026-09-24 撤掉门禁） | 只会出现在历史失败记录里；同类需求现在直接导入 |
 | `LINKY_IMPORT_STORY_NOT_REQUESTED` | 提交了不在单子上的编号 | 不该发生；重新发起导入 |
 | `LINKY_IMPORT_LEASE_LOST` | 租约被接管 | 无需处理，另一个副本在做 |
 | `ACTIVE_JOB_EXISTS` / `BATCH_READ_ONLY` | 批次在跑任务 / 已完成或已有 AI 结果 | 先停止任务或换批次 |
 | `REQUIREMENT_ATTACHMENT_DIGEST_MISMATCH` | 物化时 sha256 与冻结值不符 | 不是"少一份资料"，是资料被换过：查 Storage 与导入记录，重新导入 |
+
+`LINKY_PROXY_UNREACHABLE` 现在只在**连代理那一跳**失败时出现。2026-09-24 之前它会被误报：
+HTTPS 目标经 CONNECT 隧道时代码写的是 `https.request({ createConnection, agent: false })`，
+而 Node 在 `agent === false` 时另建一个默认 Agent 并忽略 `createConnection`，请求实际去连
+`127.0.0.1:443` 拿到 ECONNREFUSED，再被归成"代理不可用"。现象是代理日志有
+`proxy_tunnel_established`、宿主机 curl 200，导入却报代理不可用。修复方式是把
+`createConnection` 挂在 Agent 实例上（`net/proxy-http.ts` 的 `tunneledHttpsRequest`），
+并把隧道之后的失败归到 `LINKY_TIMEOUT` / `LINKY_NETWORK_ERROR`。
+排查顺序因此变成：先看代理日志有没有 `proxy_tunnel_established` —— 有，就不是代理的问题。
 
 ## 21.6 清理归属
 

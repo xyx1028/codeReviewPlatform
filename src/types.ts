@@ -174,7 +174,7 @@ export interface AnalysisJob {
   attempt: number
   total_stories: number
   analysis_context_version?: 1 | 2
-  commit_window_days?: 14 | 21 | 28
+  commit_window_days?: 7 | 14 | 21 | 28
   scope_status?: 'LEGACY' | 'PREPARING' | 'READY' | 'DEGRADED' | 'FAILED'
   error_code: string | null
   error_message: string | null

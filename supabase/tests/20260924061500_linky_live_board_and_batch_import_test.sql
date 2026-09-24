@@ -150,27 +150,8 @@ begin
     'a wrong claim token cannot renew the lease'
   );
 
-  -- 正文和附件都没有的故事拒绝；只有附件（需求写在 PRD 附件里）是允许的。
-  begin
-    perform public.commit_linky_batch_story(v_request, 'worker-v120r', v_token,
-      jsonb_build_object('story_code', 'US-2026-012147', 'title', 'x'), '[]'::jsonb);
-    raise exception 'a story without any requirement source must be rejected';
-  exception when others then
-    v_error := SQLERRM;
-    perform pg_temp.assert(v_error like '%LINKY_IMPORT_STORY_NO_REQUIREMENT_SOURCE%',
-      'a story needs requirement text or at least one attachment');
-  end;
-  begin
-    -- 附件数组非空但形状不合法（缺 sha256）同样算没有需求来源。
-    perform public.commit_linky_batch_story(v_request, 'worker-v120r', v_token,
-      jsonb_build_object('story_code', 'US-2026-012147', 'title', 'x'),
-      jsonb_build_array(jsonb_build_object('linky_attachment_id', 'bad', 'filename', 'b.md')));
-    raise exception 'a malformed attachment must not count as a requirement source';
-  exception when others then
-    v_error := SQLERRM;
-    perform pg_temp.assert(v_error like '%LINKY_IMPORT_STORY_NO_REQUIREMENT_SOURCE%',
-      'malformed attachments do not count');
-  end;
+  -- 正文与附件都为空的故事也允许导入（2026-09-24 起撤掉了那道门禁），
+  -- 相关断言见 20260924080010_linky_import_allow_title_only_test.sql。
 
   -- 不在单子上的编号不许提交。
   begin

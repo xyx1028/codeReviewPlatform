@@ -260,6 +260,10 @@ a {
   margin: 0;
 }
 
+.mb-sm {
+  margin-bottom: 12px;
+}
+
 .full-width {
   width: 100%;
 }
@@ -353,22 +357,26 @@ a {
   font-weight: 700;
 }
 
-.field-mapping-title {
+.inline-hint-label {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+/*
+ * 跟在筛选项标签后面的一行轻提示（hover 出完整理由）。
+ *
+ * 它替掉了表格上方那块整幅 Alert：那块东西把最该看的列表往下推，而在"已经选了项目组"的
+ * 常规路径上又完全是噪音。提示贴着要操作的那个控件，占 0 像素垂直空间。
+ */
+.inline-hint-text {
+  font-size: 12px;
   cursor: help;
 }
 
-.field-mapping-help {
-  width: 18px;
-  height: 18px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid #91caff;
-  border-radius: 50%;
-  color: #1677ff;
-  font-size: 12px;
-  font-weight: 700;
+/* 未选项目组时，替换表头「全选」勾选框的占位符。 */
+.selection-locked-mark {
+  color: rgba(0, 0, 0, 0.25);
+  cursor: help;
+  user-select: none;
 }

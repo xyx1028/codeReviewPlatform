@@ -9,6 +9,7 @@ import {
   Col,
   Descriptions,
   Divider,
+  Drawer,
   Empty,
   Form,
   Input,
@@ -35,6 +36,7 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { LinkyStoryPicker } from './components/linky/LinkyStoryPicker'
+import { groupImportFailures } from './components/linky/import-failures'
 import { StoryBoardPage } from './pages/StoryBoardPage'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -93,6 +95,7 @@ import {
   wechatLoginEnabled,
 } from './lib/api'
 import type { CreateBatchInput, ModelConfigInput } from './lib/api'
+import type { LinkyBatchImportRequest } from './types'
 import { downloadAiTemplate, parseAiWorkbook, templateVersion } from './lib/excel'
 import { parseBaselineCommit } from './lib/baseline'
 import { hashFile } from './lib/hash'
@@ -1363,11 +1366,11 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
         ) : null}
       />
       <Table
-        rowKey="id"
-        loading={batchesQuery.isLoading}
-        columns={columns}
-        dataSource={batchesQuery.data ?? []}
-        tableLayout="fixed"
+rowKey="id"
+loading={batchesQuery.isLoading}
+columns={columns}
+dataSource={batchesQuery.data ?? []}
+tableLayout="fixed"
       />
       <Modal title="创建每周评审批次" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={createMutation.isPending}>
         <Form
@@ -1485,6 +1488,13 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
     releaseWindow: null,
   })
   const [watchedImportId, setWatchedImportId] = useState<string | null>(null)
+  /**
+   * 已冻结清单走抽屉，不占页面高度。
+   *
+   * 这一页的主任务是"再挑一批需求"：清单是回头核对用的，无论摊开还是折叠，都要在最该
+   * 操作的列表前面垫一块东西。抽屉里还能顺带放上次导入没通过的明细，两者都是"事后查"。
+   */
+  const [snapshotOpen, setSnapshotOpen] = useState(false)
   const { message } = AntApp.useApp()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
@@ -1548,8 +1558,23 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
     onError: (error) => message.error(describeLinkyError(error)),
   })
 
+  const frozenAttachments = attachmentsQuery.data ?? []
+  const attachmentCountByStory = useMemo(() => {
+    const counter = new Map<string, number>()
+    for (const attachment of frozenAttachments) {
+      counter.set(attachment.story_id, (counter.get(attachment.story_id) ?? 0) + 1)
+    }
+    return counter
+  }, [frozenAttachments])
+  const failureGroups = groupImportFailures(latestImport?.stories_failed ?? [])
+  const failedCount = latestImport?.stories_failed.length ?? 0
+  const importPercent =
+    latestImport === null || latestImport.stories_total === 0
+      ? 0
+      : Math.round((latestImport.stories_committed / latestImport.stories_total) * 100)
+
   return (
-    <Space direction="vertical" size="large" className="page-stack">
+    <div className="import-page">
       {readOnly ? (
         <Alert
           type="warning"
@@ -1559,142 +1584,187 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
         />
       ) : null}
 
-      {latestImport !== null ? (
-        <Card title="上一次导入">
-          <Space direction="vertical" size="small" className="full-width">
-            <Text>
-              {latestImport.workspace_name}
-              {latestImport.release_window ? ` / ${latestImport.release_window}` : ''}
-              {' · '}
-              勾选 {latestImport.stories_total} 条 · 已冻结 {latestImport.stories_committed} 条 · 附件{' '}
-              {latestImport.attachments_stored} 个
-              {latestImport.attachments_failed > 0 ? `（失败 ${latestImport.attachments_failed} 个）` : ''}
-              {' · '}
-              <Tag
-                color={
-                  latestImport.status === 'SUCCEEDED'
-                    ? 'green'
-                    : latestImport.status === 'FAILED'
-                      ? 'red'
-                      : 'blue'
-                }
+      {/*
+        * 批次快照条：一行说完"这个批次现在冻结了什么"。
+        *
+        * 它替掉了「上一次导入」摘要加一段折叠清单的老排法 —— 两块回答的是同一个问题，叠在
+        * 一起却先吃掉大半屏。数字直接读，逐条明细进抽屉；在途时下面那根细进度条是这一带
+        * 唯一会动的东西。
+        */}
+      {importedStories.length > 0 || latestImport !== null ? (
+        <section className="import-snapshot">
+          <div className="import-snapshot__row">
+            <div className="import-snapshot__metric">
+              <span className="import-snapshot__value">{importedStories.length}</span>
+              <span className="import-snapshot__unit">条需求已冻结</span>
+            </div>
+            <div className="import-snapshot__metric">
+              <span className="import-snapshot__value">{frozenAttachments.length}</span>
+              <span className="import-snapshot__unit">个附件已冻结</span>
+            </div>
+            {latestImport !== null ? (
+              <div className="import-snapshot__last">
+                <Tag color={IMPORT_STATUS_META[latestImport.status].color}>
+                  {IMPORT_STATUS_META[latestImport.status].label}
+                </Tag>
+                <Text>
+                  {latestImport.workspace_name}
+                  {latestImport.release_window ? ` / ${latestImport.release_window}` : ''}
+                </Text>
+                <Text type="secondary">
+                  上次勾选 {latestImport.stories_total} 条，冻结 {latestImport.stories_committed} 条，附件{' '}
+                  {latestImport.attachments_stored} 个
+                  {latestImport.attachments_failed > 0
+                    ? `，${latestImport.attachments_failed} 个没取到`
+                    : ''}
+                </Text>
+              </div>
+            ) : null}
+            {failedCount > 0 ? (
+              /*
+               * 失败只在这里露一个可点的小标记。
+               *
+               * 原来是一整块黄色 Alert 铺满整行，写着 LINKY_IMPORT_STORY_* 原始码 ——
+               * 占的面积和它携带的信息量完全不成比例，而抽屉里本来就逐条列了编号。
+               * 这里只回答"有几条、什么原因"，点进去才看名单。
+               */
+              <Tooltip
+                title={failureGroups
+                  .map(
+                    (group) =>
+                      `${String(group.storyCodes.length)} 条 · ${describeLinkyError(`${group.code} ${group.message}`)}`,
+                  )
+                  .join('\n')}
               >
-                {latestImport.status}
-              </Tag>
-            </Text>
-            {importing ? (
-              <Progress
-                percent={
-                  latestImport.stories_total === 0
-                    ? 0
-                    : Math.round((latestImport.stories_committed / latestImport.stories_total) * 100)
-                }
-                status="active"
-              />
+                <Tag
+                  color="warning"
+                  className="import-snapshot__warning"
+                  onClick={() => setSnapshotOpen(true)}
+                >
+                  {failedCount} 条未导入
+                </Tag>
+              </Tooltip>
             ) : null}
-            {latestImport.error_code ? (
-              <Alert
-                type="error"
-                showIcon
-                title={`导入失败：${latestImport.error_code}`}
-                description={latestImport.error_message ?? ''}
-              />
+            {importedStories.length > 0 || failedCount > 0 ? (
+              <Button
+                size="small"
+                className="import-snapshot__action"
+                onClick={() => setSnapshotOpen(true)}
+              >
+                查看清单
+              </Button>
             ) : null}
-            {latestImport.stories_failed.length > 0 ? (
-              <Alert
-                type="warning"
-                showIcon
-                title={`${latestImport.stories_failed.length} 条需求没有导入`}
-                description={
-                  <Space direction="vertical" size={2}>
-                    {latestImport.stories_failed.slice(0, 10).map((failure) => (
-                      <span key={failure.story_code}>
-                        {failure.story_code}：{failure.code} {failure.message}
-                      </span>
-                    ))}
-                  </Space>
-                }
-              />
-            ) : null}
-          </Space>
-        </Card>
+          </div>
+          {importing ? <Progress percent={importPercent} status="active" size="small" /> : null}
+        </section>
       ) : null}
 
-      {importedStories.length > 0 ? (
-        <Card title={`本批次已冻结 ${importedStories.length} 条需求`}>
-          <Space direction="vertical" size="small" className="full-width">
-            <Text type="secondary">
-              附件 {attachmentsQuery.data?.length ?? 0} 个已随批次冻结（按 sha256 对账）；分析时会物化到
-              Agent 的 workspace 的 requirements/ 目录。
-            </Text>
-            <Table
-              rowKey="id"
-              size="small"
-              pagination={{ pageSize: 10 }}
-              dataSource={importedStories}
-              columns={[
-                { title: '编码', dataIndex: 'story_code', width: 150 },
-                { title: '名称', dataIndex: 'story_name', ellipsis: true },
-                { title: '开发人员', dataIndex: 'owners_text', width: 140 },
-                { title: '发布窗口', dataIndex: 'release_window', width: 120 },
-                {
-                  title: '正文',
-                  width: 90,
-                  render: (_: unknown, row: ReviewStory) =>
-                    row.requirement_detail && row.requirement_detail.trim() !== '' ? (
-                      <Tag color="green">有</Tag>
-                    ) : (
-                      <Tag color="orange">无</Tag>
-                    ),
-                },
-                {
-                  title: '来源',
-                  dataIndex: 'source_system',
-                  width: 90,
-                  render: (value: string) => <Tag>{value}</Tag>,
-                },
-              ]}
-            />
-          </Space>
-        </Card>
+      {latestImport?.error_code ? (
+        <Alert
+          type="error"
+          showIcon
+          title="导入失败"
+          description={describeLinkyError(`${latestImport.error_code} ${latestImport.error_message ?? ''}`)}
+        />
       ) : null}
 
       {readOnly ? null : (
-        <>
-          <Alert
-            type="info"
-            showIcon
-            title="选定这批需求的来源"
-            description="先选项目组（必选，它定义了这批需求属于谁），再按发布窗口收窄，然后勾选需求。点「确认导入」后平台才去取正文与附件并冻结进本批次——在那之前什么都不会入库。同一条需求重复导入是更新而不是新增。"
-          />
-          <LinkyStoryPicker
-            selectable
-            selectedCodes={selected}
-            onSelectionChange={(codes) => setSelected(codes)}
-            onScopeChange={setScope}
-            actions={
-              <Space>
-                <Text type="secondary">
-                  {scope.workspaceName === null ? '未选项目组' : scope.workspaceName}
-                  {scope.releaseWindow ? ` / ${scope.releaseWindow}` : ''} · 已选 {selected.length} 条
-                </Text>
-                <Button
-                  type="primary"
-                  disabled={selected.length === 0 || scope.workspaceName === null || importing}
-                  loading={importMutation.isPending || importing}
-                  onClick={() => importMutation.mutate()}
-                >
-                  确认导入并冻结
-                </Button>
-              </Space>
-            }
-          />
-        </>
+        <LinkyStoryPicker
+          selectable
+          selectedCodes={selected}
+          onSelectionChange={(codes) => setSelected(codes)}
+          onScopeChange={setScope}
+          actions={
+            <Space>
+              <Text type="secondary">
+                {scope.workspaceName === null ? '未选项目组' : scope.workspaceName}
+                {scope.releaseWindow ? ` / ${scope.releaseWindow}` : ''} · 已选 {selected.length} 条
+              </Text>
+              <Button
+                type="primary"
+                disabled={selected.length === 0 || scope.workspaceName === null || importing}
+                loading={importMutation.isPending || importing}
+                onClick={() => importMutation.mutate()}
+              >
+                确认导入并冻结
+              </Button>
+            </Space>
+          }
+        />
       )}
-    </Space>
+
+      <Drawer
+        width={880}
+        open={snapshotOpen}
+        onClose={() => setSnapshotOpen(false)}
+        title="本批次的需求快照"
+      >
+        <Space direction="vertical" size="large" className="full-width">
+          {failureGroups.length > 0 ? (
+            <div>
+              <Text strong>上次导入没通过的 {failedCount} 条</Text>
+              <Space direction="vertical" size={10} className="full-width mt-sm">
+                {failureGroups.map((group) => (
+                  <div key={group.code}>
+                    <Text type="secondary">{describeLinkyError(`${group.code} ${group.message}`)}</Text>
+                    <div className="import-failure-codes">
+                      {group.storyCodes.map((code) => (
+                        <Tag key={code}>{code}</Tag>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </Space>
+            </div>
+          ) : null}
+          <Table<ReviewStory>
+            rowKey="id"
+            size="small"
+            dataSource={importedStories}
+            loading={storiesQuery.isLoading || attachmentsQuery.isFetching}
+            pagination={{ pageSize: 10, size: 'small', showTotal: (total) => `共 ${total} 条` }}
+            locale={{ emptyText: <Empty description="这个批次还没有冻结任何需求" /> }}
+            columns={[
+              { title: '编码', dataIndex: 'story_code', width: 150 },
+              { title: '名称', dataIndex: 'story_name', ellipsis: true },
+              { title: '开发人员', dataIndex: 'owners_text', width: 130 },
+              { title: '发布窗口', dataIndex: 'release_window', width: 120 },
+              {
+                title: '正文',
+                width: 80,
+                render: (_: unknown, row: ReviewStory) =>
+                  row.requirement_detail && row.requirement_detail.trim() !== '' ? (
+                    <Tag color="green">有</Tag>
+                  ) : (
+                    <Tag color="orange">无</Tag>
+                  ),
+              },
+              {
+                title: '附件',
+                width: 80,
+                render: (_: unknown, row: ReviewStory) => {
+                  const count = attachmentCountByStory.get(row.id) ?? 0
+                  return count === 0 ? <Text type="secondary">—</Text> : <Text>{count} 个</Text>
+                },
+              },
+            ]}
+          />
+        </Space>
+      </Drawer>
+    </div>
   )
 }
 
+
+const IMPORT_STATUS_META: Record<
+  LinkyBatchImportRequest['status'],
+  { label: string; color: string }
+> = {
+  QUEUED: { label: '排队中', color: 'blue' },
+  RUNNING: { label: '导入中', color: 'blue' },
+  SUCCEEDED: { label: '已完成', color: 'green' },
+  FAILED: { label: '失败', color: 'red' },
+}
 
 const ACTIVE_JOB_STATUSES: AnalysisJob['status'][] = ['QUEUED', 'PREPARING_CODE', 'PREPARING_SCOPE', 'PROCESSING', 'FINALIZING']
 
@@ -1751,7 +1821,7 @@ function AutoAnalysisSection({
   const { message, modal } = AntApp.useApp()
   const queryClient = useQueryClient()
   const [supplementalModelId, setSupplementalModelId] = useState<string>()
-  const [commitWindowDays, setCommitWindowDays] = useState<14 | 21 | 28>(21)
+  const [commitWindowDays, setCommitWindowDays] = useState<7 | 14 | 21 | 28>(21)
 
   const jobQuery = useQuery({
     queryKey: ['analysis-job', batch.id],
@@ -1808,7 +1878,7 @@ function AutoAnalysisSection({
       commitWindowDays,
     }),
     onSuccess: () => {
-      message.success(`已发起精准提交分析（${String(commitWindowDays)} 天辅助窗口）`)
+      message.success(`已发起分析（${String(commitWindowDays)} 天分析窗口）`)
       invalidateAll()
     },
     onError: (error) => message.error(error.message),
@@ -1996,30 +2066,21 @@ function AutoAnalysisSection({
         </>
       ) : null}
 
-      {canManage && !hasExistingAiResult && !jobActive ? (
-        <Card size="small" className="mt-md" title="分析方式">
-          <Space direction="vertical" size={10} className="full-width">
-            <Text>精准提交分析：先按需求定位相关提交，再核对冻结版本里的最终实现。</Text>
-            <Space wrap>
-              <Text>历史漏标辅助窗口：</Text>
-              <Select<14 | 21 | 28>
-                value={commitWindowDays}
-                style={{ width: 130 }}
-                options={[
-                  { value: 14, label: '14 天' },
-                  { value: 21, label: '21 天（默认）' },
-                  { value: 28, label: '28 天' },
-                ]}
-                onChange={setCommitWindowDays}
-              />
-              <Text type="secondary">强需求号关联不受该窗口截断；任务创建后配置会冻结。</Text>
-            </Space>
-          </Space>
-        </Card>
-      ) : null}
-
       <div className="mt-md">
         <Space wrap>
+          {canManage && !hasExistingAiResult && !jobActive ? (
+            <Select<7 | 14 | 21 | 28>
+              value={commitWindowDays}
+              style={{ width: 150 }}
+              options={[
+                { value: 7, label: '分析窗口 7 天' },
+                { value: 14, label: '分析窗口 14 天' },
+                { value: 21, label: '分析窗口 21 天' },
+                { value: 28, label: '分析窗口 28 天' },
+              ]}
+              onChange={setCommitWindowDays}
+            />
+          ) : null}
           <Button
             type="primary"
             disabled={!canStart}
@@ -2028,18 +2089,10 @@ function AutoAnalysisSection({
           >
             开始分析
           </Button>
-          {jobActive ? <Tag color="processing">分析进行中，页面每 4 秒自动刷新</Tag> : null}
           {canManage && jobActive ? (
             <Button danger loading={cancelJobMutation.isPending} onClick={confirmCancelJob}>
               停止分析
             </Button>
-          ) : null}
-          {job ? (
-            <Tag color={job.analysis_context_version === 2 ? 'blue' : 'default'}>
-              {job.analysis_context_version === 2
-                ? `V1.11 精准提交 · ${String(job.commit_window_days ?? 21)} 天`
-                : '兼容全仓 V1'}
-            </Tag>
           ) : null}
         </Space>
       </div>
@@ -2051,7 +2104,7 @@ function AutoAnalysisSection({
             <Col xs={24} md={12}>
               <Statistic
                 title="代码准备"
-                value={`${snapshots.length}/4 仓库`}
+                value={`${snapshots.length}/${String(REQUIRED_REPOSITORIES.length)} 仓库`}
                 valueStyle={{ color: snapshots.length === 4 ? '#389e0d' : undefined }}
               />
             </Col>

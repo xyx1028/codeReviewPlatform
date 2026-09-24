@@ -20,7 +20,7 @@ describe('describeLinkyError', () => {
     expect(describeLinkyError(new Error('LINKY_IMPORT_TOO_MANY_STORIES'))).toContain('500')
   })
 
-  it('需求既没正文也没附件时说清为什么被跳过', () => {
+  it('旧版门禁留下的失败行仍然能解释清楚', () => {
     const text = describeLinkyError(new Error('LINKY_IMPORT_STORY_NO_REQUIREMENT_SOURCE'))
     expect(text).toContain('正文')
     expect(text).toContain('附件')

@@ -2600,3 +2600,116 @@ a.dashboard-distribution-item:focus-visible {
   background: var(--ant-color-fill-quaternary, #fafafa);
   user-select: none;
 }
+
+/* ==========================================================================
+ * 原始需求导入页 / 用户故事看板
+ *
+ * 这一组类是 JSX 早就在用、但样式表里一直缺的 —— 缺的结果是整页失去卡片边框与
+ * 间距，筛选控件被压成内容宽度，看起来像没加载 CSS。这里补齐，并统一用 antd Card
+ * 的观感（白底、12px 圆角、极淡描边），免得自绘区块和旁边真正的 Card 对不上。
+ * ========================================================================== */
+
+.import-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+.import-snapshot {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 20px;
+  background: #ffffff;
+  border: 1px solid #f0f0f0;
+  border-radius: 12px;
+}
+
+.import-snapshot__row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 28px;
+}
+
+.import-snapshot__metric {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.import-snapshot__value {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: #141414;
+}
+
+.import-snapshot__unit {
+  font-size: 13px;
+  color: rgba(0, 0, 0, 0.45);
+}
+
+/* 分隔线代替"又一张卡片"：上次导入的来源信息跟着指标走，但视觉上是另一组。 */
+.import-snapshot__last {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-left: 28px;
+  border-left: 1px solid #f0f0f0;
+  min-width: 0;
+}
+
+/* 可点的失败标记：它是抽屉入口，所以要有手型，别让人以为是死标签。 */
+.import-snapshot__warning {
+  cursor: pointer;
+  margin-inline-end: 0;
+}
+
+.import-snapshot__action {
+  margin-left: auto;
+}
+
+.story-board-card__heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.story-board-card__count {
+  font-size: 13px;
+  font-weight: 400;
+}
+
+/*
+ * 筛选条：一行放完，窄屏自动折行。
+ *
+ * 用 flex + min-width 而不是固定栅格：控件数量以后增减不用重算 span，而每个字段都有
+ * 下限宽度，不会被挤成只剩一个箭头。
+ */
+.story-filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.story-filter-bar__field {
+  flex: 1 1 150px;
+  min-width: 150px;
+}
+
+.story-filter-bar__field--wide {
+  flex: 1.4 1 200px;
+  min-width: 200px;
+}
+
+.story-filter-bar__search {
+  flex: 1.6 1 220px;
+  min-width: 200px;
+}

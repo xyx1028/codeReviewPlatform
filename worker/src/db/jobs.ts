@@ -50,7 +50,7 @@ export interface JobContext {
   total_stories: number
   /** V1.11：缺失即历史 v1，绝不能把在途旧 Job 隐式升级。 */
   analysis_context_version?: 1 | 2
-  commit_window_days?: 14 | 21 | 28
+  commit_window_days?: 7 | 14 | 21 | 28
   required_worker_scope_version?: 1 | 2
   story_input_catalog_hash?: string | null
   identity_snapshot_hash?: string | null

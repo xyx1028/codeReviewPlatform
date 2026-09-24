@@ -812,7 +812,7 @@ export async function setBatchModel(batchId: string, modelConfigId: string) {
 }
 
 export type AnalysisContextVersion = 1 | 2
-export type CommitWindowDays = 14 | 21 | 28
+export type CommitWindowDays = 7 | 14 | 21 | 28
 
 /**
  * 登录用户：创建分析任务。未传 options 时保持历史 V1 行为；V1.11 页面显式传 version=2。
@@ -2029,7 +2029,8 @@ export function describeLinkyError(error: unknown): string {
   if (raw.includes('LINKY_IMPORT_WORKSPACE_REQUIRED')) return '请先选定项目组，它定义了这批需求的来源。'
   if (raw.includes('LINKY_IMPORT_TOO_MANY_STORIES')) return '一次最多导入 500 条需求，请拆成多个批次。'
   if (raw.includes('LINKY_IMPORT_STORY_NO_REQUIREMENT_SOURCE')) {
-    return '有需求在 Linky 里既没有正文也没有附件，已跳过：AI 不能在不知道需求内容的情况下判断代码。'
+    // 2026-09-24 起不再拒绝空需求，这条只为解释历史导入记录里已有的失败行。
+    return '这条失败来自旧版门禁（需求既无正文也无附件），现在同类需求会正常导入，重新导入一次即可。'
   }
   if (raw.includes('LINKY_IMPORT_STORY_NOT_REQUESTED')) return '导入单与提交的需求不匹配，请重新发起导入。'
   if (raw.includes('LINKY_IMPORT_LEASE_LOST')) return '这张导入单已被另一个 Worker 接管，请刷新查看进度。'

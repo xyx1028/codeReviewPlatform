@@ -14,17 +14,17 @@ import {
   App as AntApp,
   Button,
   Card,
-  Col,
+  Checkbox,
   Descriptions,
   Drawer,
   Empty,
   Input,
-  Row,
   Select,
   Space,
   Spin,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
@@ -36,6 +36,7 @@ import {
   linkyApiBase,
   type LinkyLiveStory,
 } from '../../lib/linky-live'
+import { pruneSelectionToScope, selectAllState, shouldResetSelection, toggleSelectAllFiltered } from './story-selection'
 
 const { Text, Paragraph } = Typography
 
@@ -65,7 +66,6 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
   const { message } = AntApp.useApp()
   const [workspaceName, setWorkspaceName] = useState<string | null>(null)
   const [releaseWindow, setReleaseWindow] = useState<string | null>(null)
-  const [iteration, setIteration] = useState<string | null>(null)
   const [statusLabel, setStatusLabel] = useState<string | null>(null)
   const [assigneeName, setAssigneeName] = useState<string | null>(null)
   const [keyword, setKeyword] = useState('')
@@ -77,7 +77,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
    * 它就把 current 重置回第 1 页 —— 表现就是"点了第 2 页又跳回来，像翻不动"。
    */
   const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(20)
+  const [pageSize, setPageSize] = useState(10)
 
   /**
    * 一次把范围内的故事全取回来。
@@ -119,21 +119,54 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
     () => (workspaceName === null ? all : all.filter((story) => story.workspaceName === workspaceName)),
     [all, workspaceName],
   )
+  const scopedCodes = useMemo(() => new Set(scoped.map((story) => story.storyCode)), [scoped])
+  /**
+   * 没选项目组时不许勾选。
+   *
+   * 导入单按单一项目组冻结，而这个状态下的列表是跨全部工作区汇总的；放开勾选就等于允许
+   * 提交一批注定 `LINKY_NOT_FOUND` 的编号。与其事后报错，不如在这里就选不上。
+   *
+   * 理由摆在两个当事控件上：筛选里「项目组」标签旁的一行提示（告诉去哪做），以及表头那个
+   * 替换了全选框的占位符（解释为什么点不动）。都是 hover 出全文，不占版面。
+   */
+  const selectionLocked = props.selectable === true && workspaceName === null
+
+  /**
+   * 切项目组时清空历史勾选。
+   *
+   * 写在事件里而不是 effect 里：清空是"用户切了项目组"这个动作的直接后果，放进 effect
+   * 会多一轮渲染，也会让 `preserveSelectedRowKeys` 在这一轮里短暂持有跨组的编号。
+   */
+  const changeWorkspace = (value: string | null) => {
+    if (
+      props.selectable === true &&
+      shouldResetSelection({
+        previousWorkspaceName: workspaceName,
+        nextWorkspaceName: value,
+        selectedCount: props.selectedCodes?.length ?? 0,
+      })
+    ) {
+      const count = props.selectedCodes?.length ?? 0
+      props.onSelectionChange?.([], [])
+      message.info(`已清空之前勾选的 ${count} 条：一张导入单只能来自一个项目组`)
+    }
+    setWorkspaceName(value)
+    setReleaseWindow(null)
+  }
+
   const releaseWindows = useMemo(() => facet(scoped.map((story) => story.releaseWindow)), [scoped])
-  const iterations = useMemo(() => facet(scoped.map((story) => story.iteration)), [scoped])
   const statuses = useMemo(() => facet(scoped.map((story) => story.statusLabel)), [scoped])
   const assignees = useMemo(() => facet(scoped.map((story) => story.assigneeName)), [scoped])
 
   // 筛选条件变了就回第 1 页：否则会停在一个已经没有数据的页码上。
   useEffect(() => {
     setPage(1)
-  }, [workspaceName, releaseWindow, iteration, statusLabel, assigneeName, keyword])
+  }, [workspaceName, releaseWindow, statusLabel, assigneeName, keyword])
 
   const filtered = useMemo(() => {
     const needle = keyword.trim().toLowerCase()
     return scoped.filter((story) => {
       if (releaseWindow !== null && story.releaseWindow !== releaseWindow) return false
-      if (iteration !== null && story.iteration !== iteration) return false
       if (statusLabel !== null && story.statusLabel !== statusLabel) return false
       if (assigneeName !== null && story.assigneeName !== assigneeName) return false
       if (needle !== '') {
@@ -142,10 +175,35 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
       }
       return true
     })
-  }, [scoped, releaseWindow, iteration, statusLabel, assigneeName, keyword])
+  }, [scoped, releaseWindow, statusLabel, assigneeName, keyword])
 
   const options = (entries: Array<{ value: string; count: number }>) =>
     entries.map((entry) => ({ value: entry.value, label: `${entry.value}（${entry.count}）` }))
+
+  /** 除项目组以外的筛选是否生效 —— 项目组定义导入口径，不跟着「清空」一起动。 */
+  const secondaryFilterActive =
+    releaseWindow !== null || statusLabel !== null || assigneeName !== null || keyword.trim() !== ''
+
+  const clearSecondaryFilters = () => {
+    setReleaseWindow(null)
+    setStatusLabel(null)
+    setAssigneeName(null)
+    setKeyword('')
+  }
+
+  const selectedCodes = props.selectedCodes ?? []
+  const filteredCodes = useMemo(() => filtered.map((story) => story.storyCode), [filtered])
+  // 表头全选的口径是"当前筛选结果的全部条目"，与分页无关，理由见 selectAllState。
+  // 不用 useMemo：`selectedCodes` 每次渲染都是新数组，memo 永远命中不了，只是噪音。
+  const selectAll = selectAllState({ filteredCodes, selectedCodes })
+
+  /** 勾选变化的唯一出口：先按项目组裁剪，再把编号与对应故事一起回传。 */
+  const applySelection = (codes: readonly string[]) => {
+    const kept = pruneSelectionToScope(codes, scopedCodes)
+    const keptSet = new Set(kept)
+    const chosen = scoped.filter((story) => keptSet.has(story.storyCode))
+    props.onSelectionChange?.(kept, chosen)
+  }
 
   const columns: ColumnsType<LinkyLiveStory> = useMemo(
     () => [
@@ -203,10 +261,27 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
         />
       ) : null}
 
+      {/*
+        * 筛选与列表合成一张卡片。
+        *
+        * 原来是上下两张 Card：光是"筛选"这个标题、卡片内外边距和每个控件上面的文字标签，
+        * 就把真正要看的列表推下去大半屏。控件的 placeholder 已经写着「全部项目组」之类，
+        * 标签是重复信息，删掉不丢语义。
+        */}
       <Card
-        title="筛选"
+        className="story-board-card"
+        title={
+          <span className="story-board-card__heading">
+            用户故事
+            <Text type="secondary" className="story-board-card__count">
+              {filtered.length === all.length
+                ? `${String(all.length)} 条`
+                : `筛出 ${String(filtered.length)} / ${String(all.length)} 条`}
+            </Text>
+          </span>
+        }
         extra={
-          <Space>
+          <Space wrap>
             <Text type="secondary">
               {storiesQuery.isFetching
                 ? '正在从 Linky 取数…'
@@ -215,6 +290,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
                   : ''}
             </Text>
             <Button
+              size="small"
               loading={storiesQuery.isFetching}
               onClick={() => {
                 void storiesQuery.refetch()
@@ -223,85 +299,66 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
             >
               刷新
             </Button>
+            {props.actions}
           </Space>
         }
       >
-        <Row gutter={[12, 12]}>
-          <Col xs={24} md={8}>
-            <Text strong>项目组</Text>
-            <Select
-              allowClear
-              className="full-width select-with-margin"
-              placeholder="全部项目组"
-              loading={storiesQuery.isLoading}
-              value={workspaceName ?? undefined}
-              options={options(workspaces)}
-              onChange={(value) => {
-                setWorkspaceName(value ?? null)
-                setReleaseWindow(null)
-                setIteration(null)
-              }}
-            />
-          </Col>
-          <Col xs={24} md={8}>
-            <Text strong>发布窗口</Text>
-            <Select
-              allowClear
-              className="full-width select-with-margin"
-              placeholder="全部发布窗口"
-              value={releaseWindow ?? undefined}
-              options={options(releaseWindows)}
-              onChange={(value) => setReleaseWindow(value ?? null)}
-            />
-          </Col>
-          <Col xs={24} md={8}>
-            <Text strong>迭代</Text>
-            <Select
-              allowClear
-              className="full-width select-with-margin"
-              placeholder="全部迭代"
-              value={iteration ?? undefined}
-              options={options(iterations)}
-              onChange={(value) => setIteration(value ?? null)}
-            />
-          </Col>
-          <Col xs={24} md={8}>
-            <Text strong>需求状态</Text>
-            <Select
-              allowClear
-              className="full-width select-with-margin"
-              placeholder="全部状态"
-              value={statusLabel ?? undefined}
-              options={options(statuses)}
-              onChange={(value) => setStatusLabel(value ?? null)}
-            />
-          </Col>
-          <Col xs={24} md={8}>
-            <Text strong>负责人</Text>
-            <Select
-              allowClear
-              showSearch
-              className="full-width select-with-margin"
-              placeholder="全部负责人"
-              value={assigneeName ?? undefined}
-              options={options(assignees)}
-              onChange={(value) => setAssigneeName(value ?? null)}
-            />
-          </Col>
-          <Col xs={24} md={8}>
-            <Text strong>关键字</Text>
-            <Input
-              className="select-with-margin"
-              allowClear
-              placeholder="编号或标题"
-              value={keyword}
-              onChange={(event) => setKeyword(event.target.value)}
-            />
-          </Col>
-        </Row>
-      </Card>
+        {/*
+          * 筛选条用 flex 而不是 Row/Col 栅格：控件数量会变（导入页和看板页要的维度不同），
+          * 栅格得跟着重算 span，flex 自己换行就行；末尾还能塞一个「清空筛选」而不占一格。
+          */}
+        <div className="story-filter-bar">
+          <Select
+            allowClear
+            className="story-filter-bar__field story-filter-bar__field--wide"
+            placeholder={selectionLocked ? '全部项目组（勾选前必选）' : '全部项目组'}
+            status={selectionLocked ? 'warning' : undefined}
+            loading={storiesQuery.isLoading}
+            value={workspaceName ?? undefined}
+            options={options(workspaces)}
+            onChange={(value) => changeWorkspace(value ?? null)}
+          />
+          <Select
+            allowClear
+            className="story-filter-bar__field"
+            placeholder="全部发布窗口"
+            value={releaseWindow ?? undefined}
+            options={options(releaseWindows)}
+            onChange={(value) => setReleaseWindow(value ?? null)}
+          />
+          <Select
+            allowClear
+            className="story-filter-bar__field"
+            placeholder="全部状态"
+            value={statusLabel ?? undefined}
+            options={options(statuses)}
+            onChange={(value) => setStatusLabel(value ?? null)}
+          />
+          <Select
+            allowClear
+            showSearch
+            className="story-filter-bar__field"
+            placeholder="全部负责人"
+            value={assigneeName ?? undefined}
+            options={options(assignees)}
+            onChange={(value) => setAssigneeName(value ?? null)}
+          />
+          <Input
+            allowClear
+            className="story-filter-bar__search"
+            placeholder="编号或标题"
+            value={keyword}
+            onChange={(event) => setKeyword(event.target.value)}
+          />
+          {secondaryFilterActive ? (
+            <Tooltip title="项目组保持不变，其余条件清空">
+              <Button type="link" size="small" onClick={clearSecondaryFilters}>
+                清空筛选
+              </Button>
+            </Tooltip>
+          ) : null}
+        </div>
 
-      <Card title={`用户故事（${filtered.length} / ${all.length} 条）`} extra={props.actions}>
         <Table<LinkyLiveStory>
           rowKey="storyCode"
           size="small"
@@ -328,12 +385,60 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
           rowSelection={
             props.selectable
               ? {
-                  selectedRowKeys: props.selectedCodes ?? [],
+                  selectedRowKeys: selectedCodes,
                   preserveSelectedRowKeys: true,
+                  // 没选项目组时禁用勾选框，理由见 selectionLocked。
+                  getCheckboxProps: () => ({ disabled: selectionLocked }),
+                  /*
+                   * 锁定时把「全选」换成一个可悬浮的占位符。
+                   *
+                   * 原来这里是表格上方一整块 Alert：它把最该看的列表往下推，而且在"已经选了
+                   * 项目组"的常规路径上纯属噪音。把理由挂在**被禁用的那个控件本身**上，
+                   * 谁去点谁看得到，不占垂直空间。
+                   */
+                  columnTitle: selectionLocked ? (
+                    <Tooltip title="先在上方选定项目组，才能勾选需求">
+                      <span className="selection-locked-mark" aria-label="先选项目组才能勾选">
+                        —
+                      </span>
+                    </Tooltip>
+                  ) : (
+                    /*
+                     * 自己画全选框，不用 antd 默认的那个。
+                     *
+                     * 默认实现只管当前页：筛出 26 条、每页 10 条时点一次只勾 10 条，
+                     * 得翻页点三次。这里换成"整份筛选结果"的三态框——勾上就是把筛出来的
+                     * 全部选上，取消只移除筛选结果里的那些（筛选之外的同组勾选由
+                     * preserveSelectedRowKeys 留着，不该被这个动作清掉）。
+                     */
+                    <Tooltip
+                      title={
+                        selectAll.checked
+                          ? `取消已勾选的这 ${filteredCodes.length} 条`
+                          : `全选当前筛选结果的 ${filteredCodes.length} 条（不只是本页）`
+                      }
+                    >
+                      <Checkbox
+                        checked={selectAll.checked}
+                        indeterminate={selectAll.indeterminate}
+                        disabled={filteredCodes.length === 0}
+                        aria-label="全选当前筛选结果"
+                        onChange={(event) =>
+                          applySelection(
+                            toggleSelectAllFiltered({
+                              selectedCodes,
+                              filteredCodes,
+                              select: event.target.checked,
+                            }),
+                          )
+                        }
+                      />
+                    </Tooltip>
+                  ),
                   onChange: (keys) => {
-                    const codes = keys.map((key) => String(key))
-                    const chosen = all.filter((story) => codes.includes(story.storyCode))
-                    props.onSelectionChange?.(codes, chosen)
+                    // 只保留当前项目组里的编号：preserveSelectedRowKeys 留住的跨组勾选
+                    // 提交后必然逐条 LINKY_NOT_FOUND。
+                    applySelection(keys.map((key) => String(key)))
                   },
                 }
               : undefined
@@ -391,13 +496,13 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
                 description={`Linky 侧返回：${detail.teamResolveError}。平台不会编造人名，请人工确认。`}
               />
             ) : null}
-            <Card size="small" title="需求正文（实时）">
+            <Card size="small" title="需求正文">
               {detail === null || detail.requirementDetail === null ? (
                 <Alert
                   type="warning"
                   showIcon
                   title="这条需求在 Linky 里没有正文"
-                  description="导入批次时会被拒绝——AI 不能在不知道需求内容的情况下判断代码是否实现了它。请先在 Linky 里补上需求描述。"
+                  description="仍然可以导入，AI 会按标题和附件判断；但只有标题时一致性结论会明显更弱。要更准就先在 Linky 里补上需求描述或挂 PRD 附件。"
                 />
               ) : (
                 <Paragraph className="linky-requirement-detail">{detail.requirementDetail}</Paragraph>
@@ -405,7 +510,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
             </Card>
             <Card
               size="small"
-              title={`附件（${attachments.length} 个，实时）`}
+              title={`附件（${attachments.length} 个）`}
               loading={attachmentsQuery.isLoading}
             >
               {attachmentsQuery.error ? (
