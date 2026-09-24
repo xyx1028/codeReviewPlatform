@@ -383,26 +383,13 @@ a {
   line-height: 1.6;
 }
 
-.inline-hint-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
 /*
- * 跟在筛选项标签后面的一行轻提示（hover 出完整理由）。
+ * 需求正文：保留换行。
  *
- * 它替掉了表格上方那块整幅 Alert：那块东西把最该看的列表往下推，而在"已经选了项目组"的
- * 常规路径上又完全是噪音。提示贴着要操作的那个控件，占 0 像素垂直空间。
+ * Linky 的正文里有真实换行和缩进，默认的 HTML 空白折叠会把整篇压成一段，段落边界全丢。
  */
-.inline-hint-text {
-  font-size: 12px;
-  cursor: help;
-}
-
-/* 未选项目组时，替换表头「全选」勾选框的占位符。 */
-.selection-locked-mark {
-  color: rgba(0, 0, 0, 0.25);
-  cursor: help;
-  user-select: none;
+.linky-requirement-detail {
+  margin-bottom: 0 !important;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }

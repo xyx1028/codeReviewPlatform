@@ -18,6 +18,7 @@ import {
   List,
   Menu,
   Modal,
+  Popover,
   Progress,
   Radio,
   Row,
@@ -1522,9 +1523,62 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
   const { message } = AntApp.useApp()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
-  const readOnly = !canManage || batch.status === 'COMPLETED'
   const storiesQuery = useQuery({ queryKey: ['stories', batchId], queryFn: () => listStories(batchId) })
   const importedStories = storiesQuery.data ?? []
+  /** 已冻结的编号：交给选择器显示成"已勾选且不可取消"。 */
+  const frozenStoryCodes = useMemo(
+    () => (storiesQuery.data ?? []).map((story) => story.story_code),
+    [storiesQuery.data],
+  )
+  /*
+   * AI 侧的两个状态决定这一页还能不能改。
+   *
+   * queryKey 与 AI 结果管理页完全一致，所以两页共用同一份缓存，不会为了这个判断多打请求。
+   */
+  const aiImportsQuery = useQuery({ queryKey: ['ai-imports', batchId], queryFn: () => listAiImports(batchId) })
+  const analysisJobQuery = useQuery({
+    queryKey: ['analysis-job', batchId],
+    queryFn: () => getLatestAnalysisJob(batchId),
+    refetchInterval: (query) => (isActiveJob(query.state.data as AnalysisJob | null) ? 4000 : false),
+  })
+  const hasAiResult = (aiImportsQuery.data?.length ?? 0) > 0
+  const analysisRunning = isActiveJob(analysisJobQuery.data)
+  /**
+   * 这一页为什么只读 —— 四个原因的处置动作完全不同，所以不合并成一句「只读」。
+   *
+   * 没权限要去找管理员；批次已完成要去统计看板重开；而后两个是**数据一致性**约束：冻结的
+   * 需求集合就是那次 AI 分析的输入，分析在跑或已出结论之后再增删，历史结论就对不上它声称
+   * 分析过的需求了。
+   *
+   * 后端本来就拒绝：`request_linky_batch_import` 对这两种情况分别抛 BATCH_READ_ONLY 和
+   * ACTIVE_JOB_EXISTS。这里补的是页面侧 —— 之前它照常让人筛选、勾选、点「确认导入并冻结」，
+   * 直到弹出一句原始错误码才知道这件事根本不允许。
+   */
+  const readOnlyReason: { type: 'warning' | 'info'; title: string; description: string } | null =
+    !canManage
+      ? { type: 'warning', title: '无管理权限', description: '只有管理员或该批次的创建者可以导入需求。' }
+      : batch.status === 'COMPLETED'
+        ? {
+            type: 'warning',
+            title: '批次已完成',
+            description: '批次完成后默认只读，如需继续导入请先在统计看板重新打开批次。',
+          }
+        : hasAiResult
+          ? {
+              type: 'info',
+              title: '本批次已产生 AI 结果，需求不能再改',
+              description:
+                '已冻结的需求集合是那份 AI 结果的输入。需要分析另一批需求时请新建批次，不要在已有结论的批次上增删需求。',
+            }
+          : analysisRunning
+            ? {
+                type: 'info',
+                title: '分析任务正在运行，需求暂时不能改',
+                description:
+                  '分析读的是当前这份需求快照。等这次分析结束，或在「AI结果管理」里停止它之后，这一页会重新可用。',
+              }
+            : null
+  const readOnly = readOnlyReason !== null
   const attachmentsQuery = useQuery({
     queryKey: ['review-story-attachments', batchId, importedStories.length],
     queryFn: () => listReviewStoryAttachments(importedStories.map((story) => story.id)),
@@ -1573,9 +1627,9 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
       })
     },
     onSuccess: (requestId) => {
+      // 不弹提示：快照条上立刻出现「导入中 + 进度条」，比一条会自己消失的 toast 更可靠。
       setWatchedImportId(requestId)
       void latestImportQuery.refetch()
-      message.info('已提交导入：内网侧 Worker 正在取需求正文与附件')
     },
     onError: (error) => message.error(describeLinkyError(error)),
   })
@@ -1597,12 +1651,19 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
 
   return (
     <div className="import-page">
-      {readOnly ? (
+      {readOnlyReason ? (
         <Alert
-          type="warning"
+          type={readOnlyReason.type}
           showIcon
-          title={canManage ? '批次已完成' : '无管理权限'}
-          description={canManage ? '批次完成后默认只读，如需继续导入请先在统计看板重新打开批次。' : '只有管理员或该批次的创建者可以导入需求。'}
+          title={readOnlyReason.title}
+          description={readOnlyReason.description}
+          action={
+            readOnlyReason.type === 'info' ? (
+              <Button size="small" onClick={() => navigate(`/batches/${batchId}/ai-result`)}>
+                去 AI 结果管理
+              </Button>
+            ) : undefined
+          }
         />
       ) : null}
 
@@ -1663,7 +1724,7 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
                 </Tag>
               </Tooltip>
             ) : null}
-            {importedStories.length > 0 ? (
+            {!readOnly && importedStories.length > 0 ? (
               <Button
                 size="small"
                 className="import-snapshot__action"
@@ -1686,27 +1747,69 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
         />
       ) : null}
 
-      {readOnly ? null : (
+      {readOnly ? (
+        /*
+         * 只读时把已冻结的清单直接摊在页面上。
+         *
+         * 这个状态下页面只剩「这批需求是什么」一件事可看。让人先看懂一条一行的快照条、
+         * 再去点「查看清单」开抽屉，是把唯一的内容藏在一次点击后面。
+         */
+        <section className="ai-panel">
+          <div className="ai-panel__head">
+            <span className="ai-panel__title">本批次已冻结的需求</span>
+            <span className="ai-panel__meta">只读</span>
+          </div>
+          <FrozenStoryTable
+            stories={importedStories}
+            loading={storiesQuery.isLoading || attachmentsQuery.isFetching}
+            attachmentCountByStory={attachmentCountByStory}
+          />
+        </section>
+      ) : latestImportQuery.isPending || aiImportsQuery.isPending || analysisJobQuery.isPending ? (
+        /*
+         * 三条前置查询都回来之后再挂选择器。
+         *
+         * 一是选择器的初始项目组只在挂载时读一次，先挂载再补数据会让已经导入过的批次仍然
+         * 看到门禁；二是 AI 侧那两条决定这一页是否只读，缺了它们会先闪一屏"可以操作"的界面，
+         * 用户点下去才发现不允许。
+         */
+        <Spin />
+      ) : (
         <LinkyStoryPicker
           selectable
           selectedCodes={selected}
           onSelectionChange={(codes) => setSelected(codes)}
           onScopeChange={setScope}
+          /*
+           * 沿用上一张导入单的口径。
+           *
+           * 只认 `linky_batch_import` 里的 workspace_name：它是 Worker 校验过的真实 Linky 项目组。
+           * 不去拿 review_story.project_name 兜底 —— Excel 时代的批次那一列是人填的文本，
+           * 对不上任何工作区时会把列表筛成 0 条，比老老实实显示门禁更糟。
+           */
+          initialWorkspaceName={latestImport?.workspace_name ?? null}
+          initialReleaseWindow={latestImport?.release_window ?? null}
+          /*
+           * 已经冻结进本批次的需求：显示成已勾选且不可取消。
+           *
+           * 这一页只能往批次里加需求，没有移除通道 —— 取消勾选改变不了任何事实，所以不给取消。
+           */
+          lockedCodes={frozenStoryCodes}
+          /*
+           * 只把终点按钮交给选择器。
+           *
+           * 「已选 N 条 / 哪个项目组」由选择器自己渲染在勾选摘要条上 —— 那两个值本来就是它的
+           * 状态，这里再拼一遍只会两处不同步。
+           */
           actions={
-            <Space>
-              <Text type="secondary">
-                {scope.workspaceName === null ? '未选项目组' : scope.workspaceName}
-                {scope.releaseWindow ? ` / ${scope.releaseWindow}` : ''} · 已选 {selected.length} 条
-              </Text>
-              <Button
-                type="primary"
-                disabled={selected.length === 0 || scope.workspaceName === null || importing}
-                loading={importMutation.isPending || importing}
-                onClick={() => importMutation.mutate()}
-              >
-                确认导入并冻结
-              </Button>
-            </Space>
+            <Button
+              type="primary"
+              disabled={selected.length === 0 || scope.workspaceName === null || importing}
+              loading={importMutation.isPending || importing}
+              onClick={() => importMutation.mutate()}
+            >
+              确认导入并冻结
+            </Button>
           }
         />
       )}
@@ -1717,40 +1820,64 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
         onClose={() => setSnapshotOpen(false)}
         title="导入需求"
       >
-        <Table<ReviewStory>
-          rowKey="id"
-          size="small"
-          dataSource={importedStories}
+        <FrozenStoryTable
+          stories={importedStories}
           loading={storiesQuery.isLoading || attachmentsQuery.isFetching}
-          pagination={{ pageSize: 10, size: 'small', showTotal: (total) => `共 ${total} 条` }}
-          locale={{ emptyText: <Empty description="这个批次还没有冻结任何需求" /> }}
-          columns={[
-            { title: '编码', dataIndex: 'story_code', width: 150 },
-            { title: '名称', dataIndex: 'story_name', ellipsis: true },
-            { title: '开发人员', dataIndex: 'owners_text', width: 130 },
-            { title: '发布窗口', dataIndex: 'release_window', width: 120 },
-            {
-              title: '正文',
-              width: 80,
-              render: (_: unknown, row: ReviewStory) =>
-                row.requirement_detail && row.requirement_detail.trim() !== '' ? (
-                  <Tag color="green">有</Tag>
-                ) : (
-                  <Tag color="orange">无</Tag>
-                ),
-            },
-            {
-              title: '附件',
-              width: 80,
-              render: (_: unknown, row: ReviewStory) => {
-                const count = attachmentCountByStory.get(row.id) ?? 0
-                return count === 0 ? <Text type="secondary">—</Text> : <Text>{count} 个</Text>
-              },
-            },
-          ]}
+          attachmentCountByStory={attachmentCountByStory}
         />
       </Drawer>
     </div>
+  )
+}
+
+/**
+ * 已冻结需求清单。抽屉和只读态的页面主体共用同一份列定义。
+ *
+ * 之所以抽出来：这两处必须完全一致 —— 只读态摊在页面上的那份，就是「我上次到底冻结了
+ * 哪些需求」的唯一答案，跟抽屉里那份列不同会让人以为是两批数据。
+ */
+function FrozenStoryTable({
+  stories,
+  loading,
+  attachmentCountByStory,
+}: {
+  stories: ReviewStory[]
+  loading: boolean
+  attachmentCountByStory: Map<string, number>
+}) {
+  return (
+    <Table<ReviewStory>
+      rowKey="id"
+      size="small"
+      dataSource={stories}
+      loading={loading}
+      pagination={{ pageSize: 10, size: 'small', showTotal: (total) => `共 ${total} 条` }}
+      locale={{ emptyText: <Empty description="这个批次还没有冻结任何需求" /> }}
+      columns={[
+        { title: '编码', dataIndex: 'story_code', width: 150 },
+        { title: '名称', dataIndex: 'story_name', ellipsis: true },
+        { title: '开发人员', dataIndex: 'owners_text', width: 130 },
+        { title: '发布窗口', dataIndex: 'release_window', width: 120 },
+        {
+          title: '正文',
+          width: 80,
+          render: (_: unknown, row: ReviewStory) =>
+            row.requirement_detail && row.requirement_detail.trim() !== '' ? (
+              <Tag color="green">有</Tag>
+            ) : (
+              <Tag color="orange">无</Tag>
+            ),
+        },
+        {
+          title: '附件',
+          width: 80,
+          render: (_: unknown, row: ReviewStory) => {
+            const count = attachmentCountByStory.get(row.id) ?? 0
+            return count === 0 ? <Text type="secondary">—</Text> : <Text>{count} 个</Text>
+          },
+        },
+      ]}
+    />
   )
 }
 
@@ -2005,8 +2132,7 @@ function AutoAnalysisSection({
   const statusTone: 'idle' | 'running' | 'done' | 'failed' =
     job === null ? 'idle' : job.status === 'SUCCEEDED' ? 'done' : job.status === 'FAILED' ? 'failed' : 'running'
   const statusLabel = job ? analysisJobStatusLabels[job.status] ?? job.status : '未开始'
-  const satisfiedCount = preconditions.filter((item) => item.ok).length
-  const blockedCount = preconditions.length - satisfiedCount
+  const blockedCount = preconditions.filter((item) => !item.ok).length
   // 仓库总数一律读白名单长度。原来这里写死 4，而白名单有 5 个仓：结果是"全部就绪"永远
   // 不变绿，而少一个仓时"待准备"提示又已经消失。
   const snapshotTotal = REQUIRED_REPOSITORIES.length
@@ -2095,32 +2221,6 @@ function AutoAnalysisSection({
         />
       ) : null}
 
-      {!hasExistingAiResult ? (
-        /*
-         * 前置条件清单：一条一行，成立与不成立用不同的标记和底色，而不是"绿 Tag / 灰 Tag"。
-         *
-         * 灰 Tag 的问题是它既可能表示"还没满足"，也可能被读成"可选项"。这里把不满足的那几条
-         * 提到最前面并标成琥珀色 —— 用户打开这一页想知道的就是"还差什么"。
-         */
-        <div className={`analysis-checklist${canStart ? ' analysis-checklist--ready' : ''}`}>
-          <div className="analysis-checklist__head">
-            <span className="analysis-checklist__title">开始分析前的检查</span>
-            <span className="analysis-checklist__score">
-              {canStart ? '全部满足' : `${satisfiedCount}/${preconditions.length} 已满足`}
-            </span>
-          </div>
-          <ul className="analysis-checklist__items">
-            {[...preconditions].sort((a, b) => Number(a.ok) - Number(b.ok)).map((item) => (
-              <li key={item.label} className={item.ok ? 'is-ok' : 'is-blocked'}>
-                <span className="analysis-check-mark" aria-hidden="true" />
-                <span className="sr-only">{item.ok ? '已满足：' : '未满足：'}</span>
-                <span className="analysis-checklist__label">{item.label}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-
       <div className="analysis-actions">
         {canManage && !hasExistingAiResult && !jobActive ? (
           <Select<7 | 14 | 21 | 28>
@@ -2149,7 +2249,18 @@ function AutoAnalysisSection({
           </Button>
         ) : null}
         {!hasExistingAiResult && blockedCount > 0 ? (
-          <span className="analysis-actions__hint">还有 {blockedCount} 项前置条件未满足</span>
+          /*
+           * 前置条件清单整块删掉了（常规路径上它 7 条里有 6 条是绿的，纯占地方），
+           * 但"按钮为什么点不动"必须留得住 —— 未满足的那几条挂在这句提示的悬浮里。
+           */
+          <Tooltip
+            title={preconditions
+              .filter((item) => !item.ok)
+              .map((item) => item.label)
+              .join('；')}
+          >
+            <span className="analysis-actions__hint">还有 {blockedCount} 项前置条件未满足</span>
+          </Tooltip>
         ) : null}
       </div>
 
@@ -2175,69 +2286,70 @@ function AutoAnalysisSection({
                 {pendingRepositories.length > 0
                   ? `待准备：${pendingRepositories.join('、')}`
                   : '全部仓库已冻结在精确 Commit'}
+                {snapshots.length > 0 ? (
+                  /*
+                   * 仓库快照从主流程里撤掉，挪进这里的悬浮明细。
+                   *
+                   * 它是"出了问题才要核对"的东西 —— 五行 Commit 摆在页面中间，日常只是把
+                   * 真正要看的「逐需求 Agent 任务」推到屏幕外。上面那句"全部仓库已冻结在精确
+                   * Commit"已经把结论说完了，SHA 留给需要它的人点开看。
+                   */
+                  <Popover
+                    trigger="click"
+                    placement="bottomLeft"
+                    title="仓库快照"
+                    content={
+                      <Table<AnalysisRepositorySnapshot>
+                        rowKey="id"
+                        size="small"
+                        pagination={false}
+                        className="analysis-snapshot-popover"
+                        dataSource={snapshots}
+                        columns={[
+                          { title: '仓库', dataIndex: 'repository_name', width: 180 },
+                          { title: '分支', dataIndex: 'requested_branch', width: 120 },
+                          {
+                            title: 'Commit',
+                            dataIndex: 'commit_sha',
+                            width: 130,
+                            render: (sha: string) => <Text code>{sha.slice(0, 12)}</Text>,
+                          },
+                          {
+                            title: 'Subject',
+                            dataIndex: 'commit_subject',
+                            width: 280,
+                            ellipsis: true,
+                            render: (value) => value || '-',
+                          },
+                        ]}
+                      />
+                    }
+                  >
+                    <Button type="link" size="small" className="analysis-progress__detail">
+                      查看 Commit
+                    </Button>
+                  </Popover>
+                ) : null}
               </span>
             </div>
-            <div className="analysis-progress__panel">
-              <span className="analysis-progress__label">Agent 审核完成</span>
-              <span className="analysis-progress__value">
-                {agentDoneCount}
-                <span className="analysis-progress__total">/{totalStories} 条需求</span>
-              </span>
-              <Progress percent={agentPercent} size="small" showInfo={false} className="analysis-progress__bar" />
-              <span className="analysis-progress__hint">{agentPercent}% 已产出结论</span>
-            </div>
-          </div>
-
-          <div className="analysis-running">
-            <span className="analysis-running__label">处理中需求</span>
-            {processingStories.length ? (
-              <span className="analysis-running__chips">
-                {processingStories.map((task) => (
-                  <span key={task.id} className="analysis-running__chip">
-                    <span className="analysis-running__pulse" aria-hidden="true" />
-                    {taskStoryLabel(task)}
-                  </span>
-                ))}
-              </span>
-            ) : (
-              <span className="analysis-running__empty">无</span>
-            )}
-          </div>
-
-          <div className="analysis-panel">
-            <div className="analysis-panel__head">
-              <span className="analysis-panel__title">仓库快照</span>
-              <span className="analysis-panel__meta">
-                {snapshots.length}/{snapshotTotal} 已冻结
-              </span>
-            </div>
-            <Table<AnalysisRepositorySnapshot>
-              rowKey="id"
-              size="small"
-              pagination={false}
-              loading={snapshotsQuery.isLoading}
-              locale={{ emptyText: '仓库快照准备中' }}
-              dataSource={snapshots}
-              columns={[
-                { title: '仓库', dataIndex: 'repository_name', width: 200 },
-                { title: '分支', dataIndex: 'requested_branch', width: 140 },
-                {
-                  title: 'Commit',
-                  dataIndex: 'commit_sha',
-                  width: 150,
-                  render: (sha: string) => <Text code>{sha.slice(0, 12)}</Text>,
-                },
-                { title: 'Subject', dataIndex: 'commit_subject', ellipsis: true, render: (value) => value || '-' },
-              ]}
-            />
           </div>
 
           {/* 逐需求任务列表：每行提供进入 Agent 运行详情的入口（VIEWER 也可查看，只读）。 */}
           <div className="analysis-panel">
             <div className="analysis-panel__head">
               <span className="analysis-panel__title">逐需求 Agent 任务</span>
+              {/*
+                * 需求完成度只在这里出现一次。
+                *
+                * 原来上面还有一块「Agent 审核完成 2/2 · 100%」，和这张表的状态列说的是同一件事 ——
+                * 两处一起改、一起刷新，读的人还得对一遍是不是一致。留表格：它多了逐条状态和
+                * 「运行详情」入口，是那块面板给不了的。
+                */}
               <span className="analysis-panel__meta">
-                已完成 {agentDoneCount} · 处理中 {processingStories.length} · 共 {storyTasks.length}
+                已完成 {agentDoneCount}/{totalStories}
+                {processingStories.length > 0
+                  ? ` · 处理中 ${processingStories.map((task) => taskStoryLabel(task)).join('、')}`
+                  : ` · ${agentPercent}%`}
               </span>
             </div>
             <Table<AnalysisStoryTaskWithStory>
@@ -2638,7 +2750,7 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
               render: (importFileId: string | null) =>
                 importFileId ? <Tag color="blue">人工导入</Tag> : <Tag color="geekblue">AI 自动分析</Tag>,
             },
-            { title: '分析基线', render: (_value, record) => <BaselineImportDetails aiImport={record} /> },
+            { title: '分析基线', render: (_value, record) => <BaselineImportDetails aiImport={record} compact /> },
             { title: '导入时间', dataIndex: 'created_at', width: 180, render: (value) => new Date(value).toLocaleString() },
             {
               title: '操作',
@@ -3580,7 +3692,14 @@ function BaselineCommitChips({ metadata }: { metadata: BaselineCommit }) {
   )
 }
 
-function BaselineImportDetails({ aiImport }: { aiImport: AiImportRecord }) {
+/**
+ * 分析基线的展示。
+ *
+ * `compact` 是给表格单元格用的：五个仓库的 Commit chip 铺开会把一行顶成两行高，
+ * 而"哪个仓冻在哪个 SHA"是出了分歧才去核对的东西。紧凑模式下它们收进一个悬浮，
+ * 单元格只留分支、模型、时间这三件一眼要看的。
+ */
+function BaselineImportDetails({ aiImport, compact = false }: { aiImport: AiImportRecord; compact?: boolean }) {
   const modelNameById = useModelDisplayNameMap()
   const metadata = parseBaselineCommit(aiImport.baseline_commit)
   // 现在只会分析批次选定的那个分支，所以配置分支就是分析分支，只展示一个。
@@ -3605,7 +3724,22 @@ function BaselineImportDetails({ aiImport }: { aiImport: AiImportRecord }) {
         <BaselineMetaChip label="分析时间" value={aiImport.analyzed_at ? new Date(aiImport.analyzed_at).toLocaleString() : '-'} />
       </div>
       {metadata ? (
-        <BaselineCommitChips metadata={metadata} />
+        compact ? (
+          metadata.commits.length > 0 ? (
+            <Popover
+              trigger="click"
+              placement="bottomRight"
+              title="仓库基线"
+              content={<BaselineCommitChips metadata={metadata} />}
+            >
+              <Button type="link" size="small" className="baseline-meta__detail">
+                {metadata.commits.length} 个仓库 Commit
+              </Button>
+            </Popover>
+          ) : null
+        ) : (
+          <BaselineCommitChips metadata={metadata} />
+        )
       ) : aiImport.baseline_commit ? (
         <Text type="secondary" className="baseline-meta__raw">{aiImport.baseline_commit}</Text>
       ) : null}

@@ -1261,127 +1261,23 @@ a.dashboard-distribution-item:focus-visible {
 }
 
 /* 前置条件清单 */
-.analysis-checklist {
-  padding: 13px 16px 14px;
-  background: #fffdf6;
-  border: 1px solid #fae7c3;
-  border-radius: 12px;
-}
 
-.analysis-checklist--ready {
-  background: #f9fefb;
-  border-color: #d6efdd;
-}
 
-.analysis-checklist__head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-}
 
-.analysis-checklist__title {
-  color: #0f172a;
-  font-size: 13px;
-  font-weight: 650;
-}
 
-.analysis-checklist__score {
-  color: #b45309;
-  font-size: 12px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
 
-.analysis-checklist--ready .analysis-checklist__score {
-  color: #15803d;
-}
 
-.analysis-checklist__items {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
-  gap: 7px 20px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
 
-.analysis-checklist__items li {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  gap: 8px;
-  font-size: 13px;
-}
 
-.analysis-checklist__items li.is-ok {
-  color: #475569;
-}
 
-.analysis-checklist__items li.is-blocked {
-  color: #b45309;
-  font-weight: 600;
-}
 
-.analysis-checklist__label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 /* 对勾与感叹号都是纯 CSS：这个项目没有引入图标包，也不值得为两个形状引入一个。 */
-.analysis-check-mark {
-  position: relative;
-  flex: 0 0 16px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-}
 
-li.is-ok > .analysis-check-mark {
-  background: #22c55e;
-}
 
-li.is-ok > .analysis-check-mark::after {
-  content: '';
-  position: absolute;
-  top: 5px;
-  left: 4px;
-  width: 6px;
-  height: 3px;
-  border: 1.5px solid #ffffff;
-  border-top: 0;
-  border-right: 0;
-  transform: rotate(-45deg);
-}
 
-li.is-blocked > .analysis-check-mark {
-  background: #f59e0b;
-}
 
-li.is-blocked > .analysis-check-mark::before {
-  content: '';
-  position: absolute;
-  top: 3px;
-  left: 7px;
-  width: 2px;
-  height: 6px;
-  border-radius: 1px;
-  background: #ffffff;
-}
 
-li.is-blocked > .analysis-check-mark::after {
-  content: '';
-  position: absolute;
-  top: 11px;
-  left: 7px;
-  width: 2px;
-  height: 2px;
-  border-radius: 50%;
-  background: #ffffff;
-}
 
 .analysis-actions {
   display: flex;
@@ -3506,6 +3402,157 @@ li.is-blocked > .analysis-check-mark::after {
 }
 
 /*
+ * 卡片头右上角：只有取数时间和「刷新」。
+ *
+ * nowrap 是必须的 —— 原来这里是一个会换行的 Space，宽度一紧就把「刷新」两个字折成上下
+ * 两行，看起来像按钮坏了。
+ */
+.story-board-card__tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap;
+}
+
+.story-board-card__updated {
+  color: #94a3b8;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * 项目组门禁。
+ *
+ * 进导入页时不摆列表：跨全部工作区的几百条在这一页没有可操作含义，一张导入单只能来自
+ * 一个项目组。这个状态下只有一个动作，所以只给一个控件，并把它做到足够大 —— 不用去猜
+ * "是不是还要在哪里点一下"。
+ */
+.story-gate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 44px 24px 48px;
+  text-align: center;
+}
+
+.story-gate__mark {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 4px;
+  border-radius: 13px;
+  background: linear-gradient(135deg, #e6f0ff, #f5f9ff);
+  box-shadow: inset 0 0 0 1px #dbeafe;
+}
+
+/* 一个下拉箭头的抽象：两条斜线，指向"要选一个"。 */
+.story-gate__mark::after {
+  content: '';
+  position: absolute;
+  top: 16px;
+  left: 15px;
+  width: 12px;
+  height: 12px;
+  border: 2px solid #2563eb;
+  border-top: 0;
+  border-left: 0;
+  border-radius: 0 0 3px 0;
+  transform: rotate(45deg);
+}
+
+.story-gate__copy {
+  display: flex;
+  max-width: 460px;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.story-gate__title {
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.story-gate__hint {
+  color: #94a3b8;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.story-gate__select {
+  width: min(100%, 320px);
+  margin-top: 6px;
+}
+
+/*
+ * 勾选摘要条：贴着表格上沿，全选框就在正下方。
+ *
+ * 它替掉了卡片头里那串「未选项目组 · 已选 0 条 + 主按钮」—— 那一行要同时容纳取数时间、
+ * 刷新、摘要和主按钮四样东西，宽度一紧就互相挤到换行。
+ */
+.story-action-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  background: #fafbfd;
+  border: 1px solid #eef1f6;
+  border-radius: 10px;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+/* 有勾选才变蓝：颜色在这里的含义是"现在有东西等着你提交"。 */
+.story-action-bar--active {
+  background: #f5f9ff;
+  border-color: #cfe3ff;
+}
+
+.story-action-bar__summary {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  gap: 6px;
+}
+
+.story-action-bar__count {
+  color: #0f172a;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.story-action-bar--active .story-action-bar__count {
+  color: #1d4ed8;
+}
+
+.story-action-bar__label {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.story-action-bar__locked {
+  min-width: 0;
+  overflow: hidden;
+  padding-left: 12px;
+  border-left: 1px solid #e3e8f0;
+  color: #94a3b8;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.story-action-bar__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/*
  * 筛选条：一行放完，窄屏自动折行。
  *
  * 用 flex + min-width 而不是固定栅格：控件数量以后增减不用重算 span，而每个字段都有
@@ -3532,4 +3579,21 @@ li.is-blocked > .analysis-check-mark::after {
 .story-filter-bar__search {
   flex: 1.6 1 220px;
   min-width: 200px;
+}
+
+/* 悬浮里的快照表：给个下限宽度，免得 Subject 被挤成一个省略号。 */
+.analysis-snapshot-popover {
+  min-width: 680px;
+}
+
+.analysis-progress__detail {
+  padding-inline: 4px;
+  height: auto;
+}
+
+/* 紧凑模式下的"展开仓库 Commit"入口：跟在 chip 行后面，不自己占一行。 */
+.baseline-meta__detail {
+  padding-inline: 4px;
+  height: auto;
+  font-size: 12px;
 }
