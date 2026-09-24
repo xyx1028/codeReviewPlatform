@@ -76,7 +76,7 @@ begin
   -- 2 + 3. 没有分析任务时：回退到最近创建的**有 Key** 的配置 = v_new。
   --        最早的 v_old 不该赢（那是第一版的 bug），没 Key 的 v_nokey 也不该赢。
   ----------------------------------------------------------------------------
-  v_conv := public.create_code_qa_conversation('kdmanage-backend', 'release', '选型-回退');
+  v_conv := public.create_code_qa_conversation(array['kdmanage-backend'], 'release', '选型-回退');
   v_turn := public.request_code_qa_turn((v_conv ->> 'id')::uuid, '问题一');
 
   select model_config_id into v_chosen
@@ -122,7 +122,7 @@ begin
     v_tpl.harness_version
   );
 
-  v_conv := public.create_code_qa_conversation('kdmanage-backend', 'release', '选型-跟随任务');
+  v_conv := public.create_code_qa_conversation(array['kdmanage-backend'], 'release', '选型-跟随任务');
   v_turn := public.request_code_qa_turn((v_conv ->> 'id')::uuid, '问题二');
 
   select model_config_id into v_chosen
@@ -149,7 +149,7 @@ begin
     v_tpl.capability_policy_snapshot, v_tpl.harness_version
   );
 
-  v_conv := public.create_code_qa_conversation('kdmanage-backend', 'release', '选型-跳过无Key');
+  v_conv := public.create_code_qa_conversation(array['kdmanage-backend'], 'release', '选型-跳过无Key');
   v_turn := public.request_code_qa_turn((v_conv ->> 'id')::uuid, '问题三');
 
   select model_config_id into v_chosen
@@ -163,7 +163,7 @@ begin
   ----------------------------------------------------------------------------
   update public.ai_model_config set enabled = false where id in (v_old, v_new);
   -- 只剩 v_nokey 启用（有配置但没 Key）→ MODEL_SECRET_MISSING。
-  v_conv := public.create_code_qa_conversation('kdmanage-backend', 'release', '选型-无Key');
+  v_conv := public.create_code_qa_conversation(array['kdmanage-backend'], 'release', '选型-无Key');
   begin
     perform public.request_code_qa_turn((v_conv ->> 'id')::uuid, '问题四');
     perform pg_temp.assert(false, 'must fail when no usable config exists');
@@ -175,7 +175,7 @@ begin
 
   update public.ai_model_config set enabled = false where id = v_nokey;
   -- 一个启用配置都没有 → MODEL_CONFIG_NOT_FOUND。
-  v_conv := public.create_code_qa_conversation('kdmanage-backend', 'release', '选型-无配置');
+  v_conv := public.create_code_qa_conversation(array['kdmanage-backend'], 'release', '选型-无配置');
   begin
     perform public.request_code_qa_turn((v_conv ->> 'id')::uuid, '问题五');
     perform pg_temp.assert(false, 'must fail when nothing is enabled');

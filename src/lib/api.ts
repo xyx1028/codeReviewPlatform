@@ -2060,19 +2060,19 @@ export async function getCodeQaCatalog() {
 }
 
 /**
- * 新建会话。仓库与分支在这里定下，之后不能改。
+ * 新建会话。仓库集合与分支在这里定下，之后不能改。
  *
- * 不能改是刻意的：DSH 会话的历史是连续的，中途换仓库会让模型带着 A 仓的上下文解释
- * B 仓的代码。换仓库就开新会话。
+ * 可以一次选多个仓库（产品的问题经常跨前后端）。不能事后改是刻意的：DSH 会话的历史是
+ * 连续的，中途加减仓库会让已经给出的回答对应不上现在挂着的代码。要换就开新会话。
  */
 export async function createCodeQaConversation(input: {
-  repository: string
+  repositories: string[]
   branch: DefaultBranch
   title?: string | null
 }) {
   const client = requireSupabase()
   const { data, error } = await client.rpc('create_code_qa_conversation', {
-    p_repository: input.repository,
+    p_repositories: input.repositories,
     p_branch: input.branch,
     p_title: input.title ?? null,
   })
@@ -2132,6 +2132,13 @@ export function describeCodeQaRpcError(error: unknown): string {
   if (raw.includes('CODE_QA_CONVERSATION_NOT_FOUND')) return '找不到这个会话，或它不属于你。'
   if (raw.includes('CODE_QA_TURN_IN_FLIGHT')) return '这个会话还有一个问题正在回答，请等它结束。'
   if (raw.includes('CODE_QA_QUESTION_REQUIRED')) return '请先输入问题。'
+  if (raw.includes('CODE_QA_REPOSITORY_REQUIRED')) return '请至少选择一个代码仓库。'
+  if (raw.includes('CODE_QA_REPOSITORY_NOT_IN_CONVERSATION')) {
+    return '这个仓库不在当前会话的范围内。'
+  }
+  if (raw.includes('code_qa_conversation_repositories_valid')) {
+    return '选择的仓库不合法：至少一个、不能重复，且必须在平台支持的仓库列表内。'
+  }
   if (raw.includes('CODE_QA_TITLE_REQUIRED')) return '标题不能为空。'
   if (raw.includes('MODEL_CONFIG_NOT_FOUND')) {
     return '平台还没有启用任何模型配置，请联系管理员在「模型管理」里配置后再提问。'

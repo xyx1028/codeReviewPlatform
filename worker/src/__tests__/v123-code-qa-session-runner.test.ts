@@ -16,7 +16,7 @@ import {
   classifyCodeQaError,
   CODE_QA_ERROR_CODES,
   CODE_QA_MODEL_API_KEY_ENV,
-  resolveCodeQaSnapshot,
+  resolveCodeQaSnapshots,
   type CodeQaSessionDeps,
 } from '../ai/code-qa/qa-session-runner.js'
 import { SessionResumeUnsupportedError } from '../ai/acp/acp-client.js'
@@ -46,9 +46,9 @@ function claimOf(overrides: Partial<CodeQaTurnClaim> = {}): CodeQaTurnClaim {
     claim_token: 'token-1',
     conversation_id: 'conv-1',
     question: '转派后待办怎么处理？',
-    repository: 'kdmanage-backend',
+    repositories: ['kdmanage-backend'],
     branch: 'release',
-    commit_sha: null,
+    commit_shas: {},
     dsh_session_id: null,
     skill_catalog_hash: null,
     owner_id: 'owner-1',
@@ -110,11 +110,16 @@ describe('resolveCodeQaSnapshot', () => {
       jobsDb: { bindCodeQaConversationSnapshot: bind } as unknown as CodeQaSessionDeps['jobsDb'],
     })
 
-    const prepared = await resolveCodeQaSnapshot(claimOf(), claimRef, deps)
+    const prepared = await resolveCodeQaSnapshots(claimOf(), claimRef, deps)
 
     expect(atBranchHead).toHaveBeenCalledOnce()
-    expect(bind).toHaveBeenCalledWith({ ...claimRef, commitSha: HEAD_SHA })
-    expect(prepared.commitSha).toBe(HEAD_SHA)
+    expect(bind).toHaveBeenCalledWith({
+      ...claimRef,
+      repository: 'kdmanage-backend',
+      commitSha: HEAD_SHA,
+    })
+    expect(prepared).toHaveLength(1)
+    expect(prepared[0]!.commitSha).toBe(HEAD_SHA)
     // 冻结值与解析值一致时不必再取一次。
     expect(atSnapshot).not.toHaveBeenCalled()
   })
@@ -129,13 +134,13 @@ describe('resolveCodeQaSnapshot', () => {
       jobsDb: { bindCodeQaConversationSnapshot: bind } as unknown as CodeQaSessionDeps['jobsDb'],
     })
 
-    const prepared = await resolveCodeQaSnapshot(
-      claimOf({ commit_sha: FROZEN_SHA }),
+    const prepared = await resolveCodeQaSnapshots(
+      claimOf({ commit_shas: { 'kdmanage-backend': FROZEN_SHA } }),
       claimRef,
       deps,
     )
 
-    expect(prepared.commitSha).toBe(FROZEN_SHA)
+    expect(prepared[0]!.commitSha).toBe(FROZEN_SHA)
     // 这一条是整个多轮一致性的关键：重新解析会让上一轮的文件引用悄悄失效。
     expect(atBranchHead).not.toHaveBeenCalled()
     expect(bind).not.toHaveBeenCalled()
@@ -158,9 +163,9 @@ describe('resolveCodeQaSnapshot', () => {
       jobsDb: { bindCodeQaConversationSnapshot: bind } as unknown as CodeQaSessionDeps['jobsDb'],
     })
 
-    const prepared = await resolveCodeQaSnapshot(claimOf(), claimRef, deps)
+    const prepared = await resolveCodeQaSnapshots(claimOf(), claimRef, deps)
 
-    expect(prepared.commitSha).toBe(OTHER_SHA)
+    expect(prepared[0]!.commitSha).toBe(OTHER_SHA)
     expect(atSnapshot).toHaveBeenCalledWith(
       'kdmanage-backend',
       'release',
@@ -172,14 +177,14 @@ describe('resolveCodeQaSnapshot', () => {
   it('白名单外的仓库被拒（不信数据库侧的 CHECK，自己再断言一次）', async () => {
     const deps = depsOf({ prepareAtBranchHead: vi.fn(), prepareAtSnapshot: vi.fn() })
     await expect(
-      resolveCodeQaSnapshot(claimOf({ repository: 'not-a-repo' }), claimRef, deps),
+      resolveCodeQaSnapshots(claimOf({ repositories: ['not-a-repo'] }), claimRef, deps),
     ).rejects.toThrow(/repository not in whitelist/)
   })
 
   it('白名单外的分支被拒', async () => {
     const deps = depsOf({ prepareAtBranchHead: vi.fn(), prepareAtSnapshot: vi.fn() })
     await expect(
-      resolveCodeQaSnapshot(claimOf({ branch: 'main' }), claimRef, deps),
+      resolveCodeQaSnapshots(claimOf({ branch: 'main' }), claimRef, deps),
     ).rejects.toThrow(/branch not allowed/)
   })
 })

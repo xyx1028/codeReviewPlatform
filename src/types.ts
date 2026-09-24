@@ -1518,8 +1518,10 @@ export type CodeQaStage = 'QUEUED' | 'PREPARING_CODE' | 'EXPLORING' | 'GENERATIN
  * 全部字段可选：它由 Worker 写入，失败的轮次往往只有一部分键。页面必须能渲染缺席。
  */
 export interface CodeQaEvidence {
-  /** 这一轮实际使用的代码快照 commit。 */
-  commit_sha?: string
+  /** 这一轮实际使用的代码快照 commit，按仓库：`{ "<repo>": "<sha>" }`。 */
+  commit_shas?: Record<string, string>
+  /** 这一轮挂了哪些仓库。 */
+  repositories?: string[]
   /** Agent 真正读过的文件（快照内相对路径）。 */
   files_read?: string[]
   /** Agent 调用过的平台技能名。 */
@@ -1548,14 +1550,21 @@ export interface CodeQaTurn {
   finished_at: string | null
 }
 
-/** 会话列表项。仓库与分支是会话级的（见执行方案 §5.4）。 */
+/**
+ * 会话列表项。
+ *
+ * 仓库集合与分支都是**会话级**的：一个会话可以同时挂多个仓库（产品的问题经常跨
+ * 前后端），但只钉一个分支 —— 五个仓库共用同一套分支名，而"这个会话在看哪一版代码"
+ * 必须是一句话能说清的（见执行方案 §5.4）。
+ */
 export interface CodeQaConversationSummary {
   id: string
   title: string
-  repository: string
+  /** 至少一个，已去重并按名字排序。 */
+  repositories: string[]
   branch: DefaultBranch
-  /** 首轮拉取后冻结的 commit；尚未拉取时为 null。 */
-  commit_sha: string | null
+  /** 已冻结的 commit，按仓库。尚未拉取的仓库不在这个映射里。 */
+  commit_shas: Record<string, string>
   /** 是否已经有 DSH 会话可供续跑。真正的 session id 不出给浏览器。 */
   has_session: boolean
   turn_count: number

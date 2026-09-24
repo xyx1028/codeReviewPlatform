@@ -327,7 +327,7 @@ function SetupPage() {
   return (
     <main className="center-page">
       <Card className="setup-card">
-        <Title level={2}>AI 需求—代码一致性评审平台</Title>
+        <Title level={2}>代码评审平台</Title>
         <Alert
           type="warning"
           showIcon
@@ -354,7 +354,7 @@ function AuthPageLayout({
         <div className="auth-brand">
           <span className="auth-brand-mark">AI</span>
           <div>
-            <Text strong>AI 需求—代码一致性评审平台</Text>
+            <Text strong>代码评审平台</Text>
             <div className="auth-brand-caption">需求与代码的一致性质量门户</div>
           </div>
         </div>
@@ -654,7 +654,7 @@ function Shell({ session }: { session: Session }) {
         <div className="brand-lockup">
           <span className="brand-mark" aria-hidden="true">AI</span>
           <div className="brand-copy">
-            <Text className="brand">AI需求-开发-评审一致性平台</Text>
+            <Text className="brand">代码评审平台</Text>
             <Text className="subtitle">需求与代码一致性 · 智能分析</Text>
           </div>
         </div>

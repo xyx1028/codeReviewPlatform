@@ -136,7 +136,7 @@ begin
   ----------------------------------------------------------------------------
   -- 4. Worker 侧目录：形状与 get_story_task_skill_snapshot 一致。
   ----------------------------------------------------------------------------
-  v_conv := public.create_code_qa_conversation('kdmanage-backend', 'release', null);
+  v_conv := public.create_code_qa_conversation(array['kdmanage-backend'], 'release', null);
   v_conv_id := (v_conv ->> 'id')::uuid;
   v_turn := public.request_code_qa_turn(v_conv_id, '这个模块怎么实现的？');
   v_turn_id := (v_turn ->> 'id')::uuid;

@@ -301,10 +301,11 @@ export interface CodeQaTurnClaim {
   claim_token: string
   conversation_id: string
   question: string
-  repository: string
+  /** 会话选中的仓库集合（已去重并按名字排序）。至少一个。 */
+  repositories: string[]
   branch: string
-  /** 会话已冻结的 commit；null = 这是第一轮，要自己解析分支头。 */
-  commit_sha: string | null
+  /** 已冻结的 commit：`{ "<repo>": "<sha>" }`。缺某个仓库就是那个仓库还没冻结过。 */
+  commit_shas: Record<string, string>
   /** 既有 DSH 会话；null = 要 session/new。 */
   dsh_session_id: string | null
   /** 首轮物化的技能目录身份；用于判断能不能续跑。 */
@@ -328,7 +329,11 @@ export type CodeQaStageName = 'PREPARING_CODE' | 'EXPLORING' | 'GENERATING' | 'D
 
 /** 一轮回答的可核对证据。写进 code_qa_turn.evidence。 */
 export interface CodeQaEvidencePayload {
-  commit_sha?: string
+  /** 实际使用的代码基线，按仓库：`{ "<repo>": "<sha>" }`。 */
+  commit_shas?: Record<string, string>
+  /** 这一轮挂了哪些仓库。 */
+  repositories?: string[]
+  /** Agent 真正读过的文件（工作目录内相对路径；多仓库时带仓库名前缀）。 */
   files_read?: string[]
   skills_used?: string[]
   tool_call_count?: number
@@ -1981,9 +1986,19 @@ export class JobsDb {
       claim_token: claimToken,
       conversation_id: String(row.conversation_id),
       question: String(row.question ?? ''),
-      repository: String(row.repository),
+      // 逐项校验成字符串数组：一个非字符串元素会在下游变成 `undefined/<sha>` 这种路径。
+      repositories: Array.isArray(row.repositories)
+        ? row.repositories.filter((item): item is string => typeof item === 'string')
+        : [],
       branch: String(row.branch),
-      commit_sha: typeof row.commit_sha === 'string' ? row.commit_sha : null,
+      commit_shas:
+        row.commit_shas !== null && typeof row.commit_shas === 'object'
+          ? Object.fromEntries(
+              Object.entries(row.commit_shas as Record<string, unknown>).filter(
+                (entry): entry is [string, string] => typeof entry[1] === 'string',
+              ),
+            )
+          : {},
       dsh_session_id: typeof row.dsh_session_id === 'string' ? row.dsh_session_id : null,
       skill_catalog_hash:
         typeof row.skill_catalog_hash === 'string' ? row.skill_catalog_hash : null,
@@ -2035,12 +2050,13 @@ export class JobsDb {
    * 返回值继续，否则两轮之间会指向不同版本的代码（而模型不会告诉你它换了版本）。
    */
   bindCodeQaConversationSnapshot(
-    input: CodeQaTurnClaimRef & { commitSha: string },
+    input: CodeQaTurnClaimRef & { repository: string; commitSha: string },
   ): Promise<string> {
     return this.db.rpc<string>('bind_code_qa_conversation_snapshot', {
       p_turn_id: input.turnId,
       p_worker_id: input.workerId,
       p_claim_token: input.claimToken,
+      p_repository: input.repository,
       p_commit_sha: input.commitSha,
     })
   }

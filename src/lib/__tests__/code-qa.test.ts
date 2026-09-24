@@ -43,9 +43,9 @@ function detail(turns: CodeQaTurn[]): CodeQaConversationDetail {
   return {
     id: 'conv-1',
     title: '问答',
-    repository: 'kdmanage-backend',
+    repositories: ['kdmanage-backend'],
     branch: 'release',
-    commit_sha: 'a'.repeat(40),
+    commit_shas: { 'kdmanage-backend': 'a'.repeat(40) },
     has_session: true,
     created_at: '2026-09-24T10:00:00Z',
     updated_at: '2026-09-24T10:00:00Z',
@@ -154,23 +154,54 @@ describe('轮询与在飞判定', () => {
 describe('summarizeCodeQaEvidence', () => {
   it('整理出 commit、文件、技能与工具次数', () => {
     const summary = summarizeCodeQaEvidence({
-      commit_sha: 'abcdef1234567890abcdef1234567890abcdef12',
+      commit_shas: { 'kdmanage-backend': 'abcdef1234567890abcdef1234567890abcdef12' },
       files_read: ['src/a.java', 'src/b.java'],
       skills_used: ['kdmanage-backend-engineering'],
       tool_call_count: 9,
       resumed: true,
     })
-    expect(summary.shortSha).toBe('abcdef12')
+    expect(summary.commits).toEqual([
+      {
+        repository: 'kdmanage-backend',
+        commitSha: 'abcdef1234567890abcdef1234567890abcdef12',
+        shortSha: 'abcdef12',
+      },
+    ])
     expect(summary.filesRead).toHaveLength(2)
     expect(summary.skillsUsed).toEqual(['kdmanage-backend-engineering'])
     expect(summary.toolCallCount).toBe(9)
     expect(summary.resumed).toBe(true)
   })
 
+  it('跨仓库时按仓库名排序列出每个 commit（V1.23d）', () => {
+    const summary = summarizeCodeQaEvidence({
+      commit_shas: {
+        'kdmanage-frontend': 'f'.repeat(40),
+        'kdmanage-backend': 'b'.repeat(40),
+      },
+    })
+    // 排序固定，否则同一轮刷新两次会看到不同顺序。
+    expect(summary.commits.map((entry) => entry.repository)).toEqual([
+      'kdmanage-backend',
+      'kdmanage-frontend',
+    ])
+    // repositories 缺席时从 commit 映射推导，页面照样能显示范围。
+    expect(summary.repositories).toEqual(['kdmanage-backend', 'kdmanage-frontend'])
+  })
+
+  it('repositories 存在时优先用它（包含还没冻结 commit 的仓库）', () => {
+    const summary = summarizeCodeQaEvidence({
+      repositories: ['kdmanage-backend', 'kdmanage-frontend'],
+      commit_shas: { 'kdmanage-backend': 'b'.repeat(40) },
+    })
+    expect(summary.repositories).toEqual(['kdmanage-backend', 'kdmanage-frontend'])
+    expect(summary.commits).toHaveLength(1)
+  })
+
   it('证据整体缺席时返回空结构而不是抛错', () => {
     const summary = summarizeCodeQaEvidence(null)
-    expect(summary.commitSha).toBeNull()
-    expect(summary.shortSha).toBeNull()
+    expect(summary.commits).toEqual([])
+    expect(summary.repositories).toEqual([])
     expect(summary.filesRead).toEqual([])
     expect(summary.skillsUsed).toEqual([])
     expect(summary.toolCallCount).toBeNull()

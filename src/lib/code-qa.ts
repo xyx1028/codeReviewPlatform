@@ -120,9 +120,10 @@ export function codeQaPollInterval(detail: CodeQaConversationDetail | undefined)
 }
 
 export interface EvidenceSummary {
-  commitSha: string | null
-  /** 短 SHA，给页面显示。 */
-  shortSha: string | null
+  /** 每个仓库各自的代码版本：`[{ repository, commitSha, shortSha }]`，按仓库名排序。 */
+  commits: Array<{ repository: string; commitSha: string; shortSha: string }>
+  /** 这一轮挂了哪些仓库（即使还没冻结 commit 也在列）。 */
+  repositories: string[]
   filesRead: string[]
   skillsUsed: string[]
   toolCallCount: number | null
@@ -133,14 +134,27 @@ export interface EvidenceSummary {
 /**
  * 把证据 jsonb 整理成页面直接能渲染的形状。
  *
- * 全部字段都按"可能缺席"处理：证据由 Worker 写入，旧行、失败行都可能只有一部分键。
+ * 全部字段都按"可能缺席"处理：它由 Worker 写入，失败的轮次往往只有一部分键。
  * 缺席时返回空而不是抛错 —— 一个历史轮次渲染不出证据，不该让整页崩掉。
  */
 export function summarizeCodeQaEvidence(evidence: CodeQaEvidence | null | undefined): EvidenceSummary {
-  const sha = typeof evidence?.commit_sha === 'string' ? evidence.commit_sha : null
+  const shaMap = evidence?.commit_shas
+  const commits =
+    shaMap !== null && typeof shaMap === 'object'
+      ? Object.entries(shaMap)
+          .filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+          .map(([repository, commitSha]) => ({
+            repository,
+            commitSha,
+            shortSha: commitSha.slice(0, 8),
+          }))
+          .sort((a, b) => a.repository.localeCompare(b.repository))
+      : []
   return {
-    commitSha: sha,
-    shortSha: sha ? sha.slice(0, 8) : null,
+    commits,
+    repositories: Array.isArray(evidence?.repositories)
+      ? evidence.repositories.filter((item): item is string => typeof item === 'string')
+      : commits.map((entry) => entry.repository),
     filesRead: Array.isArray(evidence?.files_read)
       ? evidence.files_read.filter((item): item is string => typeof item === 'string')
       : [],

@@ -29,12 +29,24 @@ import {
 } from '../ai/code-qa/qa-prompt.js'
 import { isMutatingTool, V4_DEFAULT_POLICY } from '../ai/policy/v4-capability-policy.js'
 
+const SHA = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'
+
 const context: CodeQaPromptContext = {
-  repository: 'kdmanage-backend',
+  repositories: [{ name: 'kdmanage-backend', commitSha: SHA }],
   branch: 'release',
-  commitSha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
   skillNames: ['kdmanage-backend-engineering'],
-  workspaceHint: 'code/kdmanage-backend',
+  multiRepoWorkspace: false,
+}
+
+/** 跨仓库会话的上下文（V1.23d）。 */
+const multiContext: CodeQaPromptContext = {
+  repositories: [
+    { name: 'kdmanage-backend', commitSha: SHA },
+    { name: 'kdmanage-frontend', commitSha: 'f'.repeat(40) },
+  ],
+  branch: 'release',
+  skillNames: [],
+  multiRepoWorkspace: true,
 }
 
 describe('buildCodeQaPolicy', () => {
@@ -171,7 +183,7 @@ describe('buildCodeQaSystemPrompt', () => {
   })
 
   it('只显示短 SHA，不把全长 SHA 灌进提示词', () => {
-    expect(system).not.toContain(context.commitSha)
+    expect(system).not.toContain(SHA)
   })
 
   it('明确禁止用通用常识补全没读到的逻辑', () => {
@@ -200,6 +212,68 @@ describe('buildCodeQaSystemPrompt', () => {
 
   it('不要求 JSON 输出（回答是给人看的）', () => {
     expect(system).toContain('不要用 JSON')
+  })
+
+  /*
+   * 以下两组来自线上第一版的真实缺陷（2026-09-24）：
+   * `prompt.system` 构造了却从未注入，模型没收到任何规则，于是用英文回答、
+   * 罗列自己能做什么、不给文件路径。注入修好之后，这些要求必须真的出现在正文里。
+   */
+  it('把「用简体中文」写在最前面，而不是埋在末尾', () => {
+    expect(system).toContain('简体中文')
+    // 第一个小标题之内就必须出现，否则模型会顺着英文代码上下文回英文。
+    const head = system.slice(0, 200)
+    expect(head).toContain('简体中文')
+  })
+
+  it('中文要求出现不止一次（首尾各一次）', () => {
+    const hits = system.split('简体中文').length - 1
+    expect(hits).toBeGreaterThanOrEqual(2)
+  })
+
+  it('明确说明标识符保持原文，避免把类名也翻译了', () => {
+    expect(system).toContain('标识符保持原文')
+  })
+
+  it('明确告知 bash 不可用（否则模型会先试一次再报错）', () => {
+    expect(system).toContain('bash')
+    expect(system).toMatch(/不可用/)
+  })
+
+  it('禁止罗列自己能做什么（线上第一版正是这种回答）', () => {
+    expect(system).toContain('不要罗列你能做什么')
+  })
+})
+
+describe('buildCodeQaSystemPrompt：跨仓库会话（V1.23d）', () => {
+  const system = buildCodeQaSystemPrompt(multiContext)
+
+  it('列出全部仓库及各自的代码版本', () => {
+    expect(system).toContain('kdmanage-backend')
+    expect(system).toContain('kdmanage-frontend')
+    expect(system).toContain('共 2 个')
+    expect(system).toContain('a1b2c3d4')
+    expect(system).toContain('ffffffff')
+  })
+
+  it('说明路径要带仓库名前缀（否则模型会用 pom.xml 这种路径读不到）', () => {
+    expect(system).toContain('kdmanage-backend/pom.xml')
+    expect(system).toContain('仓库名前缀')
+  })
+
+  it('提示跨仓库检索优先用按仓库名定位的快照工具', () => {
+    expect(system).toContain('search_snapshot_code')
+    expect(system).toContain('不受目录布局影响')
+  })
+
+  it('要求说清每段结论属于哪个仓库（产品要分别找对应开发）', () => {
+    expect(system).toContain('属于哪个仓库')
+  })
+
+  it('单仓库时不出现跨仓库的那些话', () => {
+    const single = buildCodeQaSystemPrompt(context)
+    expect(single).not.toContain('跨仓库的会话')
+    expect(single).toContain('当前目录就是这个仓库的根目录')
   })
 })
 
@@ -328,5 +402,55 @@ describe('collectReadFiles', () => {
 
   it('空输入返回空数组', () => {
     expect(collectReadFiles([])).toEqual([])
+  })
+
+  /*
+   * 以下两条来自跨仓库会话的真实运行（V1.23d）：`read_snapshot_code` 的 `path` 是
+   * **仓库内**相对路径（它另有 `repository` 参数），而 `read` 的路径相对 cwd、多仓库时
+   * 自带仓库名前缀。不补前缀时证据里会同时出现
+   * `kdmanage-frontend/src/pages/X.tsx` 与 `src/pages/X.tsx` —— 既重复又歧义。
+   */
+  it('快照工具的路径补上仓库名前缀', () => {
+    const files = collectReadFiles([
+      {
+        toolName: 'read_snapshot_code',
+        arguments: { repository: 'kdmanage-frontend', path: 'src/pages/X.tsx' },
+      },
+    ])
+    expect(files).toEqual(['kdmanage-frontend/src/pages/X.tsx'])
+  })
+
+  it('路径已经带仓库名时不重复加前缀', () => {
+    const files = collectReadFiles([
+      {
+        toolName: 'read_snapshot_code',
+        arguments: {
+          repository: 'kdmanage-frontend',
+          path: 'kdmanage-frontend/src/pages/X.tsx',
+        },
+      },
+    ])
+    expect(files).toEqual(['kdmanage-frontend/src/pages/X.tsx'])
+  })
+
+  it('同一个文件经两种工具读到时只留一条（补前缀后可去重）', () => {
+    const root = '/workspace/cache/ws'
+    const files = collectReadFiles(
+      [
+        { toolName: 'read', arguments: { path: `${root}/kdmanage-frontend/src/a.tsx` } },
+        {
+          toolName: 'read_snapshot_code',
+          arguments: { repository: 'kdmanage-frontend', path: 'src/a.tsx' },
+        },
+      ],
+      { workspaceRoot: root },
+    )
+    expect(files).toEqual(['kdmanage-frontend/src/a.tsx'])
+  })
+
+  it('没有 repository 参数时不硬造前缀', () => {
+    expect(
+      collectReadFiles([{ toolName: 'read', arguments: { path: 'src/a.java' } }]),
+    ).toEqual(['src/a.java'])
   })
 })

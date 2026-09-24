@@ -83,7 +83,9 @@ function TurnStatusTag({ turn }: { turn: CodeQaTurn }) {
 function TurnEvidence({ turn }: { turn: CodeQaTurn }) {
   const evidence = summarizeCodeQaEvidence(turn.evidence)
   const hasAnything =
-    evidence.shortSha !== null || evidence.filesRead.length > 0 || evidence.skillsUsed.length > 0
+    evidence.commits.length > 0 ||
+    evidence.filesRead.length > 0 ||
+    evidence.skillsUsed.length > 0
   if (!hasAnything) return null
 
   return (
@@ -97,18 +99,31 @@ function TurnEvidence({ turn }: { turn: CodeQaTurn }) {
             <Text type="secondary" style={{ fontSize: 12 }}>
               依据：读了 {evidence.filesRead.length} 个文件
               {evidence.skillsUsed.length > 0 ? `，用了 ${evidence.skillsUsed.length} 个模块技能` : ''}
-              {evidence.shortSha ? `，代码版本 ${evidence.shortSha}` : ''}
+              {evidence.commits.length === 1
+                ? `，代码版本 ${evidence.commits[0].shortSha}`
+                : evidence.commits.length > 1
+                  ? `，跨 ${evidence.commits.length} 个仓库`
+                  : ''}
             </Text>
           ),
           children: (
             <Space direction="vertical" size={8} style={{ width: '100%' }}>
-              {evidence.commitSha ? (
-                <Text style={{ fontSize: 12 }}>
-                  <Text type="secondary">代码快照 commit：</Text>
-                  <Text code copyable={{ text: evidence.commitSha }}>
-                    {evidence.shortSha}
+              {evidence.commits.length > 0 ? (
+                <div>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    代码版本（每个仓库各自固定）：
                   </Text>
-                </Text>
+                  <ul style={{ margin: '4px 0 0', paddingLeft: 20 }}>
+                    {evidence.commits.map((entry) => (
+                      <li key={entry.repository}>
+                        <Text style={{ fontSize: 12 }}>{entry.repository} @ </Text>
+                        <Text code copyable={{ text: entry.commitSha }} style={{ fontSize: 12 }}>
+                          {entry.shortSha}
+                        </Text>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               ) : null}
               {evidence.filesRead.length > 0 ? (
                 <div>
@@ -196,7 +211,7 @@ export default function CodeQaPage() {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
-  const [createForm] = Form.useForm<{ repository: string; branch: DefaultBranch }>()
+  const [createForm] = Form.useForm<{ repositories: string[]; branch: DefaultBranch }>()
   const streamEndRef = useRef<HTMLDivElement | null>(null)
 
   const catalogQuery = useQuery({ queryKey: ['code-qa-catalog'], queryFn: getCodeQaCatalog })
@@ -326,7 +341,12 @@ export default function CodeQaPage() {
                     {item.title}
                   </Text>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    {item.repository} · {item.branch} · {item.turn_count} 问
+                    {/* 多仓库时只显示"N 个仓库"，列宽放不下全部名字。悬浮看完整清单。 */}
+                    {item.repositories.length === 1
+                      ? item.repositories[0]
+                      : `${item.repositories.length} 个仓库`}
+                    {' · '}
+                    {item.branch} · {item.turn_count} 问
                   </Text>
                 </Space>
               </List.Item>
@@ -369,15 +389,25 @@ export default function CodeQaPage() {
                 <Text strong>{detail?.title ?? '对话'}</Text>
                 {detail ? (
                   <>
-                    <Tag>{detail.repository}</Tag>
+                    {detail.repositories.map((repo) => {
+                      const sha = detail.commit_shas?.[repo]
+                      return (
+                        <Tooltip
+                          key={repo}
+                          title={
+                            sha
+                              ? `${repo} 固定看这一版代码：${sha}`
+                              : `${repo}：代码还没拉取，第一次提问时拉取并固定`
+                          }
+                        >
+                          <Tag color={sha ? 'purple' : undefined}>
+                            {repo}
+                            {sha ? ` @ ${sha.slice(0, 8)}` : ' · 待拉取'}
+                          </Tag>
+                        </Tooltip>
+                      )
+                    })}
                     <Tag color="geekblue">{detail.branch}</Tag>
-                    {detail.commit_sha ? (
-                      <Tooltip title={`这个对话固定看这一版代码：${detail.commit_sha}`}>
-                        <Tag color="purple">代码版本 {detail.commit_sha.slice(0, 8)}</Tag>
-                      </Tooltip>
-                    ) : (
-                      <Tag>代码待拉取</Tag>
-                    )}
                   </>
                 ) : null}
               </Space>
@@ -474,7 +504,7 @@ export default function CodeQaPage() {
           showIcon
           style={{ marginBottom: 16 }}
           message="仓库和分支选定后不能再改"
-          description="一个对话固定看一个分支的一版代码，这样追问时引用的文件才不会错位。要换仓库或看最新代码，新建一个对话。"
+          description="可以一次选多个仓库（比如前端 + 后端），适合问跨端联动的问题。一个对话固定看这些仓库的同一版代码，这样追问时引用的文件才不会错位。要换仓库或看最新代码，新建一个对话。"
         />
         <Form
           form={createForm}
@@ -483,20 +513,30 @@ export default function CodeQaPage() {
           onFinish={(values) => createMutation.mutate(values)}
         >
           <Form.Item
-            name="repository"
-            label="仓库"
-            rules={[{ required: true, message: '请选择仓库' }]}
+            name="repositories"
+            label="仓库（可多选）"
+            rules={[{ required: true, message: '请至少选择一个仓库' }]}
+            extra="选多个仓库时，AI 会在每段结论上说清它属于哪个仓库。"
           >
             <Select
-              placeholder="选择要问的代码仓库"
+              mode="multiple"
+              allowClear
+              placeholder="选择要问的代码仓库，可选多个"
               options={repositories.map((repo) => ({
                 value: repo.name,
                 label: `${repo.name}（${repo.gitlab_project}）`,
               }))}
               showSearch
+              // 选 3 个以上时折叠成 "+N"，否则选择框会把弹窗撑变形。
+              maxTagCount={3}
             />
           </Form.Item>
-          <Form.Item name="branch" label="分支" rules={[{ required: true, message: '请选择分支' }]}>
+          <Form.Item
+            name="branch"
+            label="分支"
+            rules={[{ required: true, message: '请选择分支' }]}
+            extra="所有选中的仓库都看这个分支。"
+          >
             <Select
               options={branches.map((branch) => ({
                 value: branch,

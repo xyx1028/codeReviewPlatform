@@ -26,7 +26,7 @@
  *      上文而用户以为它记得。
  */
 
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import {
@@ -133,8 +133,8 @@ export interface CodeQaSessionDeps {
 export interface CodeQaTurnOutcome {
   status: 'SUCCEEDED' | 'FAILED'
   errorCode?: string
-  /** 实际使用的代码基线。 */
-  commitSha?: string
+  /** 实际使用的代码基线，按仓库。 */
+  commitShas?: Record<string, string>
   answerChars?: number
   toolCallCount?: number
   resumed?: boolean
@@ -179,20 +179,26 @@ export function classifyCodeQaError(error: unknown): string {
 }
 
 /**
- * 确定这一轮使用的代码基线。
+ * 确定这一轮使用的代码基线 —— 每个选中的仓库各一份。
  *
- * 首轮解析分支头并把结果冻结到会话；后续轮直接取会话冻结的 SHA。
+ * 每个仓库独立冻结：首轮解析分支头并写进会话的 `commit_shas`，后续轮直接取已冻结值。
  * **冻结 RPC 的返回值是权威的** —— 并发下两个 Worker 可能同时解析出不同的头，
  * 数据库只让第一个写进去，第二个必须服从。
+ *
+ * 顺序按 `repositories` 给的顺序（数据库已排序），让提示词与快照挂载顺序稳定。
  */
-export async function resolveCodeQaSnapshot(
+export async function resolveCodeQaSnapshots(
   claim: CodeQaTurnClaim,
   claimRef: CodeQaTurnClaimRef,
   deps: CodeQaSessionDeps,
-): Promise<PreparedRepository> {
+): Promise<PreparedRepository[]> {
   // 双侧校验：数据库侧有 CHECK，这里再断言一次。两边都不信对方。
-  const repository: RepositoryName = assertRepositoryName(claim.repository)
   const branch: BranchName = assertBranch(claim.branch)
+  if (claim.repositories.length === 0) {
+    throw Object.assign(new Error('这个会话没有选中任何仓库'), {
+      code: CODE_QA_ERROR_CODES.SNAPSHOT_FAILED,
+    })
+  }
   const prepareOptions = {
     cacheRoot: deps.paths.codeCacheRoot,
     authMode: deps.git.authMode,
@@ -203,24 +209,99 @@ export async function resolveCodeQaSnapshot(
   const atSnapshot = deps.prepareAtSnapshot ?? prepareRepositoryAtSnapshot
   const atBranchHead = deps.prepareAtBranchHead ?? prepareRepository
 
-  if (claim.commit_sha !== null) {
-    return atSnapshot(repository, branch, claim.commit_sha, prepareOptions)
-  }
+  const prepared: PreparedRepository[] = []
+  for (const name of claim.repositories) {
+    const repository: RepositoryName = assertRepositoryName(name)
+    const frozenSha = claim.commit_shas[repository]
 
-  const prepared = await atBranchHead(repository, branch, prepareOptions)
-  const frozen = await deps.jobsDb.bindCodeQaConversationSnapshot({
-    ...claimRef,
-    commitSha: prepared.commitSha,
-  })
-  if (frozen === prepared.commitSha) return prepared
-  // 另一个 Worker 抢先冻结了别的 SHA（或会话早已冻结）。服从数据库，重新取那一版。
-  deps.logger.info('code_qa_snapshot_rebased_to_frozen', {
-    event: 'code_qa_snapshot_rebased_to_frozen',
-    conversation_id: claim.conversation_id,
-  })
-  return atSnapshot(repository, branch, frozen, prepareOptions)
+    if (frozenSha !== undefined) {
+      prepared.push(await atSnapshot(repository, branch, frozenSha, prepareOptions))
+      continue
+    }
+
+    const head = await atBranchHead(repository, branch, prepareOptions)
+    const frozen = await deps.jobsDb.bindCodeQaConversationSnapshot({
+      ...claimRef,
+      repository,
+      commitSha: head.commitSha,
+    })
+    if (frozen === head.commitSha) {
+      prepared.push(head)
+      continue
+    }
+    // 另一个 Worker 抢先冻结了别的 SHA（或会话早已冻结）。服从数据库，重新取那一版。
+    deps.logger.info('code_qa_snapshot_rebased_to_frozen', {
+      event: 'code_qa_snapshot_rebased_to_frozen',
+      conversation_id: claim.conversation_id,
+      repository,
+    })
+    prepared.push(await atSnapshot(repository, branch, frozen, prepareOptions))
+  }
+  return prepared
 }
 
+/**
+ * 为这一轮搭一个把所有选中仓库并列在一起的工作目录。
+ *
+ * ```text
+ * <attemptsRoot>/code-qa-ws-<turn>/
+ *   kdmanage-backend  -> <cacheRoot>/kdmanage-backend/<sha>   (symlink)
+ *   kdmanage-frontend -> <cacheRoot>/kdmanage-frontend/<sha>  (symlink)
+ * ```
+ *
+ * 为什么要这一层：Agent 的 cwd 只能是一个目录，而多仓库的快照分散在
+ * `<cacheRoot>/<repo>/<sha>/` 下，没有一个既包含它们、又不包含别的 SHA 的共同父目录。
+ * 把 `<cacheRoot>` 直接当 cwd 会让模型看到同一个仓库的历史快照，那比看不到更糟。
+ *
+ * 用符号链接而不是复制：这些仓库是几百 MB 的真实代码库，复制一份的代价与收益完全不成
+ * 比例，而且快照本来就是只读的。
+ *
+ * **失败不致命**：建不出链接时退回"只把第一个仓库当 cwd"，并记一行日志。此时
+ * `read` / `grep` / `glob` 只覆盖第一个仓库，但 `search_snapshot_code` /
+ * `read_snapshot_code` 这些按仓库名工作的快照工具**全部仓库照常可用** —— 它们不依赖
+ * cwd，所以多仓库问答仍然能工作，只是文件系统那一路窄一些。
+ */
+export function materializeCodeQaWorkspace(input: {
+  attemptsRoot: string
+  turnId: string
+  prepared: readonly PreparedRepository[]
+  logger: Logger
+}): { cwd: string; linked: boolean; cleanup: () => void } {
+  const single = input.prepared[0]
+  if (single === undefined) throw new Error('no prepared repository')
+  // 单仓库不需要这一层：直接用快照目录，行为与多仓库之前完全一致。
+  if (input.prepared.length === 1) {
+    return { cwd: single.path, linked: false, cleanup: () => undefined }
+  }
+
+  const root = join(input.attemptsRoot, `code-qa-ws-${input.turnId}`)
+  try {
+    rmSync(root, { recursive: true, force: true })
+    mkdirSync(root, { recursive: true, mode: 0o700 })
+    for (const repo of input.prepared) {
+      symlinkSync(repo.path, join(root, repo.repository), 'dir')
+    }
+    return {
+      cwd: root,
+      linked: true,
+      cleanup: () => {
+        // 只删链接树本身。`rmSync` 不会跟随符号链接删掉目标，所以共享的代码缓存安全。
+        try {
+          rmSync(root, { recursive: true, force: true })
+        } catch {
+          // 残留目录由周期清理回收，不影响这一轮的结论。
+        }
+      },
+    }
+  } catch (error) {
+    input.logger.warn('code_qa_workspace_link_failed', {
+      event: 'code_qa_workspace_link_failed',
+      repository_count: input.prepared.length,
+      error_message: error instanceof Error ? error.name : 'UNKNOWN',
+    })
+    return { cwd: single.path, linked: false, cleanup: () => undefined }
+  }
+}
 /**
  * 执行一轮问答。
  *
@@ -252,9 +333,10 @@ export async function runCodeQaTurn(
   const toolDetails: Array<{ toolName: string; arguments?: Record<string, unknown> }> = []
   const skillsUsed = new Set<string>()
   let resumed = false
-  let commitSha: string | null = claim.commit_sha
-  // 失败路径也要归一路径，但那时 `prepared` 可能还不存在。
+  let commitShas: Record<string, string> = { ...claim.commit_shas }
+  // 失败路径也要归一路径，但那时 workspace 可能还不存在。
   let workspaceRoot: string | null = null
+  let workspaceCleanup: (() => void) | null = null
   let reportedGenerating = false
 
   try {
@@ -263,25 +345,42 @@ export async function runCodeQaTurn(
       configuredProxy: deps.modelProxy,
     })
 
-    // 1. 代码基线。
-    const prepared = await resolveCodeQaSnapshot(claim, claimRef, deps)
-    commitSha = prepared.commitSha
-    workspaceRoot = prepared.path
+    // 1. 代码基线 —— 每个选中的仓库各一份。
+    const prepared = await resolveCodeQaSnapshots(claim, claimRef, deps)
+    commitShas = Object.fromEntries(prepared.map((r) => [r.repository, r.commitSha]))
     log.info('code_qa_snapshot_ready', {
       event: 'code_qa_snapshot_ready',
-      repository: prepared.repository,
-      branch: prepared.branch,
-      commit_sha: prepared.commitSha,
-      cached: prepared.cached,
+      branch: prepared[0]!.branch,
+      repository_count: prepared.length,
+      repositories: prepared.map((r) => r.repository),
+      commit_shas: commitShas,
+      cached_count: prepared.filter((r) => r.cached).length,
     })
 
-    const snapshots = new SnapshotStore([
-      {
-        name: prepared.repository,
-        commitSha: prepared.commitSha,
-        gitDir: prepared.path,
-      },
-    ])
+    // 多仓库需要一个把它们并列起来的 cwd；单仓库直接用快照目录。
+    const workspace = materializeCodeQaWorkspace({
+      attemptsRoot: deps.paths.agentAttemptsRoot,
+      turnId: claim.turn_id,
+      prepared,
+      logger: log,
+    })
+    workspaceRoot = workspace.cwd
+    workspaceCleanup = workspace.cleanup
+    if (prepared.length > 1) {
+      log.info('code_qa_workspace_ready', {
+        event: 'code_qa_workspace_ready',
+        repository_count: prepared.length,
+        linked: workspace.linked,
+      })
+    }
+
+    const snapshots = new SnapshotStore(
+      prepared.map((repo) => ({
+        name: repo.repository,
+        commitSha: repo.commitSha,
+        gitDir: repo.path,
+      })),
+    )
 
     // 2. 治理面。问答只有一个 Agent，所以这两个账本都是最小配置。
     const authority = new AgentAuthorityLedger({
@@ -356,14 +455,14 @@ export async function runCodeQaTurn(
         rootAgentId: identity.rootAgentId,
         rootSessionId: identity.rootSessionId,
       },
-      cwd: prepared.path,
+      cwd: workspace.cwd,
       // 会话 JSONL 与评审共用持久卷，但目录前缀独立：清理与保留期各自计算。
       sessionRoot: join(deps.paths.sessionRoot, 'code-qa'),
       broker: {
         socketPath: control.socketPath,
         requestTimeoutMs: claim.request_timeout_ms_snapshot,
       },
-      repositories: [prepared.repository],
+      repositories: prepared.map((r) => r.repository),
       skills: {
         catalogHash: deps.skills?.catalogHash ?? '',
         bundles: deps.skills?.bundles ?? [],
@@ -407,11 +506,48 @@ export async function runCodeQaTurn(
     // 6. Key。只存在于这个函数的局部变量，finally 置空，不进日志。
     apiKey = await deps.jobsDb.getModelSecretForCodeQaTurn(claimRef)
 
+    // 7. 提示词。
+    const willResume = claim.dsh_session_id !== null
+    const prompt = buildCodeQaPrompt({
+      question: claim.question,
+      context: {
+        repositories: prepared.map((r) => ({
+          name: r.repository,
+          commitSha: r.commitSha,
+        })),
+        branch: prepared[0]!.branch,
+        skillNames,
+        // 多仓库时告诉模型各仓库在 cwd 下按名字并列；单仓库时 cwd 就是仓库根。
+        multiRepoWorkspace: prepared.length > 1,
+      },
+      resumed: willResume,
+    })
+
+    /*
+     * 8. 把硬规则写进 `<dshHome>/AGENTS.md`。
+     *
+     * **这是唯一真正生效的注入通道。** `runSingleAcpTurn(options, prompt, signal)` 只收
+     * 一条 prompt 字符串，没有 system 参数 —— 早先这里构造了 `prompt.system` 却从没用过，
+     * 后果是线上第一版的回答用英文、罗列自己能做什么、不给文件路径：四条硬规则一条都没
+     * 送到模型，而没有任何错误码能发现（一次"成功"的问答，只是质量全错）。
+     *
+     * DSH 的 `agent-instructions` 插件会把用户全局 `$DSH_HOME/AGENTS.md` 作为**第一次请求
+     * 的持久基线消息**注入，会话恢复时也会对账基线 —— 正好是 system prompt 的语义。
+     * 而 `dshHome` 是 per-attempt 我们自己创建的可写目录，不用碰只读的代码快照。
+     *
+     * 续跑轮也要写：per-turn 的 dshHome 是新建的临时目录，上一轮那份随目录一起被清理了。
+     */
+    writeFileSync(join(profile.dshHome, 'AGENTS.md'), `${prompt.system}\n`, { mode: 0o600 })
+    log.info('code_qa_instructions_written', {
+      event: 'code_qa_instructions_written',
+      bytes: Buffer.byteLength(prompt.system, 'utf8'),
+    })
+
     processHandle = await (deps.startProcess ?? startAcpProcess)({
       dshHome: profile.dshHome,
       profileName: profile.profileName,
       patchPath: profile.patchPath,
-      cwd: prepared.path,
+      cwd: workspace.cwd,
       apiKeyEnvVar: CODE_QA_MODEL_API_KEY_ENV,
       apiKey,
       brokerToken: control.token,
@@ -419,20 +555,6 @@ export async function runCodeQaTurn(
       // 内网模型经宿主机代理。环境变量是唯一可行的机制（llm-pi-ai 没有 per-provider
       // 代理配置），代价见 network-mode.ts 的 hostProxyChildEnv 注释。
       ...(route.proxy ? { extraEnv: hostProxyChildEnv(route.proxy) } : {}),
-    })
-
-    // 7. 提示词。续跑的会话已经有 system 提示词，不重复注入。
-    const willResume = claim.dsh_session_id !== null
-    const prompt = buildCodeQaPrompt({
-      question: claim.question,
-      context: {
-        repository: prepared.repository,
-        branch: prepared.branch,
-        commitSha: prepared.commitSha,
-        skillNames,
-        workspaceHint: undefined,
-      },
-      resumed: willResume,
     })
 
     await deps.jobsDb
@@ -450,7 +572,7 @@ export async function runCodeQaTurn(
       turn = await (deps.runTurn ?? runSingleAcpTurn)(
         {
           process: processHandle,
-          cwd: prepared.path,
+          cwd: workspace.cwd,
           clientName: 'code-qa-worker',
           // 必须显式传空数组：默认值是 ['submit_review_result']。
           permittedTools: [...CODE_QA_PERMITTED_TOOLS],
@@ -524,8 +646,9 @@ export async function runCodeQaTurn(
     }
 
     const evidence: CodeQaEvidencePayload = {
-      commit_sha: prepared.commitSha,
-      files_read: collectReadFiles(toolDetails, { workspaceRoot: prepared.path }),
+      commit_shas: commitShas,
+      repositories: prepared.map((r) => r.repository),
+      files_read: collectReadFiles(toolDetails, { workspaceRoot: workspace.cwd }),
       skills_used: [...skillsUsed].sort(),
       tool_call_count: toolDetails.length,
       resumed: turn.resumed,
@@ -535,7 +658,7 @@ export async function runCodeQaTurn(
 
     return {
       status: 'SUCCEEDED',
-      commitSha: prepared.commitSha,
+      commitShas,
       answerChars: answer.length,
       toolCallCount: toolDetails.length,
       resumed: turn.resumed,
@@ -557,14 +680,15 @@ export async function runCodeQaTurn(
         errorCode,
         errorMessage: reason(error),
         evidence: {
-          ...(commitSha !== null ? { commit_sha: commitSha } : {}),
+          ...(Object.keys(commitShas).length > 0 ? { commit_shas: commitShas } : {}),
+          repositories: claim.repositories,
           files_read: collectReadFiles(toolDetails, { workspaceRoot: workspaceRoot ?? undefined }),
           tool_call_count: toolDetails.length,
           resumed,
         },
       })
       .catch(() => undefined)
-    return { status: 'FAILED', errorCode, ...(commitSha !== null ? { commitSha } : {}) }
+    return { status: 'FAILED', errorCode, commitShas }
   } finally {
     apiKey = null
     if (processHandle) {
@@ -572,6 +696,11 @@ export async function runCodeQaTurn(
       await processHandle.reapProcessTree().catch(() => undefined)
     }
     await broker?.close().catch(() => undefined)
+    try {
+      workspaceCleanup?.()
+    } catch {
+      // 同下：清理失败不改变结论。
+    }
     try {
       profileCleanup?.()
     } catch {
