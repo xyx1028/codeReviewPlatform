@@ -81,10 +81,17 @@ export async function materializeRequirementAttachments(input: {
   attachments: readonly FrozenRequirementAttachment[]
   storage: StoryAttachmentStorage
   logger: Logger
+  /**
+   * 已被平台占用的文件名（V1.21：`需求快照.md`）。
+   *
+   * 平台自己写进 `requirements/<story>/` 的文件不能被同名附件覆盖 —— 那会让模型读到的
+   * "需求快照"其实是上游某个附件的内容。撞名时给附件加序号，而不是拒绝附件。
+   */
+  reservedNames?: readonly string[]
 }): Promise<MaterializeRequirementAttachmentsResult> {
   const materialized: MaterializedRequirementAttachment[] = []
   const failures: RequirementAttachmentFailure[] = []
-  const usedNames = new Set<string>()
+  const usedNames = new Set<string>(input.reservedNames ?? [])
 
   for (const attachment of input.attachments) {
     try {

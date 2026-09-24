@@ -2035,3 +2035,88 @@ export SUPABASE_SERVICE_ROLE_KEY=$(supabase status -o env | grep '^SERVICE_ROLE_
 npx tsx scripts/v120-linky-e2e.mts          # 跑完删除临时批次与对象
 E2E_KEEP=1 npx tsx scripts/v120-linky-e2e.mts   # 保留，用于在页面上肉眼看
 ```
+
+---
+
+# 22. V1.21 需求全量上下文（冻结面补齐 + 需求快照文件 + 附件必读）
+
+## 22.1 先知道这三条
+
+**1）没有新表、没有新 env、没有新工具。** 一个 `create or replace` 改
+`review_story_requirement_context()`，其余全在 Worker 提示词装配里。
+`v4-capability-contract.json` 一字未动，manifest 仍是 revision 3 / 34 tools，
+新旧 Worker 可以混跑同一批次。
+
+**2）只影响之后新建的 Analysis Job。** `analysis_job_story_snapshot.requirement_context`
+与 `input_hash` 都是冻结时算一次写库、读取不重算，所以历史批次和在途 Job 的需求上下文
+保持原样，`story_input_hash` 不会漂移，Session 续跑不受影响。
+
+**3）`prompt_version` 从 `agent-review-v2` 变成 `agent-review-v2.1`。**
+监控台的"优化前后对比"靠它把两种提示词分开。看板与统计不按这个值过滤，不需要改前端。
+
+## 22.2 运行检查
+
+```bash
+# 新 attempt 的 workspace 里应当有需求快照文件（每条故事一份）
+docker exec codereviewplatform-worker-1 sh -c \
+  'ls -l /workspace/attempts/*/workspace/requirements/*/ 2>/dev/null | head'
+
+# 日志：快照写入成功
+docker logs codereviewplatform-worker-1 2>&1 | grep requirement_snapshot_materialized | tail -3
+```
+
+两个新日志事件：
+
+| 事件 | 含义 | 处置 |
+|---|---|---|
+| `requirement_snapshot_materialized` | `requirements/<story>/需求快照.md` 已落盘，附带字节数与附件数 | 无 |
+| `requirement_snapshot_unavailable` | 写快照失败（workspace 配额、磁盘）。attempt **继续**，提示词退化为只有字段投影与附件 | 查 workspace 配额；连续出现说明 `maxWorkspaceBytes` 偏小 |
+
+快照文件写不出去不让 attempt 失败：它是"更全的一份需求资料"，缺了它模型仍有提示词里的
+字段投影与附件。附件 sha256 不符仍然 fail closed，这条没有放松。
+
+## 22.3 怎么确认 AI 真的拿到了全量需求
+
+```sql
+-- 冻结面（新 Job）：这几个键在 V1.21 之前全部缺席
+select job_id, story_code,
+       requirement_context ? 'release_window'       as has_release_window,
+       requirement_context ? 'iteration'            as has_iteration,
+       requirement_context ? 'source_status'        as has_status,
+       requirement_context ? 'developers'           as has_developers,
+       requirement_context ? 'requirement_handlers' as has_req_handlers,
+       requirement_context ? 'test_handlers'        as has_test_handlers,
+       requirement_context ? 'source_fields'        as has_source_fields
+from public.analysis_job_story_snapshot
+order by created_at desc limit 10;
+```
+
+任何一列为 false 且对应的 `review_story` 列非空，就是冻结函数没生效（多半是云端没推迁移）。
+
+## 22.4 回滚
+
+没有可回滚的结构变化。需要退回旧行为时：
+
+1. 写一个新迁移把 `review_story_requirement_context()` 覆盖回 V1.20 的 5 键版本
+   （禁止编辑既有迁移文件）；
+2. Worker 回滚上一版镜像并重启。
+
+只做其中一步也是安全的：旧 Worker 读到多出来的键会忽略；新 Worker 读到少了键的旧快照，
+提示词里少几行字段，不报错。
+
+## 22.5 怎么复跑验证
+
+```bash
+# 数据库契约（自带 begin…rollback，不留数据）
+docker exec -i supabase_db_codeReviewPlatform psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  < supabase/tests/20260924082700_story_requirement_context_full_fields_test.sql
+
+# 单测：字段投影 / 快照渲染 / 真实落盘 / 提示词
+npx vitest run worker/src/__tests__/v121-requirement-context.test.ts \
+  worker/src/__tests__/v120-requirement-attachments.test.ts
+
+# 看一条真实冻结需求的全量上下文（本地库，只读）
+docker exec -i supabase_db_codeReviewPlatform psql -U postgres -d postgres -c \
+  "select jsonb_pretty(public.review_story_requirement_context(s.*)) from public.review_story s
+   where s.source_system='LINKY' order by s.created_at desc limit 1;"
+```

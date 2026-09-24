@@ -141,6 +141,30 @@ const { Title, Text, Paragraph } = Typography
 
 type AiResultMode = 'auto' | 'manual'
 
+/**
+ * 两种 AI 结果来源的文案集中放在这里。
+ *
+ * 之前 title / description 在「可选择」和「已锁定」两个分支各写一遍，改一句就得改两处，
+ * 而锁定态恰好是用户最常截图追问的那一屏。
+ */
+const AI_RESULT_MODES: Record<AiResultMode, { title: string; description: string; steps: string }> = {
+  auto: {
+    title: '自动 AI 分析',
+    description: '平台自动准备代码、检索需求并生成分析结果',
+    steps: '冻结代码快照 → 逐需求 Agent 审核 → 结论写回批次',
+  },
+  manual: {
+    title: '人工手动 AI 分析',
+    description: '下载模板交给外部 AI 填写，再上传校验并导入',
+    steps: '下载模板 → 外部 AI 填写 → 上传校验 → 确认导入',
+  },
+}
+
+const AI_RESULT_MODE_LIST = (Object.keys(AI_RESULT_MODES) as AiResultMode[]).map((value) => ({
+  value,
+  ...AI_RESULT_MODES[value],
+}))
+
 const defaultBranchOptions: { value: DefaultBranch; label: DefaultBranch }[] = [
   { value: 'feature_dev', label: 'feature_dev' },
   { value: 'feature_sit', label: 'feature_sit' },
@@ -1492,7 +1516,7 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
    * 已冻结清单走抽屉，不占页面高度。
    *
    * 这一页的主任务是"再挑一批需求"：清单是回头核对用的，无论摊开还是折叠，都要在最该
-   * 操作的列表前面垫一块东西。抽屉里还能顺带放上次导入没通过的明细，两者都是"事后查"。
+   * 操作的列表前面垫一块东西。抽屉里只放已冻结的需求本身。
    */
   const [snapshotOpen, setSnapshotOpen] = useState(false)
   const { message } = AntApp.useApp()
@@ -1531,9 +1555,7 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
     queryClient.invalidateQueries({ queryKey: ['batch-workspace', batchId] })
     queryClient.invalidateQueries({ queryKey: ['batches'] })
     if (latestImport.status === 'SUCCEEDED') {
-      message.success(
-        `已冻结 ${latestImport.stories_committed} 条需求、${latestImport.attachments_stored} 个附件`,
-      )
+      message.success(`已冻结 ${latestImport.stories_committed} 条需求`)
       navigate(`/batches/${batchId}/ai-result`)
     } else {
       message.error(`需求导入失败：${latestImport.error_code ?? ''} ${latestImport.error_message ?? ''}`)
@@ -1598,10 +1620,12 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
               <span className="import-snapshot__value">{importedStories.length}</span>
               <span className="import-snapshot__unit">条需求已冻结</span>
             </div>
-            <div className="import-snapshot__metric">
-              <span className="import-snapshot__value">{frozenAttachments.length}</span>
-              <span className="import-snapshot__unit">个附件已冻结</span>
-            </div>
+            {/*
+              * 附件数量不在这里露。
+              *
+              * 附件是平台内部为了让 Agent 读到验收口径而做的搬运，使用者的决策里用不到这个数字；
+              * 真要看某条需求带没带附件，「查看清单」抽屉里有逐条的附件列。
+              */}
             {latestImport !== null ? (
               <div className="import-snapshot__last">
                 <Tag color={IMPORT_STATUS_META[latestImport.status].color}>
@@ -1612,21 +1636,19 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
                   {latestImport.release_window ? ` / ${latestImport.release_window}` : ''}
                 </Text>
                 <Text type="secondary">
-                  上次勾选 {latestImport.stories_total} 条，冻结 {latestImport.stories_committed} 条，附件{' '}
-                  {latestImport.attachments_stored} 个
-                  {latestImport.attachments_failed > 0
-                    ? `，${latestImport.attachments_failed} 个没取到`
-                    : ''}
+                  {new Date(latestImport.finished_at ?? latestImport.created_at).toLocaleString()}
+                  {' · '}
+                  勾选 {latestImport.stories_total} 条
                 </Text>
               </div>
             ) : null}
             {failedCount > 0 ? (
               /*
-               * 失败只在这里露一个可点的小标记。
+               * 失败只在这里露一个带 Tooltip 的小标记。
                *
                * 原来是一整块黄色 Alert 铺满整行，写着 LINKY_IMPORT_STORY_* 原始码 ——
-               * 占的面积和它携带的信息量完全不成比例，而抽屉里本来就逐条列了编号。
-               * 这里只回答"有几条、什么原因"，点进去才看名单。
+               * 占的面积和它携带的信息量完全不成比例。这里只回答"有几条、什么原因"，
+               * 逐条编号已经不再展示：失败的需求本来就没进快照，重新勾选一次即可。
                */
               <Tooltip
                 title={failureGroups
@@ -1636,16 +1658,12 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
                   )
                   .join('\n')}
               >
-                <Tag
-                  color="warning"
-                  className="import-snapshot__warning"
-                  onClick={() => setSnapshotOpen(true)}
-                >
+                <Tag color="warning" className="import-snapshot__warning">
                   {failedCount} 条未导入
                 </Tag>
               </Tooltip>
             ) : null}
-            {importedStories.length > 0 || failedCount > 0 ? (
+            {importedStories.length > 0 ? (
               <Button
                 size="small"
                 className="import-snapshot__action"
@@ -1697,59 +1715,40 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
         width={880}
         open={snapshotOpen}
         onClose={() => setSnapshotOpen(false)}
-        title="本批次的需求快照"
+        title="导入需求"
       >
-        <Space direction="vertical" size="large" className="full-width">
-          {failureGroups.length > 0 ? (
-            <div>
-              <Text strong>上次导入没通过的 {failedCount} 条</Text>
-              <Space direction="vertical" size={10} className="full-width mt-sm">
-                {failureGroups.map((group) => (
-                  <div key={group.code}>
-                    <Text type="secondary">{describeLinkyError(`${group.code} ${group.message}`)}</Text>
-                    <div className="import-failure-codes">
-                      {group.storyCodes.map((code) => (
-                        <Tag key={code}>{code}</Tag>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </Space>
-            </div>
-          ) : null}
-          <Table<ReviewStory>
-            rowKey="id"
-            size="small"
-            dataSource={importedStories}
-            loading={storiesQuery.isLoading || attachmentsQuery.isFetching}
-            pagination={{ pageSize: 10, size: 'small', showTotal: (total) => `共 ${total} 条` }}
-            locale={{ emptyText: <Empty description="这个批次还没有冻结任何需求" /> }}
-            columns={[
-              { title: '编码', dataIndex: 'story_code', width: 150 },
-              { title: '名称', dataIndex: 'story_name', ellipsis: true },
-              { title: '开发人员', dataIndex: 'owners_text', width: 130 },
-              { title: '发布窗口', dataIndex: 'release_window', width: 120 },
-              {
-                title: '正文',
-                width: 80,
-                render: (_: unknown, row: ReviewStory) =>
-                  row.requirement_detail && row.requirement_detail.trim() !== '' ? (
-                    <Tag color="green">有</Tag>
-                  ) : (
-                    <Tag color="orange">无</Tag>
-                  ),
+        <Table<ReviewStory>
+          rowKey="id"
+          size="small"
+          dataSource={importedStories}
+          loading={storiesQuery.isLoading || attachmentsQuery.isFetching}
+          pagination={{ pageSize: 10, size: 'small', showTotal: (total) => `共 ${total} 条` }}
+          locale={{ emptyText: <Empty description="这个批次还没有冻结任何需求" /> }}
+          columns={[
+            { title: '编码', dataIndex: 'story_code', width: 150 },
+            { title: '名称', dataIndex: 'story_name', ellipsis: true },
+            { title: '开发人员', dataIndex: 'owners_text', width: 130 },
+            { title: '发布窗口', dataIndex: 'release_window', width: 120 },
+            {
+              title: '正文',
+              width: 80,
+              render: (_: unknown, row: ReviewStory) =>
+                row.requirement_detail && row.requirement_detail.trim() !== '' ? (
+                  <Tag color="green">有</Tag>
+                ) : (
+                  <Tag color="orange">无</Tag>
+                ),
+            },
+            {
+              title: '附件',
+              width: 80,
+              render: (_: unknown, row: ReviewStory) => {
+                const count = attachmentCountByStory.get(row.id) ?? 0
+                return count === 0 ? <Text type="secondary">—</Text> : <Text>{count} 个</Text>
               },
-              {
-                title: '附件',
-                width: 80,
-                render: (_: unknown, row: ReviewStory) => {
-                  const count = attachmentCountByStory.get(row.id) ?? 0
-                  return count === 0 ? <Text type="secondary">—</Text> : <Text>{count} 个</Text>
-                },
-              },
-            ]}
-          />
-        </Space>
+            },
+          ]}
+        />
       </Drawer>
     </div>
   )
@@ -1997,26 +1996,70 @@ function AutoAnalysisSection({
     job.execution_engine === 'deepseek-harness-acp' &&
     errorMeta.retryable
 
-  return (
-    <Card title="自动 AI 分析" className="auto-analysis-card">
-      <Row gutter={[16, 8]}>
-        <Col xs={12} md={6}><Statistic title="分支" value={batch.default_branch ?? '未选择'} /></Col>
-        <Col xs={12} md={6}><Statistic title="需求" value={`${storyCount} 条`} /></Col>
-        <Col xs={12} md={6}>
-          <Statistic title="模型" value={modelName ? `${modelDisplay} / ${modelName}` : modelDisplay} />
-        </Col>
-        <Col xs={12} md={6}>
-          <Statistic title="任务状态" value={job ? analysisJobStatusLabels[job.status] ?? job.status : '未开始'} />
-        </Col>
-      </Row>
+  /*
+   * 状态色调只有四档，并且只由 Job 状态决定。
+   *
+   * 页面上所有会变色的东西（顶边那道 3px 色条、状态药丸、脉冲点）都读同一个 CSS 变量 ——
+   * 以前是每处各自判断一次 status，改一处就会漏一处，出现"药丸说失败、进度条还是蓝的"。
+   */
+  const statusTone: 'idle' | 'running' | 'done' | 'failed' =
+    job === null ? 'idle' : job.status === 'SUCCEEDED' ? 'done' : job.status === 'FAILED' ? 'failed' : 'running'
+  const statusLabel = job ? analysisJobStatusLabels[job.status] ?? job.status : '未开始'
+  const satisfiedCount = preconditions.filter((item) => item.ok).length
+  const blockedCount = preconditions.length - satisfiedCount
+  // 仓库总数一律读白名单长度。原来这里写死 4，而白名单有 5 个仓：结果是"全部就绪"永远
+  // 不变绿，而少一个仓时"待准备"提示又已经消失。
+  const snapshotTotal = REQUIRED_REPOSITORIES.length
+  const pendingRepositories = REQUIRED_REPOSITORIES.filter(
+    (name) => !snapshots.some((snapshot) => snapshot.repository_name === name),
+  )
+  const agentPercent = totalStories ? Math.round((agentDoneCount / totalStories) * 100) : 0
 
-      <Divider />
+  return (
+    <section className={`analysis-console analysis-console--${statusTone}`}>
+      <header className="analysis-console__head">
+        <div className="analysis-console__heading">
+          <h3 className="analysis-console__title">自动 AI 分析</h3>
+          <span className="analysis-console__subtitle">平台冻结代码快照，逐条需求交给 Agent 审核</span>
+        </div>
+        <div className="analysis-console__state">
+          <span className="analysis-pill">
+            <span className="analysis-pill__dot" aria-hidden="true" />
+            {statusLabel}
+          </span>
+          {job ? (
+            <span className="analysis-console__runtime">
+              已运行 <strong>{formatDuration(job.started_at, job.finished_at)}</strong>
+            </span>
+          ) : null}
+        </div>
+      </header>
+
+      <dl className="analysis-facts">
+        <div className="analysis-facts__item">
+          <dt>代码基线分支</dt>
+          <dd className="analysis-facts__mono">{batch.default_branch ?? '未选择'}</dd>
+        </div>
+        <div className="analysis-facts__item">
+          <dt>本批次需求</dt>
+          <dd>
+            {storyCount}
+            <span className="analysis-facts__unit"> 条</span>
+          </dd>
+        </div>
+        <div className="analysis-facts__item">
+          <dt>分析模型</dt>
+          <dd title={modelName ? `${modelDisplay} / ${modelName}` : modelDisplay}>
+            {modelDisplay}
+            {modelName ? <span className="analysis-facts__unit"> / {modelName}</span> : null}
+          </dd>
+        </div>
+      </dl>
 
       {!batch.ai_model_config_id && canManage && !batchCompleted && !hasExistingAiResult ? (
         <Alert
           type="warning"
           showIcon
-          className="mb-md"
           title="该批次尚未选择分析模型"
           description={
             <Space direction="vertical" className="full-width">
@@ -2047,166 +2090,197 @@ function AutoAnalysisSection({
         <Alert
           type="error"
           showIcon
-          className="mb-md"
           title="所选模型当前不可用"
           description="该批次绑定的模型已被停用或缺少 API Key（Vault 中无记录）。请在“模型管理”中重新启用或配置密钥后再开始分析。"
         />
       ) : null}
 
       {!hasExistingAiResult ? (
-        <>
-          {/* 开始自动分析前的条件检查 */}
-          <div className="precondition-list">
-            {preconditions.map((item) => (
-              <Tag key={item.label} color={item.ok ? 'green' : 'default'} icon={undefined}>
-                {item.ok ? '✓' : '•'} {item.label}
-              </Tag>
-            ))}
+        /*
+         * 前置条件清单：一条一行，成立与不成立用不同的标记和底色，而不是"绿 Tag / 灰 Tag"。
+         *
+         * 灰 Tag 的问题是它既可能表示"还没满足"，也可能被读成"可选项"。这里把不满足的那几条
+         * 提到最前面并标成琥珀色 —— 用户打开这一页想知道的就是"还差什么"。
+         */
+        <div className={`analysis-checklist${canStart ? ' analysis-checklist--ready' : ''}`}>
+          <div className="analysis-checklist__head">
+            <span className="analysis-checklist__title">开始分析前的检查</span>
+            <span className="analysis-checklist__score">
+              {canStart ? '全部满足' : `${satisfiedCount}/${preconditions.length} 已满足`}
+            </span>
           </div>
-        </>
+          <ul className="analysis-checklist__items">
+            {[...preconditions].sort((a, b) => Number(a.ok) - Number(b.ok)).map((item) => (
+              <li key={item.label} className={item.ok ? 'is-ok' : 'is-blocked'}>
+                <span className="analysis-check-mark" aria-hidden="true" />
+                <span className="sr-only">{item.ok ? '已满足：' : '未满足：'}</span>
+                <span className="analysis-checklist__label">{item.label}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
 
-      <div className="mt-md">
-        <Space wrap>
-          {canManage && !hasExistingAiResult && !jobActive ? (
-            <Select<7 | 14 | 21 | 28>
-              value={commitWindowDays}
-              style={{ width: 150 }}
-              options={[
-                { value: 7, label: '分析窗口 7 天' },
-                { value: 14, label: '分析窗口 14 天' },
-                { value: 21, label: '分析窗口 21 天' },
-                { value: 28, label: '分析窗口 28 天' },
-              ]}
-              onChange={setCommitWindowDays}
-            />
-          ) : null}
-          <Button
-            type="primary"
-            disabled={!canStart}
-            loading={enqueueMutation.isPending}
-            onClick={() => enqueueMutation.mutate()}
-          >
-            开始分析
+      <div className="analysis-actions">
+        {canManage && !hasExistingAiResult && !jobActive ? (
+          <Select<7 | 14 | 21 | 28>
+            value={commitWindowDays}
+            className="analysis-actions__window"
+            options={[
+              { value: 7, label: '分析窗口 7 天' },
+              { value: 14, label: '分析窗口 14 天' },
+              { value: 21, label: '分析窗口 21 天' },
+              { value: 28, label: '分析窗口 28 天' },
+            ]}
+            onChange={setCommitWindowDays}
+          />
+        ) : null}
+        <Button
+          type="primary"
+          disabled={!canStart}
+          loading={enqueueMutation.isPending}
+          onClick={() => enqueueMutation.mutate()}
+        >
+          开始分析
+        </Button>
+        {canManage && jobActive ? (
+          <Button danger loading={cancelJobMutation.isPending} onClick={confirmCancelJob}>
+            停止分析
           </Button>
-          {canManage && jobActive ? (
-            <Button danger loading={cancelJobMutation.isPending} onClick={confirmCancelJob}>
-              停止分析
-            </Button>
-          ) : null}
-        </Space>
+        ) : null}
+        {!hasExistingAiResult && blockedCount > 0 ? (
+          <span className="analysis-actions__hint">还有 {blockedCount} 项前置条件未满足</span>
+        ) : null}
       </div>
 
       {job ? (
         <>
-          <Divider />
-          <Row gutter={[16, 16]}>
-            <Col xs={24} md={12}>
-              <Statistic
-                title="代码准备"
-                value={`${snapshots.length}/${String(REQUIRED_REPOSITORIES.length)} 仓库`}
-                valueStyle={{ color: snapshots.length === 4 ? '#389e0d' : undefined }}
-              />
-            </Col>
-            <Col xs={24} md={12}>
-              <Statistic title="Agent 审核完成" value={`${agentDoneCount}/${totalStories}`} />
-              <Progress
-                percent={totalStories ? Math.round((agentDoneCount / totalStories) * 100) : 0}
-                size="small"
-              />
-            </Col>
-          </Row>
+          <div className="analysis-progress">
+            <div className="analysis-progress__panel">
+              <span className="analysis-progress__label">代码准备</span>
+              <span className="analysis-progress__value">
+                {snapshots.length}
+                <span className="analysis-progress__total">/{snapshotTotal} 仓库</span>
+              </span>
+              {/* 分段条而不是百分比进度条：仓库是可数的离散对象，5 格就是 5 个仓。 */}
+              <div className="analysis-progress__segments" aria-hidden="true">
+                {REQUIRED_REPOSITORIES.map((name) => (
+                  <span
+                    key={name}
+                    className={snapshots.some((snapshot) => snapshot.repository_name === name) ? 'is-done' : ''}
+                  />
+                ))}
+              </div>
+              <span className="analysis-progress__hint">
+                {pendingRepositories.length > 0
+                  ? `待准备：${pendingRepositories.join('、')}`
+                  : '全部仓库已冻结在精确 Commit'}
+              </span>
+            </div>
+            <div className="analysis-progress__panel">
+              <span className="analysis-progress__label">Agent 审核完成</span>
+              <span className="analysis-progress__value">
+                {agentDoneCount}
+                <span className="analysis-progress__total">/{totalStories} 条需求</span>
+              </span>
+              <Progress percent={agentPercent} size="small" showInfo={false} className="analysis-progress__bar" />
+              <span className="analysis-progress__hint">{agentPercent}% 已产出结论</span>
+            </div>
+          </div>
 
-          <Row gutter={[16, 16]} className="mt-md">
-            <Col xs={24} md={12}>
-              <Text type="secondary">已运行：</Text>
-              <Text strong> {formatDuration(job.started_at, job.finished_at)}</Text>
-            </Col>
-            <Col xs={24} md={12}>
-              <Text type="secondary">处理中需求：</Text>
-              {processingStories.length ? (
-                <Space wrap size={[4, 4]}>
-                  {processingStories.map((task) => (
-                    <Tag key={task.id} color="blue">
-                      {taskStoryLabel(task)}（{storyTaskStatusLabels.RUNNING}·Agent）
-                    </Tag>
-                  ))}
-                </Space>
-              ) : (
-                <Text type="secondary"> 无</Text>
-              )}
-            </Col>
-          </Row>
+          <div className="analysis-running">
+            <span className="analysis-running__label">处理中需求</span>
+            {processingStories.length ? (
+              <span className="analysis-running__chips">
+                {processingStories.map((task) => (
+                  <span key={task.id} className="analysis-running__chip">
+                    <span className="analysis-running__pulse" aria-hidden="true" />
+                    {taskStoryLabel(task)}
+                  </span>
+                ))}
+              </span>
+            ) : (
+              <span className="analysis-running__empty">无</span>
+            )}
+          </div>
 
-          {/* 仓库快照 */}
-          <Divider titlePlacement="left" plain>仓库快照</Divider>
-          <Table<AnalysisRepositorySnapshot>
-            rowKey="id"
-            size="small"
-            pagination={false}
-            loading={snapshotsQuery.isLoading}
-            locale={{ emptyText: '仓库快照准备中' }}
-            dataSource={snapshots}
-            columns={[
-              { title: '仓库', dataIndex: 'repository_name', width: 200 },
-              { title: '分支', dataIndex: 'requested_branch', width: 140 },
-              {
-                title: 'Commit',
-                dataIndex: 'commit_sha',
-                render: (sha: string) => <Text code>{sha.slice(0, 12)}</Text>,
-              },
-              { title: 'Subject', dataIndex: 'commit_subject', render: (value) => value || '-' },
-            ]}
-          />
-          {snapshots.length > 0 && snapshots.length < 4 ? (
-            <Text type="secondary">
-              待准备仓库：{REQUIRED_REPOSITORIES.filter((name) => !snapshots.some((s) => s.repository_name === name)).join('、')}
-            </Text>
-          ) : null}
+          <div className="analysis-panel">
+            <div className="analysis-panel__head">
+              <span className="analysis-panel__title">仓库快照</span>
+              <span className="analysis-panel__meta">
+                {snapshots.length}/{snapshotTotal} 已冻结
+              </span>
+            </div>
+            <Table<AnalysisRepositorySnapshot>
+              rowKey="id"
+              size="small"
+              pagination={false}
+              loading={snapshotsQuery.isLoading}
+              locale={{ emptyText: '仓库快照准备中' }}
+              dataSource={snapshots}
+              columns={[
+                { title: '仓库', dataIndex: 'repository_name', width: 200 },
+                { title: '分支', dataIndex: 'requested_branch', width: 140 },
+                {
+                  title: 'Commit',
+                  dataIndex: 'commit_sha',
+                  width: 150,
+                  render: (sha: string) => <Text code>{sha.slice(0, 12)}</Text>,
+                },
+                { title: 'Subject', dataIndex: 'commit_subject', ellipsis: true, render: (value) => value || '-' },
+              ]}
+            />
+          </div>
 
           {/* 逐需求任务列表：每行提供进入 Agent 运行详情的入口（VIEWER 也可查看，只读）。 */}
-          <Divider titlePlacement="left" plain>逐需求 Agent 任务</Divider>
-          <Table<AnalysisStoryTaskWithStory>
-            rowKey="id"
-            size="small"
-            pagination={{
-              size: 'small',
-              defaultPageSize: 10,
-              showSizeChanger: true,
-              pageSizeOptions: [10, 20, 50],
-              showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 个需求`,
-            }}
-            loading={storyTasksQuery.isLoading}
-            locale={{ emptyText: '逐需求任务准备中' }}
-            dataSource={storyTasks}
-            columns={[
-              { title: '需求', render: (_value, task) => taskStoryLabel(task) },
-              {
-                title: 'Agent 状态',
-                dataIndex: 'agent_status',
-                width: 140,
-                filters: Object.entries(storyTaskStatusLabels).map(([value, text]) => ({ value, text })),
-                onFilter: (value, task) => task.agent_status === value,
-                render: (status: AnalysisStoryTaskWithStory['agent_status']) => (
-                  <Tag color={status === 'SUCCEEDED' ? 'green' : status === 'FAILED' ? 'red' : status === 'RUNNING' ? 'processing' : 'default'}>
-                    {storyTaskStatusLabels[status] ?? status}
-                  </Tag>
-                ),
-              },
-              {
-                title: '操作',
-                width: 120,
-                render: (_value, task) => (
-                  <Link to={`/batches/${batch.id}/agent-runs/${task.id}`}>运行详情</Link>
-                ),
-              },
-            ]}
-          />
+          <div className="analysis-panel">
+            <div className="analysis-panel__head">
+              <span className="analysis-panel__title">逐需求 Agent 任务</span>
+              <span className="analysis-panel__meta">
+                已完成 {agentDoneCount} · 处理中 {processingStories.length} · 共 {storyTasks.length}
+              </span>
+            </div>
+            <Table<AnalysisStoryTaskWithStory>
+              rowKey="id"
+              size="small"
+              pagination={{
+                size: 'small',
+                defaultPageSize: 10,
+                showSizeChanger: true,
+                pageSizeOptions: [10, 20, 50],
+                showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 个需求`,
+              }}
+              loading={storyTasksQuery.isLoading}
+              locale={{ emptyText: '逐需求任务准备中' }}
+              dataSource={storyTasks}
+              columns={[
+                { title: '需求', render: (_value, task) => taskStoryLabel(task) },
+                {
+                  title: 'Agent 状态',
+                  dataIndex: 'agent_status',
+                  width: 140,
+                  filters: Object.entries(storyTaskStatusLabels).map(([value, text]) => ({ value, text })),
+                  onFilter: (value, task) => task.agent_status === value,
+                  render: (status: AnalysisStoryTaskWithStory['agent_status']) => (
+                    <Tag color={status === 'SUCCEEDED' ? 'green' : status === 'FAILED' ? 'red' : status === 'RUNNING' ? 'processing' : 'default'}>
+                      {storyTaskStatusLabels[status] ?? status}
+                    </Tag>
+                  ),
+                },
+                {
+                  title: '操作',
+                  width: 120,
+                  render: (_value, task) => (
+                    <Link to={`/batches/${batch.id}/agent-runs/${task.id}`}>运行详情</Link>
+                  ),
+                },
+              ]}
+            />
+          </div>
 
           {/* 失败与重试 */}
           {job.status === 'FAILED' ? (
             <Alert
-              className="mt-md"
               type="error"
               showIcon
               title={`分析失败：${errorMeta.title}`}
@@ -2223,9 +2297,9 @@ function AutoAnalysisSection({
                   <Tag color={retryable ? 'green' : 'orange'}>
                     {retryable ? '处理根因后可按原 Commit 重试' : '不建议直接重试'}
                   </Tag>
-                  <details>
+                  <details className="analysis-tech-details">
                     <summary>技术详情</summary>
-                    <Space direction="vertical" size={4} className="mt-sm">
+                    <Space direction="vertical" size={4} className="mt-sm full-width">
                       <Text type="secondary">
                         错误码：<Text code>{resolvedError.code}</Text>
                         {resolvedError.originalCode && resolvedError.originalCode !== resolvedError.code
@@ -2251,11 +2325,11 @@ function AutoAnalysisSection({
           ) : null}
 
           {job.status === 'SUCCEEDED' ? (
-            <Alert className="mt-md" type="success" showIcon title="AI 自动分析已完成" description="结果已写入当前批次，可进入评审列表进行人工确认。" />
+            <Alert type="success" showIcon title="AI 自动分析已完成" description="结果已写入当前批次，可进入评审列表进行人工确认。" />
           ) : null}
         </>
       ) : null}
-    </Card>
+    </section>
   )
 }
 
@@ -2336,62 +2410,74 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
 
   const readOnly = !canManage || workspaceQuery.data.batch.status === 'COMPLETED'
   const alreadyImportedAi = Boolean(activeAiImport)
+  const parsedErrorCount = parsed?.issues.filter((issue) => issue.level === 'error').length ?? 0
 
   return (
-    <Space direction="vertical" size="large" className="page-stack">
+    <div className="ai-result-page">
       {readOnly ? <Alert type="warning" showIcon title={canManage ? '批次已完成' : '无管理权限'} description={canManage ? '批次完成后默认只读，如需继续导入或切换生效版本请先在统计看板重新打开批次。' : '只有管理员或该批次的创建者可以管理 AI 结果。'} /> : null}
       {!isSupportedDefaultBranch(workspaceQuery.data.batch.default_branch) && !alreadyImportedAi ? (
-        <Card>
-          <Alert type="info" showIcon title="请先设置代码基线分支" description="该历史批次尚未配置受支持的分支。设置后可下载 AI 模板；导入 AI 结果后不能再修改。" />
-          <Space className="select-with-margin" wrap>
-            <Select placeholder="选择代码基线分支" options={defaultBranchOptions} value={defaultBranch} onChange={setDefaultBranch} disabled={readOnly} />
-            <Button type="primary" disabled={readOnly || !defaultBranch} loading={setDefaultBranchMutation.isPending} onClick={() => setDefaultBranchMutation.mutate()}>
-              保存分支
-            </Button>
-          </Space>
-        </Card>
+        <section className="ai-panel ai-panel--setup">
+          <div className="ai-panel__head">
+            <span className="ai-panel__title">请先设置代码基线分支</span>
+            <span className="ai-panel__meta">导入 AI 结果后不可修改</span>
+          </div>
+          <div className="ai-panel__body">
+            <Text type="secondary">该历史批次尚未配置受支持的分支。设置后才能下载 AI 模板或发起自动分析。</Text>
+            <Space wrap>
+              <Select placeholder="选择代码基线分支" options={defaultBranchOptions} value={defaultBranch} onChange={setDefaultBranch} disabled={readOnly} />
+              <Button type="primary" disabled={readOnly || !defaultBranch} loading={setDefaultBranchMutation.isPending} onClick={() => setDefaultBranchMutation.mutate()}>
+                保存分支
+              </Button>
+            </Space>
+          </div>
+        </section>
       ) : null}
-      <Card
-        title={lockedResultMode ? 'AI 结果处理方式' : '选择 AI 结果处理方式'}
-        className="ai-result-mode-picker"
-        extra={lockedResultMode ? <Tag color="green">已锁定</Tag> : null}
-      >
+
+      <section className="ai-mode">
+        <div className="ai-mode__head">
+          <div className="ai-mode__heading">
+            <span className="ai-mode__title">{lockedResultMode ? 'AI 结果处理方式' : '选择 AI 结果处理方式'}</span>
+            <span className="ai-mode__hint">
+              {lockedResultMode
+                ? '本批次已产生结果，处理方式已锁定，不能再切换。'
+                : '两种流程相互独立。产生 AI 结果后，处理方式将被锁定且不能再切换。'}
+            </span>
+          </div>
+          {lockedResultMode ? <Tag color="green">已锁定</Tag> : null}
+        </div>
         {lockedResultMode ? (
-          <Alert
-            type="success"
-            showIcon
-            title={lockedResultMode === 'auto' ? '自动 AI 分析' : '人工手动 AI 分析'}
-            description={
-              lockedResultMode === 'auto'
-                ? '本批次已通过自动 AI 分析生成结果，处理方式已锁定，只展示自动分析看板。'
-                : '本批次已通过人工 AI Excel 导入结果，处理方式已锁定，只展示人工手动 AI 分析看板。'
-            }
-          />
+          <div className="ai-mode__locked">
+            <span className="ai-mode__locked-mark" aria-hidden="true" />
+            <div className="ai-mode__locked-copy">
+              <span className="ai-mode__locked-title">{AI_RESULT_MODES[lockedResultMode].title}</span>
+              <span className="ai-mode__locked-desc">
+                {lockedResultMode === 'auto'
+                  ? '结果来自平台的自动 AI 分析，本页只展示自动分析看板。'
+                  : '结果来自人工上传的 AI Excel，本页只展示人工手动分析看板。'}
+              </span>
+            </div>
+          </div>
         ) : (
-          <>
-            <Text type="secondary">两种流程相互独立。产生 AI 结果后，处理方式将被锁定且不能再切换。</Text>
-            <Radio.Group
-              className="ai-result-mode-options"
-              value={resultMode}
-              buttonStyle="solid"
-              onChange={(event) => setResultMode(event.target.value as AiResultMode)}
-            >
-              <Radio.Button value="auto">
-                <div className="ai-result-mode-content">
-                  <Text strong>自动 AI 分析</Text>
-                  <Text type="secondary">平台自动准备代码、检索需求并生成分析结果</Text>
-                </div>
-              </Radio.Button>
-              <Radio.Button value="manual">
-                <div className="ai-result-mode-content">
-                  <Text strong>人工手动 AI 分析</Text>
-                  <Text type="secondary">下载模板交给外部 AI 填写，再上传校验并导入</Text>
-                </div>
-              </Radio.Button>
-            </Radio.Group>
-          </>
+          <Radio.Group
+            className="ai-mode__grid"
+            value={resultMode}
+            onChange={(event) => setResultMode(event.target.value as AiResultMode)}
+          >
+            {AI_RESULT_MODE_LIST.map((option) => (
+              <Radio
+                key={option.value}
+                value={option.value}
+                className={`ai-mode__option${resultMode === option.value ? ' ai-mode__option--active' : ''}`}
+              >
+                <span className="ai-mode__option-title">{option.title}</span>
+                <span className="ai-mode__option-desc">{option.description}</span>
+                <span className="ai-mode__option-steps">{option.steps}</span>
+              </Radio>
+            ))}
+          </Radio.Group>
         )}
-      </Card>
+      </section>
+
       {visibleResultMode === 'auto' ? (
         <AutoAnalysisSection
           batch={workspaceQuery.data.batch}
@@ -2400,118 +2486,150 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
           hasExistingAiResult={alreadyImportedAi}
         />
       ) : (
-        <Space direction="vertical" size="large" className="page-stack">
-          <Card title="人工手动 AI 分析流程">
-        <Space wrap>
-          <Button type="primary" disabled={!workspaceQuery.data.stories.length || !isSupportedDefaultBranch(workspaceQuery.data.batch.default_branch)} onClick={() => downloadAiTemplate(workspaceQuery.data.batch, workspaceQuery.data.stories)}>
-            下载AI填写模板
-          </Button>
-          <Text type="secondary">如需人工分析，可下载模板；模板包含批次信息、需求评审、代码证据三个 Sheet。</Text>
-        </Space>
-      </Card>
-      <Card title="AI填写规范（复制给AI）">
-        <Typography.Paragraph copyable={{ text: aiFillPrompt }} className="prompt-block">
-          {aiFillPrompt}
-        </Typography.Paragraph>
-        <Divider />
-        <Text strong>交给AI的内容：</Text>
-        <Row gutter={[16, 16]} className="ai-material-row">
-          <Col xs={24} md={8}>
-            <div className="ai-material-card">
-              <div className="ai-material-index">1</div>
-              <div>
-                <Text strong>AI填写模板</Text>
-                <div><Text type="secondary">下载后交给 AI 填写的 Excel 工作簿</Text></div>
-              </div>
-            </div>
-          </Col>
-          <Col xs={24} md={8}>
-            <div className="ai-material-card">
-              <div className="ai-material-index">2</div>
-              <div>
-                <Text strong>AI填写规范</Text>
-                <div><Text type="secondary">上方可复制的固定填写要求和枚举约束</Text></div>
-              </div>
-            </div>
-          </Col>
-          <Col xs={24} md={8}>
-            <div className="ai-material-card">
-              <div className="ai-material-index">3</div>
-              <div>
-                <Text strong>待分析分支最新代码</Text>
-                <div><Text type="secondary">指定分支/Commit 下允许分析的代码目录</Text></div>
-              </div>
-            </div>
-          </Col>
-        </Row>
-      </Card>
-      {alreadyImportedAi ? (
-        <Alert
-          type="info"
-          showIcon
-          title="本批次已完成 AI 结果导入"
-          description="一个批次只能成功导入一次 AI 结果。如需重新导入，请删除当前批次后重新创建并导入。"
-        />
-      ) : (
         <>
-          <Upload.Dragger
-            accept=".xlsx,.xls"
-            maxCount={1}
-            disabled={readOnly || !isSupportedDefaultBranch(workspaceQuery.data.batch.default_branch)}
-            beforeUpload={async (selectedFile) => {
-              const result = await parseAiWorkbook(selectedFile, workspaceQuery.data.batch, workspaceQuery.data.stories)
-              if (result.batchInfo.batch_id !== workspaceQuery.data.batch.id) {
-                setFile(null)
-                setParsed(null)
-                modal.warning({
-                  title: '导入文件与当前批次不一致',
-                  content: `当前选择的 AI 分析文件不是由批次“${workspaceQuery.data.batch.name}”导出的模板生成。请先下载当前批次的 AI 填写模板，使用该模板完成 AI 分析后再重新导入。`,
-                  okText: '重新选择文件',
-                })
-                return Upload.LIST_IGNORE
-              }
-              setFile(selectedFile)
-              setParsed(result)
-              return false
-            }}
-            onRemove={() => {
-              setFile(null)
-              setParsed(null)
-            }}
-          >
-            <p>上传 AI 填写后的 Excel</p>
-            <Text type="secondary">上传后先校验 batch_id、模板版本、原始字段、AI判断和代码证据。</Text>
-          </Upload.Dragger>
-          {parsed ? (
-            <Row gutter={[16, 16]}>
-              <Col span={24} lg={10}><IssuesCard issues={parsed.issues} /></Col>
-              <Col span={24} lg={14}>
-                <Card title="解析结果">
-                  <Row gutter={16}>
-                    <Col span={8}><Statistic title="AI结果" value={parsed.results.length} /></Col>
-                    <Col span={8}><Statistic title="代码证据" value={parsed.evidence.length} /></Col>
-                    <Col span={8}><Statistic title="错误" value={parsed.issues.filter((issue) => issue.level === 'error').length} /></Col>
-                  </Row>
-                  <Divider />
-                  <Button type="primary" disabled={readOnly || hasErrors(parsed.issues)} loading={importMutation.isPending} onClick={() => importMutation.mutate()}>
-                    确认导入AI结果
-                  </Button>
-                </Card>
-              </Col>
-            </Row>
-          ) : null}
+          <section className="ai-panel">
+            <div className="ai-panel__head">
+              <span className="ai-panel__title">第 1 步 · 下载 AI 填写模板</span>
+              <span className="ai-panel__meta">批次信息 / 需求评审 / 代码证据 三个 Sheet</span>
+            </div>
+            <div className="ai-panel__body">
+              <Text type="secondary">模板内嵌当前批次的 batch_id 与基线元数据，导入时会逐项校验，不能用别的批次的模板。</Text>
+              <Button
+                type="primary"
+                disabled={!workspaceQuery.data.stories.length || !isSupportedDefaultBranch(workspaceQuery.data.batch.default_branch)}
+                onClick={() => downloadAiTemplate(workspaceQuery.data.batch, workspaceQuery.data.stories)}
+              >
+                下载 AI 填写模板
+              </Button>
+            </div>
+          </section>
+
+          <section className="ai-panel">
+            <div className="ai-panel__head">
+              <span className="ai-panel__title">第 2 步 · 把三样东西交给 AI</span>
+              <span className="ai-panel__meta">填写规范可一键复制</span>
+            </div>
+            <div className="ai-panel__body">
+              <div className="ai-material-grid">
+                {[
+                  { title: 'AI 填写模板', desc: '上一步下载的 Excel 工作簿' },
+                  { title: 'AI 填写规范', desc: '下方可复制的填写要求与枚举约束' },
+                  { title: '待分析分支最新代码', desc: '指定分支 / Commit 下允许分析的代码目录' },
+                ].map((item, index) => (
+                  <div key={item.title} className="ai-material-card">
+                    <span className="ai-material-index">{index + 1}</span>
+                    <span className="ai-material-copy">
+                      <span className="ai-material-title">{item.title}</span>
+                      <span className="ai-material-desc">{item.desc}</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="ai-prompt">
+                <div className="ai-prompt__head">
+                  <span className="ai-prompt__title">AI 填写规范</span>
+                  <Typography.Text copyable={{ text: aiFillPrompt }} className="ai-prompt__copy">
+                    复制全文
+                  </Typography.Text>
+                </div>
+                <pre className="ai-prompt__body">{aiFillPrompt}</pre>
+              </div>
+            </div>
+          </section>
+
+          {alreadyImportedAi ? (
+            <Alert
+              type="info"
+              showIcon
+              title="本批次已完成 AI 结果导入"
+              description="一个批次只能成功导入一次 AI 结果。如需重新导入，请删除当前批次后重新创建并导入。"
+            />
+          ) : (
+            <section className="ai-panel">
+              <div className="ai-panel__head">
+                <span className="ai-panel__title">第 3 步 · 上传并校验 AI 填写结果</span>
+                <span className="ai-panel__meta">校验通过后才能导入</span>
+              </div>
+              <div className="ai-panel__body">
+                <Upload.Dragger
+                  accept=".xlsx,.xls"
+                  maxCount={1}
+                  className="ai-dropzone"
+                  disabled={readOnly || !isSupportedDefaultBranch(workspaceQuery.data.batch.default_branch)}
+                  beforeUpload={async (selectedFile) => {
+                    const result = await parseAiWorkbook(selectedFile, workspaceQuery.data.batch, workspaceQuery.data.stories)
+                    if (result.batchInfo.batch_id !== workspaceQuery.data.batch.id) {
+                      setFile(null)
+                      setParsed(null)
+                      modal.warning({
+                        title: '导入文件与当前批次不一致',
+                        content: `当前选择的 AI 分析文件不是由批次“${workspaceQuery.data.batch.name}”导出的模板生成。请先下载当前批次的 AI 填写模板，使用该模板完成 AI 分析后再重新导入。`,
+                        okText: '重新选择文件',
+                      })
+                      return Upload.LIST_IGNORE
+                    }
+                    setFile(selectedFile)
+                    setParsed(result)
+                    return false
+                  }}
+                  onRemove={() => {
+                    setFile(null)
+                    setParsed(null)
+                  }}
+                >
+                  <span className="ai-dropzone__title">把 AI 填写后的 Excel 拖到这里，或点击选择</span>
+                  <span className="ai-dropzone__hint">先校验 batch_id、模板版本、原始字段、AI 判断和代码证据，再允许导入。</span>
+                </Upload.Dragger>
+                {parsed ? (
+                  <div className="ai-parse-result">
+                    <div className="ai-parse-result__stats">
+                      <div className="ai-parse-result__stat">
+                        <span className="ai-parse-result__value">{parsed.results.length}</span>
+                        <span className="ai-parse-result__label">条 AI 结果</span>
+                      </div>
+                      <div className="ai-parse-result__stat">
+                        <span className="ai-parse-result__value">{parsed.evidence.length}</span>
+                        <span className="ai-parse-result__label">条代码证据</span>
+                      </div>
+                      <div
+                        className={`ai-parse-result__stat${parsedErrorCount > 0 ? ' ai-parse-result__stat--error' : ''}`}
+                      >
+                        <span className="ai-parse-result__value">{parsedErrorCount}</span>
+                        <span className="ai-parse-result__label">个阻断错误</span>
+                      </div>
+                      <Button
+                        type="primary"
+                        className="ai-parse-result__action"
+                        disabled={readOnly || hasErrors(parsed.issues)}
+                        loading={importMutation.isPending}
+                        onClick={() => importMutation.mutate()}
+                      >
+                        确认导入 AI 结果
+                      </Button>
+                    </div>
+                    <IssuesCard issues={parsed.issues} />
+                  </div>
+                ) : null}
+              </div>
+            </section>
+          )}
         </>
       )}
-        </Space>
-      )}
-      <Card title="AI报告版本">
+
+      <section className="ai-panel">
+        <div className="ai-panel__head">
+          <span className="ai-panel__title">AI 报告版本</span>
+          <span className="ai-panel__meta">共 {aiImportsQuery.data?.length ?? 0} 个版本</span>
+        </div>
         <Table
           rowKey="id"
+          size="small"
           loading={aiImportsQuery.isLoading}
           dataSource={aiImportsQuery.data ?? []}
           pagination={false}
+          locale={{ emptyText: '本批次还没有 AI 报告' }}
           columns={[
-            { title: '版本', dataIndex: 'version', width: 90, render: (version) => `V${version}` },
+            { title: '版本', dataIndex: 'version', width: 90, render: (version) => <Text strong>V{version}</Text> },
             { title: '生效状态', dataIndex: 'is_active', width: 120, render: (active) => active ? <Tag color="green">当前生效</Tag> : <Tag>历史版本</Tag> },
             {
               title: '来源',
@@ -2521,7 +2639,7 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
                 importFileId ? <Tag color="blue">人工导入</Tag> : <Tag color="geekblue">AI 自动分析</Tag>,
             },
             { title: '分析基线', render: (_value, record) => <BaselineImportDetails aiImport={record} /> },
-            { title: '导入时间', dataIndex: 'created_at', render: (value) => new Date(value).toLocaleString() },
+            { title: '导入时间', dataIndex: 'created_at', width: 180, render: (value) => new Date(value).toLocaleString() },
             {
               title: '操作',
               width: 120,
@@ -2539,8 +2657,8 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
             },
           ]}
         />
-      </Card>
-    </Space>
+      </section>
+    </div>
   )
 }
 

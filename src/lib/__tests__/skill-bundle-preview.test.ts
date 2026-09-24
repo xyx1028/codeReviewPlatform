@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { readSkillBundlePreview } from '../skill-bundle-preview'
+import { formatBundleDiagnostics, readSkillBundlePreview } from '../skill-bundle-preview'
 
 /**
  * 用真实 deflate 压缩流构造一个能被标准解压器读的 ZIP，避免"只有我的解析器认得"的自证。
@@ -186,7 +186,7 @@ describe('readSkillBundlePreview', () => {
    */
   it('returns an empty preview for a file that is not a ZIP at all', async () => {
     const preview = await readSkillBundlePreview(new Blob([new TextEncoder().encode('not a zip')]))
-    expect(preview).toEqual({
+    expect(preview).toMatchObject({
       name: null,
       description: null,
       whenToUse: null,
@@ -195,6 +195,37 @@ describe('readSkillBundlePreview', () => {
       issue: 'archive-unreadable',
       nestedEntryPath: null,
     })
+    // 证据必须指出是"找不到中央目录"，而不是笼统的读不出来 —— 处置动作不同。
+    expect(preview.diagnostics.failureStage).toBe('eocd-not-found')
+    expect(preview.diagnostics.fileBytes).toBe(9)
+  })
+
+  /**
+   * 字节被改动/截断是远程排查里最常见的成因（IM 转发、下载中断），它必须能被单独认出来：
+   * 界面显示的 KiB 四舍五入之后跟完好文件看不出区别。
+   */
+  it('points at the central directory when its bytes are damaged', async () => {
+    const zip = await buildZip([{ path: 'SKILL.md', content: '---\nname: a\n---\n' }])
+    const bytes = new Uint8Array(await zip.arrayBuffer())
+    const view = new DataView(bytes.buffer)
+    // 无注释的 ZIP，EOCD 就在最后 22 字节；从里面取中央目录起始偏移。
+    const centralDirOffset = view.getUint32(bytes.length - 22 + 16, true)
+    bytes[centralDirOffset] = 0x00 // 破坏中央目录签名，模拟传输中被改动的字节
+
+    const preview = await readSkillBundlePreview(new Blob([bytes]))
+    expect(preview.issue).toBe('archive-unreadable')
+    expect(preview.diagnostics.failureStage).toBe('central-directory')
+    expect(preview.diagnostics.eocdOffset).toBe(bytes.length - 22)
+    expect(preview.diagnostics.failureDetail).toContain('signature')
+  })
+
+  it('carries a copyable one-line summary for screenshots', async () => {
+    const zip = await buildZip([{ path: 'SKILL.md', content: '---\nname: a\n---\n' }])
+    const preview = await readSkillBundlePreview(zip)
+    const line = formatBundleDiagnostics(preview.diagnostics)
+    expect(line).toContain('bytes=')
+    expect(line).toContain('entries=1/1')
+    expect(line).toContain('head=504b0304')
   })
 
   it('separates "no SKILL.md anywhere" from "not a ZIP"', async () => {

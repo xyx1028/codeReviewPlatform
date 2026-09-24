@@ -831,65 +831,886 @@ a.dashboard-distribution-item:focus-visible {
   }
 }
 
-/* ------------------------------------------------------------------ */
-/* AI 自动化 MVP：自动分析卡片与前置条件展示                            */
-/* ------------------------------------------------------------------ */
-.auto-analysis-card .precondition-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
+/* ==========================================================================
+ * AI 结果管理页
+ *
+ * 这一页原来是「一张大 Card 里塞了四条 Divider、八个裸 Statistic 和一排灰绿 Tag」：
+ * 每个区块都存在，但没有任何层级 —— 用户看到的是一面等重的墙。
+ *
+ * 重排的三条规则：
+ *   1. 一个区块一个面板（.ai-panel / .analysis-panel），标题行固定「标题 + 右侧计数」，
+ *      不再用 Divider 当标题；Divider 只画线，不建立包含关系。
+ *   2. 颜色只用来表达状态，且状态色只有一个源头：.analysis-console 上的 --analysis-tone。
+ *      顶部色条、状态药丸、脉冲点全部读它，不再各自判断一次 job.status。
+ *   3. 数字靠字号和 tabular-nums 拉开层级，不靠边框和底色 —— 所以面板描边统一压到
+ *      #eef1f6 这一档，避免每个区块都在抢注意力。
+ * ========================================================================== */
 
-.ai-result-mode-picker .ant-card-body {
+.ai-result-page {
   display: flex;
   flex-direction: column;
   gap: 16px;
-}
-
-.ai-result-mode-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
   width: 100%;
 }
 
-.ai-result-mode-options .ant-radio-button-wrapper {
+/* --- 通用面板 ------------------------------------------------------------- */
+
+.ai-panel {
   display: flex;
-  align-items: center;
-  height: auto;
-  min-height: 76px;
-  padding: 14px 18px;
-  white-space: normal;
+  flex-direction: column;
+  overflow: hidden;
+  background: #ffffff;
+  border: 1px solid #edf0f5;
+  border-radius: 14px;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.04);
 }
 
-.ai-result-mode-content {
+.ai-panel__head {
   display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 20px;
+  background: linear-gradient(180deg, #fcfdff, #ffffff);
+  border-bottom: 1px solid #f2f4f8;
+}
+
+.ai-panel__title {
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.ai-panel__meta {
+  color: #94a3b8;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ai-panel__body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 18px 20px;
+}
+
+.ai-panel--setup {
+  border-color: #dbeafe;
+}
+
+.ai-panel--setup .ai-panel__head {
+  background: linear-gradient(180deg, #f5f9ff, #ffffff);
+  border-bottom-color: #e6effd;
+}
+
+/*
+ * 面板直接收编表格：表头去掉 antd 的灰底，交界处只留一条发丝线。
+ *
+ * 选择器刻意比 antd 多带一个类：antd v6 的样式是 cssinjs 在组件首次渲染时注入 <style>，
+ * 出现在这张表之后，同权重时它赢。凡是要盖住 antd 默认值的规则，这一节都多写一层。
+ */
+.ai-panel > .ant-table-wrapper .ant-table-thead > tr > th,
+.analysis-panel .ant-table-wrapper .ant-table-thead > tr > th {
+  background: #ffffff;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ai-panel > .ant-table-wrapper .ant-table-pagination.ant-pagination,
+.analysis-panel .ant-table-wrapper .ant-table-pagination.ant-pagination {
+  margin: 12px 16px;
+}
+
+/* --- 处理方式选择 --------------------------------------------------------- */
+
+.ai-mode {
+  padding: 18px 20px 20px;
+  background: #ffffff;
+  border: 1px solid #edf0f5;
+  border-radius: 14px;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.04);
+}
+
+.ai-mode__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.ai-mode__heading {
+  display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: 4px;
 }
 
-.ai-result-mode-options .ant-radio-button-wrapper-checked .ant-typography {
-  color: inherit;
+.ai-mode__title {
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
 }
 
-@media (max-width: 640px) {
-  .ai-result-mode-options {
+.ai-mode__hint {
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.ai-mode__grid.ant-radio-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+
+/*
+ * 整块都可点：直接把 antd Radio 的 <label> 撑成卡片。
+ *
+ * 比自绘 div 再补 role="radio" 稳 —— 键盘焦点、方向键切换、aria-checked 都是 antd 给的，
+ * 这里只负责长相。
+ */
+.ai-mode__grid .ant-radio-wrapper.ai-mode__option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  padding: 14px 16px;
+  background: #fcfdff;
+  border: 1px solid #e8ecf3;
+  border-radius: 12px;
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.ai-mode__grid .ant-radio-wrapper.ai-mode__option:hover {
+  background: #ffffff;
+  border-color: #bfdbfe;
+}
+
+.ai-mode__grid .ant-radio-wrapper.ai-mode__option--active {
+  background: #f5f9ff;
+  border-color: #1677ff;
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.1);
+}
+
+.ai-mode__grid .ant-radio-wrapper.ai-mode__option > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  padding-inline: 0;
+}
+
+/* 单选圆点跟着第一行标题的视觉中线，而不是整块的垂直居中。 */
+.ai-mode__grid .ant-radio-wrapper.ai-mode__option > .ant-radio {
+  top: 0;
+  margin-top: 3px;
+}
+
+.ai-mode__option-title {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.ai-mode__option-desc {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.ai-mode__option-steps {
+  margin-top: 2px;
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.ai-mode__locked {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, #f2fdf5, #ffffff);
+  border: 1px solid #c6f0d3;
+  border-radius: 12px;
+}
+
+.ai-mode__locked-mark {
+  position: relative;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: #16a34a;
+}
+
+.ai-mode__locked-mark::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 8px;
+  height: 4px;
+  border: 2px solid #ffffff;
+  border-top: 0;
+  border-right: 0;
+  transform: rotate(-45deg);
+}
+
+.ai-mode__locked-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ai-mode__locked-title {
+  color: #14532d;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.ai-mode__locked-desc {
+  color: #4d7c5b;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* --- 自动分析控制台 ------------------------------------------------------- */
+
+.analysis-console {
+  --analysis-tone: #cbd5e1;
+  --analysis-tone-soft: #f1f5f9;
+  --analysis-tone-text: #475569;
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: hidden;
+  padding: 20px 22px 22px;
+  background: #ffffff;
+  border: 1px solid #edf0f5;
+  border-radius: 16px;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05);
+}
+
+/* 顶边那道 3px 是整块唯一的大面积状态色。 */
+.analysis-console::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 3px;
+  background: var(--analysis-tone);
+}
+
+.analysis-console--running {
+  --analysis-tone: #2563eb;
+  --analysis-tone-soft: #eff6ff;
+  --analysis-tone-text: #1d4ed8;
+}
+
+.analysis-console--done {
+  --analysis-tone: #16a34a;
+  --analysis-tone-soft: #f0fdf4;
+  --analysis-tone-text: #15803d;
+}
+
+.analysis-console--failed {
+  --analysis-tone: #dc2626;
+  --analysis-tone-soft: #fef2f2;
+  --analysis-tone-text: #b91c1c;
+}
+
+.analysis-console__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.analysis-console__heading {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.analysis-console__title {
+  margin: 0;
+  color: #0f172a;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.analysis-console__subtitle {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.analysis-console__state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.analysis-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 13px 5px 11px;
+  color: var(--analysis-tone-text);
+  background: var(--analysis-tone-soft);
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.analysis-pill__dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: var(--analysis-tone);
+}
+
+.analysis-console--running .analysis-pill__dot,
+.analysis-running__pulse {
+  animation: analysis-pulse 1.7s ease-in-out infinite;
+}
+
+@keyframes analysis-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.5);
+  }
+
+  55% {
+    box-shadow: 0 0 0 5px rgba(37, 99, 235, 0);
+  }
+}
+
+.analysis-console__runtime {
+  color: #64748b;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.analysis-console__runtime strong {
+  color: #0f172a;
+  font-weight: 650;
+}
+
+/* 事实条：1px 的 gap 配同色底就是发丝分隔线，不用给每格再画一圈边框。 */
+.analysis-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr 2fr;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #eef1f6;
+  border: 1px solid #eef1f6;
+  border-radius: 12px;
+}
+
+.analysis-facts__item {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px 16px;
+  background: #ffffff;
+}
+
+.analysis-facts dt {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.analysis-facts dd {
+  margin: 0;
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analysis-facts__mono {
+  color: #2563eb;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+}
+
+.analysis-facts__unit {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* 前置条件清单 */
+.analysis-checklist {
+  padding: 13px 16px 14px;
+  background: #fffdf6;
+  border: 1px solid #fae7c3;
+  border-radius: 12px;
+}
+
+.analysis-checklist--ready {
+  background: #f9fefb;
+  border-color: #d6efdd;
+}
+
+.analysis-checklist__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.analysis-checklist__title {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.analysis-checklist__score {
+  color: #b45309;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.analysis-checklist--ready .analysis-checklist__score {
+  color: #15803d;
+}
+
+.analysis-checklist__items {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 7px 20px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.analysis-checklist__items li {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.analysis-checklist__items li.is-ok {
+  color: #475569;
+}
+
+.analysis-checklist__items li.is-blocked {
+  color: #b45309;
+  font-weight: 600;
+}
+
+.analysis-checklist__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 对勾与感叹号都是纯 CSS：这个项目没有引入图标包，也不值得为两个形状引入一个。 */
+.analysis-check-mark {
+  position: relative;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+}
+
+li.is-ok > .analysis-check-mark {
+  background: #22c55e;
+}
+
+li.is-ok > .analysis-check-mark::after {
+  content: '';
+  position: absolute;
+  top: 5px;
+  left: 4px;
+  width: 6px;
+  height: 3px;
+  border: 1.5px solid #ffffff;
+  border-top: 0;
+  border-right: 0;
+  transform: rotate(-45deg);
+}
+
+li.is-blocked > .analysis-check-mark {
+  background: #f59e0b;
+}
+
+li.is-blocked > .analysis-check-mark::before {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 7px;
+  width: 2px;
+  height: 6px;
+  border-radius: 1px;
+  background: #ffffff;
+}
+
+li.is-blocked > .analysis-check-mark::after {
+  content: '';
+  position: absolute;
+  top: 11px;
+  left: 7px;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: #ffffff;
+}
+
+.analysis-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.analysis-actions__window {
+  width: 156px;
+}
+
+.analysis-actions__hint {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+/* 进度面板 */
+.analysis-progress {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.analysis-progress__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  background: linear-gradient(180deg, #fcfdff, #ffffff);
+  border: 1px solid #eef1f6;
+  border-radius: 12px;
+}
+
+.analysis-progress__label {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.analysis-progress__value {
+  color: #0f172a;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.analysis-progress__total {
+  margin-left: 5px;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* 仓库是可数的离散对象，所以画格子而不是百分比条：5 格就是 5 个仓。 */
+.analysis-progress__segments {
+  display: flex;
+  gap: 4px;
+}
+
+.analysis-progress__segments > span {
+  flex: 1 1 0;
+  height: 6px;
+  border-radius: 999px;
+  background: #e8ecf3;
+  transition: background 0.25s ease;
+}
+
+.analysis-progress__segments > span.is-done {
+  background: #16a34a;
+}
+
+.analysis-progress__bar.ant-progress-line {
+  margin: 0;
+}
+
+.analysis-progress__hint {
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 处理中需求：虚线框表示"这一行的内容会变"。 */
+.analysis-running {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 10px 14px;
+  border: 1px dashed #e3e8f0;
+  border-radius: 12px;
+}
+
+.analysis-running__label {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.analysis-running__chips {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.analysis-running__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 11px;
+  color: #1d4ed8;
+  background: #f5f9ff;
+  border: 1px solid #dbeafe;
+  border-radius: 999px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.analysis-running__pulse {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: #2563eb;
+}
+
+.analysis-running__empty {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+/* 控制台内部的表格面板 */
+.analysis-panel {
+  overflow: hidden;
+  border: 1px solid #eef1f6;
+  border-radius: 12px;
+}
+
+.analysis-panel__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 16px;
+  background: #fafbfd;
+  border-bottom: 1px solid #eef1f6;
+}
+
+.analysis-panel__title {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.analysis-panel__meta {
+  color: #94a3b8;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.analysis-tech-details > summary {
+  color: #64748b;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+/* --- 人工流程：填写规范与上传 --------------------------------------------- */
+
+.ai-material-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+
+.ai-prompt {
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid #eef1f6;
+  border-radius: 12px;
+}
+
+.ai-prompt__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 14px;
+  background: #fafbfd;
+  border-bottom: 1px solid #eef1f6;
+}
+
+.ai-prompt__title {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.ai-prompt__copy {
+  font-size: 12px;
+}
+
+/*
+ * 规范正文限高 + 内部滚动。
+ *
+ * 它有上百行，全量铺开会把"上传"那一步推到两屏之外 —— 而这段文字的用法是整段复制，
+ * 不是逐行阅读。
+ */
+.ai-prompt__body {
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  padding: 14px;
+  color: #334155;
+  background: #fcfdff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+/*
+ * 拖拽区不跟 antd 的 table / table-cell 布局较劲。
+ *
+ * antd 用 `.ant-upload-wrapper .ant-upload-drag .ant-upload-btn { display: table }` 做垂直居中，
+ * 权重比单类选择器高。这里只改内边距和两行文字本身，让居中继续由 antd 负责。
+ */
+.ai-dropzone {
+  width: 100%;
+}
+
+.ant-upload-wrapper.ai-dropzone .ant-upload-drag-container {
+  padding: 22px 20px;
+}
+
+.ai-dropzone__title {
+  display: block;
+  margin-bottom: 6px;
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ai-dropzone__hint {
+  display: block;
+  max-width: 520px;
+  margin: 0 auto;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.ai-parse-result {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ai-parse-result__stats {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 28px;
+  padding: 14px 18px;
+  background: linear-gradient(180deg, #fcfdff, #ffffff);
+  border: 1px solid #eef1f6;
+  border-radius: 12px;
+}
+
+.ai-parse-result__stat {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.ai-parse-result__value {
+  color: #0f172a;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-parse-result__label {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.ai-parse-result__stat--error .ai-parse-result__value {
+  color: #dc2626;
+}
+
+.ai-parse-result__action {
+  margin-left: auto;
+}
+
+@media (max-width: 900px) {
+  .analysis-facts {
     grid-template-columns: 1fr;
   }
 
-  .ai-result-mode-options .ant-radio-button-wrapper:first-child {
-    border-radius: 8px 8px 0 0;
-  }
-
-  .ai-result-mode-options .ant-radio-button-wrapper:last-child {
-    border-left-width: 1px;
-    border-radius: 0 0 8px 8px;
+  .ai-mode__grid.ant-radio-group {
+    grid-template-columns: 1fr;
   }
 }
 
-.precondition-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+@media (max-width: 640px) {
+  .analysis-console {
+    padding: 18px 14px 16px;
+  }
+
+  .ai-panel__head,
+  .ai-panel__body {
+    padding-inline: 14px;
+  }
+
+  .ai-parse-result__action {
+    margin-left: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .analysis-pill__dot,
+  .analysis-running__pulse {
+    animation: none;
+  }
 }
 
 .mt-md {
@@ -2663,9 +3484,8 @@ a.dashboard-distribution-item:focus-visible {
   min-width: 0;
 }
 
-/* 可点的失败标记：它是抽屉入口，所以要有手型，别让人以为是死标签。 */
+/* 失败标记本身不是入口，只挂 Tooltip 说清原因，所以保持默认光标。 */
 .import-snapshot__warning {
-  cursor: pointer;
   margin-inline-end: 0;
 }
 

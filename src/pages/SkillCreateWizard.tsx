@@ -1,5 +1,6 @@
 import {
   App as AntApp,
+  Alert,
   Col,
   Descriptions,
   Form,
@@ -20,7 +21,11 @@ import {
   adminPublishSkillVersion,
   adminUploadSkillBundle,
 } from '../lib/api'
-import { readSkillBundlePreview, type SkillBundlePreview } from '../lib/skill-bundle-preview'
+import {
+  formatBundleDiagnostics,
+  readSkillBundlePreview,
+  type SkillBundlePreview,
+} from '../lib/skill-bundle-preview'
 import { formatSkillVersion } from '../lib/skill-version'
 import type { SkillValidationResult } from '../types'
 import { BundleFileTree, formatBytes } from './SkillManagementPage'
@@ -43,7 +48,17 @@ const MANUAL_FALLBACK = '请手动填写技能编码；服务端仍会独立校�
 function previewIssueHint(preview: SkillBundlePreview): string | null {
   switch (preview.issue) {
     case 'archive-unreadable':
-      return '这个文件不是有效的 ZIP，或已损坏 / 被加密，读不出归档目录。请重新打包后再上传。'
+      // 同一个 issue 下三种处置完全不同的现实情况，靠 failureStage 分开说。
+      switch (preview.diagnostics.failureStage) {
+        case 'file-read':
+          return '浏览器读不到这个文件的字节（常见于 iCloud / OneDrive 的占位文件，或选中后文件被移动、删除）。把 ZIP 另存到本机磁盘上再上传。'
+        case 'eocd-not-found':
+          return '这个文件读不出 ZIP 归档目录：要么不是 ZIP，要么传输过程中被截断。先跟原始文件对一下 sha256，再重新拿一份（别走 IM 转发）。'
+        default:
+          return preview.diagnostics.zip64
+            ? '这是 ZIP64 归档，平台的预填解析器只读 32 位归档。用普通 ZIP 重新打包（zip -r ../<name>.zip .）。'
+            : '归档目录解析到一半失败：常见原因是文件被截断，或文件名不是 UTF-8（中文 Windows 的「发送到压缩文件夹」会这样）。见下面的技术详情。'
+      }
     case 'entry-nested':
       return `SKILL.md 在子目录 ${preview.nestedEntryPath} 里。平台要求它在 ZIP 根目录：请进入技能目录内部打包（zip -r ../<name>.zip .），不要压缩外层文件夹。`
     case 'entry-missing':
@@ -124,6 +139,20 @@ export function SkillCreateWizard({
     setValidation(null)
     const parsed = await readSkillBundlePreview(picked)
     setPreview(parsed)
+    /*
+     * 解析结果一律进控制台。
+     *
+     * 屏幕上那条 Alert 是给使用者看的（一句话 + 可复制的摘要），这条是给远程排查用的：
+     * 同一个包在一台机器上正常、在另一台上失败时，需要的是字节数、sha256、EOCD 位置和
+     * 失败在第几条中央目录记录 —— 靠截图问不出来。日志里没有文件内容。
+     */
+    const log = parsed.issue === null ? console.info : console.warn
+    log('[skill-bundle-preview]', {
+      issue: parsed.issue,
+      hasEntry: parsed.hasEntry,
+      nestedEntryPath: parsed.nestedEntryPath,
+      ...parsed.diagnostics,
+    })
     // 只填空着的字段，不覆盖管理员已经改过的显示名称。
     form.setFieldsValue({
       name: parsed.name ?? form.getFieldValue('name') ?? '',
@@ -282,6 +311,32 @@ export function SkillCreateWizard({
                 )}
               </Upload.Dragger>
             </Form.Item>
+
+            {/*
+              * 解析失败时把证据摆在屏幕上。
+              *
+              * 原来只有一条 message.warning：它会自己消失、没法复制，远程排查时对方只能
+              * 转述"说不是有效 ZIP"。这块 Alert 里的一行摘要（字节数 / sha256 / EOCD 位置 /
+              * 解析到第几条）截图就能对账，不必让对方开 DevTools。
+              */}
+            {preview !== null && preview.issue !== null ? (
+              <Alert
+                className="mt-md"
+                type="warning"
+                showIcon
+                title={previewIssueHint(preview) ?? '技能包预填失败'}
+                description={
+                  <Space direction="vertical" size={4} className="full-width">
+                    <Text type="secondary">
+                      这只影响自动填表，不阻止上传：可以手填技能编码后继续，服务端校验才是权威判定。
+                    </Text>
+                    <Text code copyable className="skill-create-modal__diagnostics">
+                      {formatBundleDiagnostics(preview.diagnostics)}
+                    </Text>
+                  </Space>
+                }
+              />
+            ) : null}
           </Col>
 
           <Col xs={24} md={15} className="skill-create-modal__details-column">

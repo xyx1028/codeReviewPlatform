@@ -1,7 +1,12 @@
 import type { StoryAnalysisScope } from '../../db/jobs.js'
 import { AGENT_REVIEW_SYSTEM_PROMPT, buildAgentReviewPrompt, type AgentReviewContext } from './agent-review-v1.js'
 
-export const AGENT_REVIEW_V2_PROMPT_VERSION = 'agent-review-v2'
+/**
+ * V1.21 起提示词带全量需求字段与需求快照文件，附件从"可读"改为"必读"，所以版本号
+ * 跟着走一格。它只是记录值（写进 agent attempt 与运行汇总），不参与 Session 续跑判定；
+ * 但监控台的"优化前后对比"只能靠它把两种提示词分开，含混复用旧值等于放弃对比能力。
+ */
+export const AGENT_REVIEW_V2_PROMPT_VERSION = 'agent-review-v2.1'
 
 export interface AgentReviewV2Context extends AgentReviewContext {
   scope: StoryAnalysisScope

@@ -59,9 +59,76 @@ export interface SkillBundlePreview {
   issue: SkillBundlePreviewIssue | null
   /** 仅 `entry-nested` 时非空：SKILL.md 实际所在的归档内路径。 */
   nestedEntryPath: string | null
+  /** 远程排查用的可读证据，见 SkillBundleDiagnostics。 */
+  diagnostics: SkillBundleDiagnostics
 }
 
-const EMPTY: SkillBundlePreview = {
+/**
+ * 解析过程留下的证据。
+ *
+ * 为什么要它：`archive-unreadable` 这一个 issue 覆盖了三种**处置动作完全不同**的现实情况 ——
+ * 浏览器连字节都读不到（文件是云盘占位符 / 选中后被移动）、字节读到了但不是 ZIP、
+ * 以及字节被截断导致中央目录读一半崩掉（IM 传输、下载中断的典型形态）。
+ * 2026-09-24 就撞上一次：同一个包在一台机器上正常、在同事那里报这条，
+ * 而提示里除了"请重新打包"没有任何可对账的信息，只能来回问。
+ *
+ * 所以这里记下**能对账的客观量**：字节数、sha256、文件头签名、EOCD 的位置与声明值、
+ * 解析到第几条中央目录记录才失败。有了 sha256 就能一句话判定"是不是同一份文件"。
+ *
+ * 不记内容：只记条目数量与失败位置的偏移，不记文件正文，也不记条目路径以外的东西。
+ */
+export interface SkillBundleDiagnostics {
+  fileName: string | null
+  fileBytes: number | null
+  lastModified: string | null
+  /** `file.arrayBuffer()` 抛出的错误（云盘占位符、选中后文件被移动时出现）。 */
+  readError: string | null
+  /** 文件头 4 字节。正常 ZIP 是 504b0304。 */
+  headSignature: string | null
+  /** 整份文件的 sha256，用于跟"已知正确的那一份"对账。算不出来时为 null。 */
+  sha256: string | null
+  eocdOffset: number | null
+  declaredEntryCount: number | null
+  centralDirOffset: number | null
+  centralDirSize: number | null
+  commentLength: number | null
+  /** 是否出现 ZIP64 结构（本解析器只读 32 位字段，遇到它会读不出来）。 */
+  zip64: boolean
+  /** 成功读出的中央目录条目数。 */
+  parsedEntryCount: number
+  /** 失败发生的环节。null 表示解析全程正常。 */
+  failureStage:
+    | 'file-read'
+    | 'eocd-not-found'
+    | 'central-directory'
+    | 'entry-not-found'
+    | 'entry-decode'
+    | null
+  /** 一句可读的失败位置，例如 `entry #4 at 0x1a2b: bad signature 0x08074b50`。 */
+  failureDetail: string | null
+}
+
+function emptyDiagnostics(): SkillBundleDiagnostics {
+  return {
+    fileName: null,
+    fileBytes: null,
+    lastModified: null,
+    readError: null,
+    headSignature: null,
+    sha256: null,
+    eocdOffset: null,
+    declaredEntryCount: null,
+    centralDirOffset: null,
+    centralDirSize: null,
+    commentLength: null,
+    zip64: false,
+    parsedEntryCount: 0,
+    failureStage: null,
+    failureDetail: null,
+  }
+}
+
+const EMPTY: Omit<SkillBundlePreview, 'diagnostics'> = {
   name: null,
   description: null,
   whenToUse: null,
@@ -74,23 +141,73 @@ const EMPTY: SkillBundlePreview = {
 const ENTRY_PATH = 'SKILL.md'
 const EOCD_SIGNATURE = 0x06054b50
 const CENTRAL_SIGNATURE = 0x02014b50
+const ZIP64_EOCD_SIGNATURE = 0x06064b50
+const ZIP64_LOCATOR_SIGNATURE = 0x07064b50
 /** 只为读一个入口文件，没必要把大归档整块解压。 */
 const MAX_ENTRY_BYTES = 1024 * 1024
+
+/** 一行可复制的摘要，给「把截图发过来」这种排查路径用。 */
+export function formatBundleDiagnostics(diagnostics: SkillBundleDiagnostics): string {
+  const parts = [
+    `bytes=${diagnostics.fileBytes ?? '?'}`,
+    `sha256=${diagnostics.sha256 === null ? '?' : diagnostics.sha256.slice(0, 16)}`,
+    `head=${diagnostics.headSignature ?? '?'}`,
+    `eocd=${diagnostics.eocdOffset ?? 'none'}`,
+    `entries=${diagnostics.parsedEntryCount}/${diagnostics.declaredEntryCount ?? '?'}`,
+  ]
+  if (diagnostics.zip64) parts.push('zip64=yes')
+  if (diagnostics.failureStage !== null) parts.push(`stage=${diagnostics.failureStage}`)
+  if (diagnostics.readError !== null) parts.push(`readError=${diagnostics.readError}`)
+  if (diagnostics.failureDetail !== null) parts.push(`detail=${diagnostics.failureDetail}`)
+  return parts.join(' · ')
+}
+
+async function digestSha256(buffer: ArrayBuffer): Promise<string | null> {
+  try {
+    const subtle = globalThis.crypto?.subtle
+    // 非安全上下文（http:// 且非 localhost）下 subtle 不存在 —— 这不是错误，只是少一项证据。
+    if (subtle === undefined) return null
+    const digest = await subtle.digest('SHA-256', buffer)
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+  } catch {
+    return null
+  }
+}
 
 /**
  * 读取 ZIP 中央目录，找到根部 `SKILL.md` 并解析出 frontmatter。
  *
- * 失败一律返回空预览 + `issue`（见文件头说明），永不抛错。
+ * 失败一律返回空预览 + `issue` + `diagnostics`（见文件头说明），永不抛错。
  */
 export async function readSkillBundlePreview(file: Blob): Promise<SkillBundlePreview> {
   // 提到 try 外面：入口解压失败时这条提示仍然有效，不该跟着一起丢。
   let containsScripts = false
   let reachedEntry = false
+  const diagnostics = emptyDiagnostics()
+  diagnostics.fileBytes = file.size
+  if (file instanceof File) {
+    diagnostics.fileName = file.name
+    diagnostics.lastModified = new Date(file.lastModified).toISOString()
+  }
+
+  let buffer: ArrayBuffer
   try {
-    const buffer = await file.arrayBuffer()
+    buffer = await file.arrayBuffer()
+  } catch (error) {
+    // 这里失败与"不是 ZIP"是两回事：文件是云盘占位符、或选中后被移动/删除都走这条。
+    diagnostics.failureStage = 'file-read'
+    diagnostics.readError = describeError(error)
+    return { ...EMPTY, issue: 'archive-unreadable', diagnostics }
+  }
+
+  diagnostics.fileBytes = buffer.byteLength
+  diagnostics.headSignature = readHeadSignature(buffer)
+  diagnostics.sha256 = await digestSha256(buffer)
+
+  try {
     const view = new DataView(buffer)
-    const entries = readCentralDirectory(view)
-    if (entries === null) return { ...EMPTY, issue: 'archive-unreadable' }
+    const entries = readCentralDirectory(view, diagnostics)
+    if (entries === null) return { ...EMPTY, issue: 'archive-unreadable', diagnostics }
 
     containsScripts = entries.some(
       (entry) => entry.path.startsWith('scripts/') && !entry.path.endsWith('/'),
@@ -98,18 +215,24 @@ export async function readSkillBundlePreview(file: Blob): Promise<SkillBundlePre
     const entry = entries.find((candidate) => candidate.path === ENTRY_PATH)
     if (entry === undefined) {
       const nested = entries.find((candidate) => candidate.path.endsWith(`/${ENTRY_PATH}`))
+      diagnostics.failureStage = 'entry-not-found'
+      diagnostics.failureDetail =
+        nested === undefined ? 'no SKILL.md in archive' : `SKILL.md nested at ${nested.path}`
       return {
         ...EMPTY,
         containsScripts,
         issue: nested === undefined ? 'entry-missing' : 'entry-nested',
         nestedEntryPath: nested?.path ?? null,
+        diagnostics,
       }
     }
 
     reachedEntry = true
     const text = readEntryText(buffer, view, entry)
     if (text === null) {
-      return { ...EMPTY, containsScripts, hasEntry: true, issue: 'entry-unreadable' }
+      diagnostics.failureStage = 'entry-decode'
+      diagnostics.failureDetail = `SKILL.md method=${entry.compressionMethod} compressed=${entry.compressedSize} uncompressed=${entry.uncompressedSize}`
+      return { ...EMPTY, containsScripts, hasEntry: true, issue: 'entry-unreadable', diagnostics }
     }
 
     const fields = readFrontmatterFields(text)
@@ -121,15 +244,32 @@ export async function readSkillBundlePreview(file: Blob): Promise<SkillBundlePre
       hasEntry: true,
       issue: null,
       nestedEntryPath: null,
+      diagnostics,
     }
-  } catch {
+  } catch (error) {
+    if (diagnostics.failureStage === null) {
+      diagnostics.failureStage = reachedEntry ? 'entry-decode' : 'central-directory'
+    }
+    diagnostics.failureDetail = diagnostics.failureDetail ?? describeError(error)
     return {
       ...EMPTY,
       containsScripts,
       hasEntry: reachedEntry,
       issue: reachedEntry ? 'entry-unreadable' : 'archive-unreadable',
+      diagnostics,
     }
   }
+}
+
+function describeError(error: unknown): string {
+  if (error instanceof Error) return `${error.name}: ${error.message}`.slice(0, 200)
+  return String(error).slice(0, 200)
+}
+
+function readHeadSignature(buffer: ArrayBuffer): string | null {
+  const head = new Uint8Array(buffer, 0, Math.min(4, buffer.byteLength))
+  if (head.length === 0) return null
+  return [...head].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
 interface CentralEntry {
@@ -140,17 +280,39 @@ interface CentralEntry {
   localHeaderOffset: number
 }
 
-function readCentralDirectory(view: DataView): CentralEntry[] | null {
+function readCentralDirectory(
+  view: DataView,
+  diagnostics: SkillBundleDiagnostics,
+): CentralEntry[] | null {
   const eocd = findEndOfCentralDirectory(view)
-  if (eocd === null) return null
+  if (eocd === null) {
+    diagnostics.failureStage = 'eocd-not-found'
+    diagnostics.failureDetail = 'no end-of-central-directory signature in the last 64 KiB'
+    return null
+  }
 
+  diagnostics.eocdOffset = eocd
   const count = view.getUint16(eocd + 10, true)
   let offset = view.getUint32(eocd + 16, true)
+  diagnostics.declaredEntryCount = count
+  diagnostics.centralDirOffset = offset
+  diagnostics.centralDirSize = view.getUint32(eocd + 12, true)
+  diagnostics.commentLength = view.getUint16(eocd + 20, true)
+  diagnostics.zip64 = hasZip64Structures(view, eocd)
   const entries: CentralEntry[] = []
 
   for (let index = 0; index < count; index += 1) {
-    if (offset + 46 > view.byteLength) return null
-    if (view.getUint32(offset, true) !== CENTRAL_SIGNATURE) return null
+    if (offset + 46 > view.byteLength) {
+      diagnostics.failureStage = 'central-directory'
+      diagnostics.failureDetail = `entry #${index + 1} at ${offset} runs past end of file (${view.byteLength})`
+      return null
+    }
+    const signature = view.getUint32(offset, true)
+    if (signature !== CENTRAL_SIGNATURE) {
+      diagnostics.failureStage = 'central-directory'
+      diagnostics.failureDetail = `entry #${index + 1} at ${offset}: signature 0x${signature.toString(16)} is not 0x2014b50`
+      return null
+    }
 
     const compressionMethod = view.getUint16(offset + 10, true)
     const compressedSize = view.getUint32(offset + 20, true)
@@ -161,12 +323,33 @@ function readCentralDirectory(view: DataView): CentralEntry[] | null {
     const localHeaderOffset = view.getUint32(offset + 42, true)
 
     const path = decodeUtf8(view.buffer, offset + 46, nameLength)
-    if (path === null) return null
+    if (path === null) {
+      // 典型成因：在中文 Windows 上用系统「发送到压缩文件夹」打的包，文件名是 GBK 而不是 UTF-8。
+      diagnostics.failureStage = 'central-directory'
+      diagnostics.failureDetail = `entry #${index + 1} at ${offset}: file name is not valid UTF-8 (length ${nameLength})`
+      return null
+    }
 
     entries.push({ path, compressionMethod, compressedSize, uncompressedSize, localHeaderOffset })
     offset += 46 + nameLength + extraLength + commentLength
+    diagnostics.parsedEntryCount = entries.length
   }
   return entries
+}
+
+/**
+ * EOCD 之前是否有 ZIP64 结构。
+ *
+ * 本解析器只读 32 位字段，所以真正的 ZIP64 归档（条目数或偏移超过 32 位）它读不出来。
+ * 记下来是为了让失败原因指向"重新用普通 ZIP 打包"，而不是让人反复重传同一个包。
+ */
+function hasZip64Structures(view: DataView, eocd: number): boolean {
+  const from = Math.max(0, eocd - 40)
+  for (let offset = from; offset + 4 <= eocd; offset += 1) {
+    const signature = view.getUint32(offset, true)
+    if (signature === ZIP64_EOCD_SIGNATURE || signature === ZIP64_LOCATOR_SIGNATURE) return true
+  }
+  return false
 }
 
 /** EOCD 在文件尾部，注释最长 65535 字节，所以从尾部往前扫这个窗口。 */

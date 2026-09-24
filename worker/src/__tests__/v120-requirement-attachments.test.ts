@@ -127,4 +127,21 @@ describe('materializeRequirementAttachments', () => {
     expect(result.materialized.map((entry) => entry.filename)).toEqual(['b.md', 'b-2.md'])
     expect(workspace.written).toHaveLength(2)
   })
+
+  // V1.21：平台自己写的 `需求快照.md` 不能被同名附件顶掉。
+  it('保留名被占用时附件加序号，而不是覆盖平台写的需求快照', async () => {
+    const workspace = collectingWorkspace()
+    const result = await materializeRequirementAttachments({
+      workspace,
+      storyCode: 'US-1',
+      attachments: [
+        { filename: '需求快照.md', contentType: null, sizeBytes: null, sha256: digest('upstream'), storagePath: KEY },
+      ],
+      storage: storageWith({ [KEY]: 'upstream' }),
+      logger: silentLogger,
+      reservedNames: ['需求快照.md'],
+    })
+    expect(result.materialized[0]?.filename).toBe('需求快照-2.md')
+    expect(workspace.written[0]?.name).toBe('需求快照-2.md')
+  })
 })

@@ -39,6 +39,11 @@ import {
 /** Environment variable through which one attempt receives its model key. */
 import type { StoryAttachmentStorage } from '../../linky/attachment-storage.js'
 import { parseFrozenRequirementAttachments } from '../requirements/attachment-materializer.js'
+import {
+  buildRequirementAcceptanceCriteria,
+  buildRequirementBody,
+  buildRequirementPromptFields,
+} from '../requirements/requirement-snapshot.js'
 
 export const AGENT_MODEL_API_KEY_ENV = 'REVIEW_MODEL_API_KEY'
 
@@ -336,7 +341,19 @@ export async function buildDeepSeekHarnessReview(
       description: analysisScope
         ? buildScopedStoryDescription(input.task, analysisScope)
         : buildStoryDescription(input.task),
-      acceptanceCriteria: input.task.acceptance_criteria,
+      /*
+       * 验收标准（V1.21）。
+       *
+       * 优先用冻结快照里的值。`task.acceptance_criteria` 是 claim RPC 恒返回 null 的
+       * 遗留字段（review_story 在 0005 就删掉了这一列），保留它只是为了不改 legacy v1 路径。
+       */
+      acceptanceCriteria: analysisScope
+        ? buildRequirementAcceptanceCriteria(analysisScope.requirement_context ?? null)
+          ?? input.task.acceptance_criteria
+        : input.task.acceptance_criteria,
+      requirementFields: analysisScope
+        ? buildRequirementPromptFields(analysisScope.requirement_context ?? null)
+        : undefined,
       projectName: input.task.project_name,
       applicationName: input.task.application_name,
     },
@@ -564,23 +581,24 @@ export function buildStoryDescription(task: StoryTask): string {
   return lines.length > 0 ? lines.join('\n') : task.story_name
 }
 
-/** V1.11 只使用冻结 scope RPC 明确返回的需求白名单，不读取原始 source_data。 */
+/**
+ * V1.21：需求正文。
+ *
+ * 只使用冻结 scope 明确返回的 `requirement_context`，不读原始 source_data —— 这条边界
+ * 与 V1.11 一致。变化在于"正文"和"字段"分开了：这里只产出正文，其余结构化字段由
+ * `buildRequirementPromptFields` 带中文标签单独渲染，全量原文进 `需求快照.md`。
+ *
+ * 旧实现把 `detailed_description` / `related_features` / `release_window` 三个键拼成
+ * `key: value` 塞进正文，其中 `release_window` 从来不存在于 requirement_context（死代码），
+ * 而 `source_status`、`iteration` 明明冻结了却被白名单丢掉。
+ */
 export function buildScopedStoryDescription(
   task: StoryTask,
   scope: { requirement_context?: Record<string, unknown> },
 ): string {
-  const context = scope.requirement_context ?? {}
-  const allowedKeys = ['detailed_description', 'related_features', 'release_window'] as const
-  const lines = allowedKeys.flatMap((key) => {
-    const value = context[key]
-    return value === null || value === undefined || String(value).trim() === ''
-      ? []
-      : [`${key}: ${String(value)}`]
+  return buildRequirementBody(scope.requirement_context ?? {}, {
+    storyName: task.story_name,
+    projectName: task.project_name,
+    applicationName: task.application_name,
   })
-  if (lines.length > 0) return lines.join('\n')
-  return [
-    task.story_name,
-    task.project_name ? `project: ${task.project_name}` : null,
-    task.application_name ? `application: ${task.application_name}` : null,
-  ].filter((value): value is string => value !== null).join('\n')
 }

@@ -94,6 +94,11 @@ import {
   type MaterializedRequirementAttachment,
 } from '../requirements/attachment-materializer.js'
 import type { StoryAttachmentStorage } from '../../linky/attachment-storage.js'
+import {
+  REQUIREMENT_SNAPSHOT_FILENAME,
+  isRequirementBodyMissing,
+  renderRequirementSnapshotMarkdown,
+} from '../requirements/requirement-snapshot.js'
 import type { StoryAnalysisScope } from '../../db/jobs.js'
 import type { CommitRelevanceOutput } from '../../analysis/commit-relevance-contract.js'
 import type {
@@ -419,6 +424,13 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
   private materializedRequirementAttachments: MaterializedRequirementAttachment[] = []
   /** 取不到的附件数量，提示词里如实告知。 */
   private missingRequirementAttachments = 0
+  /**
+   * V1.21：`requirements/<story>/需求快照.md` 的 workspace 相对路径。
+   *
+   * 与附件同理是运行期状态。为 null 时提示词不提这个文件 —— legacy v1 路径没有冻结
+   * requirement_context，凭空指一个不存在的文件只会让模型浪费一次 read。
+   */
+  private requirementSnapshotPath: string | null = null
 
   constructor(private readonly options: DeepSeekHarnessAcpEngineOptions) {}
 
@@ -636,9 +648,49 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
           attachments: this.options.requirementAttachments.items,
           storage: this.options.requirementAttachments.storage,
           logger: log,
+          reservedNames: [REQUIREMENT_SNAPSHOT_FILENAME],
         })
         this.materializedRequirementAttachments = outcome.materialized
         this.missingRequirementAttachments = outcome.failures.length
+      }
+      /*
+       * 需求快照文件（V1.21）。
+       *
+       * 写在附件之后：它要列出**确实落盘的**附件路径与缺失数量，顺序反了就只能列一份
+       * 与磁盘不符的清单。只在有冻结 requirement_context 时写 —— 那是"需求事实"的唯一
+       * 来源，legacy v1 路径没有它。
+       *
+       * 这个文件不让 attempt 失败：写不进去（配额、磁盘）时提示词不提它，模型仍然有
+       * 字段投影和附件可用。
+       */
+      if (this.options.analysisScope?.requirement_context) {
+        try {
+          const markdown = renderRequirementSnapshotMarkdown({
+            storyCode: this.options.story.code,
+            storyName: this.options.story.name,
+            context: this.options.analysisScope.requirement_context,
+            attachments: this.materializedRequirementAttachments,
+            missingAttachmentCount: this.missingRequirementAttachments,
+          })
+          this.requirementSnapshotPath = workspace.materializeRequirementAttachment(
+            this.options.story.code,
+            REQUIREMENT_SNAPSHOT_FILENAME,
+            Buffer.from(markdown, 'utf8'),
+          )
+          log.info('requirement_snapshot_materialized', {
+            event: 'requirement_snapshot_materialized',
+            story_code: this.options.story.code,
+            bytes: Buffer.byteLength(markdown, 'utf8'),
+            attachments: this.materializedRequirementAttachments.length,
+          })
+        } catch (error) {
+          this.requirementSnapshotPath = null
+          log.warn('requirement_snapshot_unavailable', {
+            event: 'requirement_snapshot_unavailable',
+            story_code: this.options.story.code,
+            error_code: error instanceof Error ? error.name : 'UNKNOWN',
+          })
+        }
       }
 
       // 同步调用，没有 await 间隙可插"开始"，所以只报完成（方案 §6.3）。
@@ -1525,10 +1577,11 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         // 物化结果在 workspace 建好之后才有，所以这里取运行期字段而不是构造参数。
         attachments: this.materializedRequirementAttachments,
         missingAttachmentCount: this.missingRequirementAttachments,
-        // 冻结快照里没有 detailed_description，就是"上游这条需求没有正文"。
+        requirementSnapshotPath: this.requirementSnapshotPath,
+        // 冻结快照里没有正文，就是"上游这条需求没有正文"。
         requirementTextMissing:
           this.options.analysisScope !== undefined
-          && (this.options.analysisScope.requirement_context?.detailed_description ?? null) === null,
+          && isRequirementBodyMissing(this.options.analysisScope.requirement_context ?? null),
       },
       branch: this.options.branch,
       pins: this.options.snapshots.pins(),
