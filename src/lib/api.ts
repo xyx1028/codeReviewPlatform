@@ -48,12 +48,7 @@ import type {
   HumanReviewResult,
   ImportFileRecord,
   ImportFileType,
-  LinkyCatalogAttachment,
-  LinkyCatalogFacets,
-  LinkyCatalogStory,
-  LinkyImportResult,
-  LinkySyncDepth,
-  LinkySyncRequest,
+  LinkyBatchImportRequest,
   ModelConnectivityTest,
   ModelNetworkAccessMode,
   ReviewBatch,
@@ -1960,120 +1955,49 @@ export function adminGetSkillOptimizationDiff(requestId: string) {
 }
 
 // ---------------------------------------------------------------------------
-// V1.20 Linky 用户故事直连。
+// V1.20 Linky 用户故事直连（修订：看板实时直连，批次在确认时冻结）。
 //
-// 前端**不直连 Linky**：那个接口只在公司内网可达（域名在内网 DNS 下解析到
-// 172.18.x.x），而页面是从公网加载的。所以看板读的是 Worker 同步下来的镜像表，
-// 刷新与导入各走一个 RPC。这样 Linky 挂掉时看板仍能浏览已同步的数据。
+// 看板的取数**不在这里** —— 它由浏览器直接请求 Linky（见 src/lib/linky-live.ts）。
+// 这里只有两件事：下一张导入单，和查这张单子的进度。
+//
+// 为什么导入要绕一圈 Worker：让浏览器把抓到的正文直接写库，等于让前端提供"需求正文"
+// 这一评审输入，平台无从判断它是否真的来自 Linky；而 Linky 只在内网可达，Worker 正好在
+// 那张网上。于是前端只提交「组 + 窗口 + 勾选的编号」，内容由服务端取。
 // ---------------------------------------------------------------------------
 
-export interface LinkyCatalogQuery {
+/** 下一张导入单。同一批次已有在途单子时返回那一张（幂等）。 */
+export async function requestLinkyBatchImport(input: {
+  batchId: string
+  workspaceName: string
+  storyCodes: string[]
   workspaceId?: string | null
-  releaseWindow?: string | null
-  iteration?: string | null
-  statusLabel?: string | null
-  assigneeName?: string | null
-  keyword?: string | null
-  limit?: number
-}
-
-/** 看板列表。刻意不 select requirement_detail：正文只在详情抽屉里按需取。 */
-export async function listLinkyCatalog(query: LinkyCatalogQuery = {}) {
-  const client = requireSupabase()
-  let request = client
-    .from('linky_story_catalog')
-    // 单行字面量：supabase-js 要靠 select 的**字面量类型**推断行类型，拼接出来的
-    // string 会让它退化成 GenericStringError。刻意不取 requirement_detail —— 正文
-    // 只在详情抽屉里按需读，列表不该为了数个数把大字段拉到浏览器。
-    .select('issue_id,story_code,title,workspace_id,workspace_name,status_label,assignee_name,iteration,release_window,subject_name,team,team_resolve_error,story_url,list_synced_at,detail_synced_at,attachment_count')
-    .order('story_code', { ascending: false })
-    .limit(query.limit ?? 500)
-  if (query.workspaceId) request = request.eq('workspace_id', query.workspaceId)
-  if (query.releaseWindow) request = request.eq('release_window', query.releaseWindow)
-  if (query.iteration) request = request.eq('iteration', query.iteration)
-  if (query.statusLabel) request = request.eq('status_label', query.statusLabel)
-  if (query.assigneeName) request = request.eq('assignee_name', query.assigneeName)
-  if (query.keyword && query.keyword.trim() !== '') {
-    const pattern = `%${query.keyword.trim()}%`
-    request = request.or(`story_code.ilike.${pattern},title.ilike.${pattern}`)
-  }
-  const { data, error } = await request
-  return unwrap<LinkyCatalogStory[]>({ data: (data ?? null) as LinkyCatalogStory[] | null, error })
-}
-
-/** 详情抽屉：正文 + 负责人 + 附件清单。 */
-export async function getLinkyCatalogStory(issueId: string) {
-  const client = requireSupabase()
-  const [story, attachments] = await Promise.all([
-    client.from('linky_story_catalog').select('*').eq('issue_id', issueId).maybeSingle(),
-    client
-      .from('linky_story_catalog_attachment')
-      .select('*')
-      .eq('issue_id', issueId)
-      .order('filename'),
-  ])
-  if (story.error) throw story.error
-  if (attachments.error) throw attachments.error
-  return {
-    story: (story.data ?? null) as LinkyCatalogStory | null,
-    attachments: (attachments.data ?? []) as LinkyCatalogAttachment[],
-  }
-}
-
-export async function getLinkyCatalogFacets(workspaceId?: string | null) {
-  const client = requireSupabase()
-  const { data, error } = await client.rpc('get_linky_catalog_facets', {
-    p_workspace_id: workspaceId ?? null,
-  })
-  return unwrap<LinkyCatalogFacets>({ data, error })
-}
-
-/** 触发同步。同范围已有在途请求时返回那一条的 id（幂等合并）。 */
-export async function enqueueLinkySync(input: {
-  depth: LinkySyncDepth
-  workspaceId?: string | null
-  workspaceName?: string | null
   releaseWindow?: string | null
 }) {
   const client = requireSupabase()
-  const { data, error } = await client.rpc('enqueue_linky_sync', {
-    p_depth: input.depth,
+  const { data, error } = await client.rpc('request_linky_batch_import', {
+    p_batch_id: input.batchId,
+    p_workspace_name: input.workspaceName,
+    p_story_codes: input.storyCodes,
     p_workspace_id: input.workspaceId ?? null,
-    p_workspace_name: input.workspaceName ?? null,
     p_release_window: input.releaseWindow ?? null,
   })
   return unwrap<string>({ data, error })
 }
 
-export async function getLinkySync(syncId: string) {
+export async function getLinkyBatchImport(requestId: string) {
   const client = requireSupabase()
-  const { data, error } = await client.rpc('get_linky_sync', { p_sync_id: syncId })
-  return unwrap<LinkySyncRequest>({ data, error })
+  const { data, error } = await client.rpc('get_linky_batch_import', { p_request_id: requestId })
+  return unwrap<LinkyBatchImportRequest>({ data, error })
 }
 
-/** 最近的同步记录，用于页面显示"上次同步什么时候、成功没有"。 */
-export async function listRecentLinkySyncs(limit = 5) {
+/** 批次页要显示「上一次导入是什么范围、成功几条」。没有导入过返回 null。 */
+export async function getLatestLinkyBatchImport(batchId: string) {
   const client = requireSupabase()
-  const { data, error } = await client
-    .from('linky_sync_request')
-    .select('id,depth,workspace_id,workspace_name,release_window,scope_key,status,attempt,worker_id,stories_synced,details_synced,attachments_stored,attachments_failed,bytes_downloaded,error_code,error_message,created_at,started_at,finished_at')
-    .order('created_at', { ascending: false })
-    .limit(limit)
-  return unwrap<LinkySyncRequest[]>({ data, error })
-}
-
-export async function importLinkyStoriesFromCatalog(input: {
-  batchId: string
-  issueIds: string[]
-  allowMissingAttachments?: boolean
-}) {
-  const client = requireSupabase()
-  const { data, error } = await client.rpc('import_linky_stories_from_catalog', {
-    p_batch_id: input.batchId,
-    p_issue_ids: input.issueIds,
-    p_allow_missing_attachments: input.allowMissingAttachments ?? false,
+  const { data, error } = await client.rpc('get_latest_linky_batch_import', {
+    p_batch_id: batchId,
   })
-  return unwrap<LinkyImportResult>({ data, error })
+  if (error) throw error
+  return (data ?? null) as LinkyBatchImportRequest | null
 }
 
 /** 批次内已冻结的需求附件。 */
@@ -2088,7 +2012,7 @@ export async function listReviewStoryAttachments(storyIds: string[]) {
   return unwrap<ReviewStoryAttachment[]>({ data, error })
 }
 
-/** 附件下载：60 秒 signed URL，与 review-files 同一套做法。 */
+/** 冻结附件的下载：60 秒 signed URL，与 review-files 同一套做法。 */
 export async function createStoryAttachmentSignedUrl(storagePath: string) {
   const client = requireSupabase()
   const { data, error } = await client.storage
@@ -2098,22 +2022,19 @@ export async function createStoryAttachmentSignedUrl(storagePath: string) {
   return data.signedUrl
 }
 
-/** 把 Linky 同步/导入的稳定错误码翻译成人话。 */
+/** 把导入链路的稳定错误码翻译成人话。 */
 export function describeLinkyError(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error)
-  if (raw.includes('LINKY_SYNC_FORBIDDEN')) return '只有管理员或评审人可以触发同步。'
-  if (raw.includes('LINKY_SYNC_TOO_FREQUENT')) return '刷新太频繁，请等 30 秒后再试。'
-  if (raw.includes('LINKY_SYNC_SCOPE_REQUIRED')) return '完整同步必须先选定一个项目组。'
-  if (raw.includes('LINKY_SYNC_DEPTH_INVALID')) return '同步深度不合法。'
-  if (raw.includes('LINKY_DETAIL_NOT_SYNCED')) {
-    return '所选需求还没有正文：请先对当前项目组与发布窗口做一次「完整同步」，再导入。'
-  }
-  if (raw.includes('LINKY_ATTACHMENTS_NOT_READY')) {
-    return '所选需求有附件还没取到。可以重试同步，或勾选「允许缺少附件」后继续导入。'
-  }
-  if (raw.includes('LINKY_STORY_NOT_IN_CATALOG')) return '所选需求不在镜像里，请先刷新。'
   if (raw.includes('LINKY_IMPORT_EMPTY_SELECTION')) return '请先勾选要导入的需求。'
-  if (raw.includes('ACTIVE_JOB_EXISTS')) return '该批次有分析任务在运行，先停止后再导入。'
+  if (raw.includes('LINKY_IMPORT_WORKSPACE_REQUIRED')) return '请先选定项目组，它定义了这批需求的来源。'
+  if (raw.includes('LINKY_IMPORT_TOO_MANY_STORIES')) return '一次最多导入 500 条需求，请拆成多个批次。'
+  if (raw.includes('LINKY_IMPORT_STORY_NO_REQUIREMENT_SOURCE')) {
+    return '有需求在 Linky 里既没有正文也没有附件，已跳过：AI 不能在不知道需求内容的情况下判断代码。'
+  }
+  if (raw.includes('LINKY_IMPORT_STORY_NOT_REQUESTED')) return '导入单与提交的需求不匹配，请重新发起导入。'
+  if (raw.includes('LINKY_IMPORT_LEASE_LOST')) return '这张导入单已被另一个 Worker 接管，请刷新查看进度。'
+  if (raw.includes('LINKY_IMPORT_NOT_FOUND')) return '找不到这张导入单。'
+  if (raw.includes('ACTIVE_JOB_EXISTS')) return '该批次有分析任务在运行，先停止后再导入需求。'
   if (raw.includes('BATCH_READ_ONLY')) return '该批次已完成或已有 AI 结果，不能再导入需求。'
   return raw
 }

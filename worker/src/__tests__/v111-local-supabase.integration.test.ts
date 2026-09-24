@@ -11,6 +11,7 @@ import { startMockModelServer } from './helpers/acp-mock-model.js'
 import type { WorkerConfig } from '../config.js'
 import type { DbClient, RpcOptions } from '../db/client.js'
 import { JobsDb } from '../db/jobs.js'
+import { REPOSITORY_NAMES } from '../git/repositories.js'
 import { collectRepositoryHistory } from '../git/story-history.js'
 import { runCommand } from '../git/run.js'
 import { Logger } from '../logger.js'
@@ -29,12 +30,15 @@ const RAW_EMAIL = 'v111.raw.owner@example.invalid'
 const RAW_MODEL_TOKEN = 'v111-local-raw-model-token-not-a-real-secret'
 const RAW_DIFF_MARKER = 'V111_RAW_DIFF_BODY_MUST_NOT_REACH_ORDINARY_TELEMETRY'
 const TEST_PEPPER = 'v111-local-transaction-pepper-not-a-real-secret'
-const REPOSITORIES = [
-  'kdmanage-backend',
-  'kdmanage-frontend',
-  'tmanage-backend',
-  'tmanage-frontend',
-] as const
+/*
+ * 直接用生产白名单，不在这里另抄一份。
+ *
+ * 抄一份的代价在扩仓时很具体：`save_repository_snapshots` 要求快照数量等于白名单长度，
+ * 而这个用例会按自己那份清单造 bare 仓库并冻结 —— 少一个仓，整条 E2E 以
+ * `exactly N repository snapshots are required` 失败，而失败点离真正的原因（清单没跟着改）
+ * 隔了十几层调用。
+ */
+const REPOSITORIES = REPOSITORY_NAMES
 const silentLogger = new Logger({ sink: () => undefined, minLevel: 'error' })
 
 function quoteSql(value: string): string {
@@ -383,10 +387,10 @@ describe('V1.11 local Supabase identity preparation smoke', () => {
   }, 120_000)
 })
 
-type FourRepoFixture = Record<(typeof REPOSITORIES)[number], { remote: string; work: string; head: string }>
+type RepoFixtures = Record<(typeof REPOSITORIES)[number], { remote: string; work: string; head: string }>
 
-async function createFourBareFixtures(root: string): Promise<FourRepoFixture> {
-  const result = {} as FourRepoFixture
+async function createBareFixtures(root: string): Promise<RepoFixtures> {
+  const result = {} as RepoFixtures
   const oldDate = new Date(Date.now() - 40 * 86_400_000).toISOString()
   const recentDate = new Date(Date.now() - 86_400_000).toISOString()
 
@@ -443,7 +447,7 @@ async function createFourBareFixtures(root: string): Promise<FourRepoFixture> {
 describe('V1.11 full local transaction E2E', () => {
   let root = ''
   let db: TransactionPsqlDbClient
-  let fixtures: FourRepoFixture
+  let fixtures: RepoFixtures
   let model: Awaited<ReturnType<typeof startMockModelServer>>
   let runtimeEvents: RuntimeEventReporterLike | null = null
   let aiCandidateId = ''
@@ -452,7 +456,7 @@ describe('V1.11 full local transaction E2E', () => {
   beforeAll(async () => {
     if (!runFullE2e) return
     root = mkdtempSync(join(tmpdir(), 'v111-full-e2e-'))
-    fixtures = await createFourBareFixtures(root)
+    fixtures = await createBareFixtures(root)
     model = await startMockModelServer([
       {
         name: 'read',

@@ -1525,6 +1525,10 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         // 物化结果在 workspace 建好之后才有，所以这里取运行期字段而不是构造参数。
         attachments: this.materializedRequirementAttachments,
         missingAttachmentCount: this.missingRequirementAttachments,
+        // 冻结快照里没有 detailed_description，就是"上游这条需求没有正文"。
+        requirementTextMissing:
+          this.options.analysisScope !== undefined
+          && (this.options.analysisScope.requirement_context?.detailed_description ?? null) === null,
       },
       branch: this.options.branch,
       pins: this.options.snapshots.pins(),

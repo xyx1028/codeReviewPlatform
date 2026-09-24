@@ -329,97 +329,35 @@ export interface ReviewStoryAttachment {
   created_at: string
 }
 
-/** V1.20：Linky 用户故事镜像行。看板的全部筛选都查它，不直连 Linky。 */
-export interface LinkyCatalogStory {
-  issue_id: string
-  story_code: string
-  title: string
-  workspace_id: string
-  workspace_name: string
-  status_label: string | null
-  assignee_name: string | null
-  iteration: string | null
-  release_window: string | null
-  subject_name: string | null
-  requirement_detail: string | null
-  team: { req?: Array<{ id?: string; name: string }>; dev?: Array<{ id?: string; name: string }>; test?: Array<{ id?: string; name: string }> } | null
-  team_resolve_error: string | null
-  story_url: string | null
-  list_synced_at: string
-  detail_synced_at: string | null
-  attachment_count: number
-}
+export type LinkyBatchImportStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
 
-export type LinkyAttachmentFetchStatus = 'PENDING' | 'STORED' | 'SKIPPED' | 'FAILED'
-
-export interface LinkyCatalogAttachment {
+/**
+ * V1.20：按批次的需求导入单。
+ *
+ * 前端只提交「项目组 + 发布窗口 + 勾选的编号」；正文与附件由内网侧的 Worker 取，
+ * 在确认那一刻冻结进 review_story(+_attachment)。这张单子是进度与失败原因的唯一来源。
+ */
+export interface LinkyBatchImportRequest {
   id: string
-  issue_id: string
-  linky_attachment_id: string
-  filename: string
-  content_type: string | null
-  size_bytes: number | null
-  storage_path: string | null
-  content_sha256: string | null
-  fetch_status: LinkyAttachmentFetchStatus
-  fetch_error: string | null
-  synced_at: string | null
-}
-
-export type LinkySyncDepth = 'LIST' | 'FULL'
-export type LinkySyncStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
-
-export interface LinkySyncRequest {
-  id: string
-  depth: LinkySyncDepth
+  batch_id: string
   workspace_id: string | null
-  workspace_name: string | null
+  workspace_name: string
   release_window: string | null
-  scope_key: string
-  status: LinkySyncStatus
+  story_codes: string[]
+  status: LinkyBatchImportStatus
   attempt: number
   worker_id: string | null
-  stories_synced: number | null
-  details_synced: number | null
-  attachments_stored: number | null
-  attachments_failed: number | null
-  bytes_downloaded: number | null
+  stories_total: number
+  stories_committed: number
+  attachments_stored: number
+  attachments_failed: number
+  bytes_downloaded: number
+  stories_failed: Array<{ story_code: string; code: string; message: string }>
   error_code: string | null
   error_message: string | null
   created_at: string
   started_at: string | null
   finished_at: string | null
-}
-
-export interface LinkyFacetEntry {
-  value: string
-  count: number
-}
-
-export interface LinkyWorkspaceFacet {
-  workspace_id: string
-  workspace_name: string
-  count: number
-  list_synced_at: string | null
-  detail_synced_at: string | null
-}
-
-export interface LinkyCatalogFacets {
-  total: number
-  workspaces: LinkyWorkspaceFacet[]
-  release_windows: LinkyFacetEntry[]
-  iterations: LinkyFacetEntry[]
-  statuses: LinkyFacetEntry[]
-  assignees: LinkyFacetEntry[]
-}
-
-export interface LinkyImportResult {
-  batch_id: string
-  requested: number
-  inserted: number
-  updated: number
-  attachments: number
-  attachments_missing: number
 }
 
 export interface ImportFileRecord {
@@ -712,7 +650,7 @@ export interface EvidenceSummary {
 // get_analysis_runtime_console 返回的脱敏事实事件与投影。数据库永不返回展示文案 ——
 // 中文只存在于 src/lib/labels.ts。payload 只有白名单里的机器码与标量：没有 Prompt、
 // 没有工具参数/返回、没有命令、没有 stdout/stderr、没有 URL、没有绝对路径、没有 token。
-// 唯一的路径类字段是 repository_name，它是四仓枚举。
+// 唯一的路径类字段是 repository_name，它是仓库白名单枚举。
 //
 // 三个 AI 诊断 RPC 故意**没有**对应的前端类型：它们不授予 authenticated，浏览器拿不到
 // （方案 §1.2 / §6.10）。归因数据走数据库与结构化日志，取数通道是 scripts/runtime-report.mjs。

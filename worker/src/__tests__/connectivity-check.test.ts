@@ -1,3 +1,4 @@
+import { ALLOWED_BRANCHES, REPOSITORIES, REPOSITORY_NAMES } from '../git/repositories.js'
 import { describe, expect, it, vi } from 'vitest'
 import {
   ConnectivityConfigError,
@@ -89,16 +90,17 @@ describe('loadConnectivityConfig', () => {
 })
 
 describe('runConnectivityCheck', () => {
-  it('checks 4 repositories x 3 branches and sends only a minimal model ping', async () => {
+  it('checks every whitelisted repository x 3 allowed branches and sends only a minimal model ping', async () => {
     const output: string[] = []
+    const expectedRepositoryUrls = REPOSITORIES.map(
+      (repository) => `http://git-mock:8080${repository.path}`,
+    )
     const gitRefProbe = vi.fn(async (
       repositoryUrl: string,
       _branch: 'feature_dev' | 'feature_sit' | 'release',
       args: string[],
     ) => {
-      expect(repositoryUrl).toMatch(
-        /^http:\/\/git-mock:8080\/kwork\/manage\/(kdmanage|tmanage)-(backend|frontend)\.git$/,
-      )
+      expect(expectedRepositoryUrls).toContain(repositoryUrl)
       expect(args.join(' ')).not.toContain(DEPLOY_TOKEN)
       expect(args).toHaveLength(2)
       expect(args[0]).toBe('-c')
@@ -115,12 +117,15 @@ describe('runConnectivityCheck', () => {
     })
 
     expect(summary.ok).toBe(true)
-    expect(summary.total).toBe(14)
-    expect(summary.by_component.git).toEqual({ total: 12, passed: 12, failed: 0 })
+    expect(summary.total).toBe(REPOSITORY_NAMES.length * ALLOWED_BRANCHES.length + 2)
+    // 期望值由白名单推导：写死 12 的那一版在加第 5 个仓时会失败，而失败信息只说
+    // "expected 12 got 15"，看不出该改的是清单还是断言。
+    const gitProbeCount = REPOSITORY_NAMES.length * ALLOWED_BRANCHES.length
+    expect(summary.by_component.git).toEqual({ total: gitProbeCount, passed: gitProbeCount, failed: 0 })
     expect(summary.by_component.supabase).toEqual({ total: 1, passed: 1, failed: 0 })
     expect(summary.by_component.model).toEqual({ total: 1, passed: 1, failed: 0 })
-    expect(gitRefProbe).toHaveBeenCalledTimes(12)
-    expect(new Set(summary.checks.filter((c) => c.component === 'git').map((c) => c.target)).size).toBe(12)
+    expect(gitRefProbe).toHaveBeenCalledTimes(gitProbeCount)
+    expect(new Set(summary.checks.filter((c) => c.component === 'git').map((c) => c.target)).size).toBe(gitProbeCount)
 
     expect(modelRequests).toHaveLength(1)
     expect(modelRequests[0]?.headers.get('Authorization')).toBe(`Bearer ${MODEL_KEY}`)
@@ -153,7 +158,7 @@ describe('runConnectivityCheck', () => {
     })
 
     expect(summary.ok).toBe(false)
-    expect(summary.total).toBe(12)
+    expect(summary.total).toBe(REPOSITORY_NAMES.length * ALLOWED_BRANCHES.length)
     expect(summary.failed).toBe(1)
     expect(summary.checks[1]?.error_code).toBe('GIT_BRANCH_MISSING')
     expect(output.join('\n')).not.toContain('sensitive remote error body')

@@ -25,7 +25,7 @@ import {
 } from '../monitoring/runtime-event-reporter.js'
 
 /**
- * Freeze all four repositories for a job's requested branch and persist the
+ * Freeze every whitelisted repository for a job's requested branch and persist the
  * snapshots. The commit SHAs become the single source of truth for the job.
  * Any failure is persisted by the current claim owner before it is rethrown.
  */
@@ -65,7 +65,7 @@ export async function prepareJob(
   try {
     for (const repo of REPOSITORIES) {
       const start = Date.now()
-      // payload 仅 repository_name（四仓枚举）：不含路径，也不含远程 URL。
+      // payload 仅 repository_name（白名单枚举）：不含路径，也不含远程 URL。
       runtimeEvents.report({
         type: 'REPOSITORY_PREPARE_STARTED',
         payload: { repository_name: repo.name },
@@ -111,7 +111,7 @@ export async function prepareJob(
       })
     }
 
-    // v1 完全保持旧路径：一次 RPC 保存四仓快照并推进 PROCESSING。
+    // v1 完全保持旧路径：一次 RPC 保存全部仓库快照并推进 PROCESSING。
     if ((claim.job.analysis_context_version ?? 1) === 1) {
       await runtimeEvents.flush().catch(() => undefined)
       await jobsDb.saveRepositorySnapshots(jobId, config.workerId, snapshots)
@@ -122,7 +122,7 @@ export async function prepareJob(
       return
     }
 
-    // V2 的顺序不可交换：四仓 HEAD 全部固定 → 保存 snapshots（数据库进入
+    // V2 的顺序不可交换：全部仓库 HEAD 固定 → 保存 snapshots（数据库进入
     // PREPARING_SCOPE 并冻结第一代输入）→ 读取同一冻结输入 → 本地 Git 历史/身份匹配
     // → 全部 manifest → 全部 Story scope → 原子 finalize。中途任何失败都不能把 Job
     // 推进 PROCESSING，也不能退化成 v1。
@@ -217,7 +217,7 @@ export async function prepareJob(
       }
     }
     /*
-     * 四个仓库的冻结范围全空 = 这个 Job 的每个需求都只能全仓降级。
+     * 全部仓库的冻结范围都空 = 这个 Job 的每个需求都只能全仓降级。
      * 它以前是无声的：范围卡片上只是一排 0，没有任何日志或错误码说"这一批精准分析已经失效"。
      * 这里留一行 warn，让运维在模型开始烧钱之前就能看到。
      */

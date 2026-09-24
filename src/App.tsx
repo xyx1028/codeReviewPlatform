@@ -6,7 +6,6 @@ import {
   App as AntApp,
   Button,
   Card,
-  Checkbox,
   Col,
   Descriptions,
   Divider,
@@ -57,7 +56,8 @@ import {
   consumeWechatAuthError,
   confirmAiResultImport,
   describeLinkyError,
-  importLinkyStoriesFromCatalog,
+  getLatestLinkyBatchImport,
+  requestLinkyBatchImport,
   listReviewStoryAttachments,
   createBatch,
   deleteBatch,
@@ -649,7 +649,7 @@ function Shell({ session }: { session: Session }) {
           <Routes>
             <Route path="/" element={<Navigate to="/batches" replace />} />
             <Route path="/batches" element={<BatchesPage canCreateBatch={canCreateBatch} canManageBatch={canManageBatch} />} />
-            <Route path="/stories" element={<StoryBoardPage role={role} userId={session.user.id} />} />
+            <Route path="/stories" element={<StoryBoardPage />} />
             <Route path="/operation-log" element={<OperationLogPage scope="batch" />} />
             <Route path="/model-operation-log" element={<OperationLogPage scope="model" isAdmin={isAdmin} />} />
             <Route
@@ -1470,15 +1470,21 @@ function BatchPage({ canManageBatch }: { canManageBatch: (batch: ReviewBatch) =>
 }
 
 /**
- * 批次内的需求导入页（V1.20 起直连 Linky）。
+ * 批次内的需求导入页（V1.20 修订）。
  *
- * 换掉的不只是入口：原来是「上传 Excel → 把中文列名一列一列对到平台字段 → 校验 → 入库」，
- * 现在是「选项目组与发布窗口 → 勾需求 → 导入」。字段映射整页删除，因为接口给的是结构化
- * 数据，需求正文与附件也一起进来了 —— 那两样正是 Excel 时代拿不到、而 AI 判一致性最需要的。
+ * 这一页回答的是「这个批次要分析哪一批需求」：选项目组 + 发布窗口，勾选需求，点确认。
+ * **确认那一刻**平台才下一张导入单，由内网侧的 Worker 去取正文与附件并冻结进批次 ——
+ * 此后分析读的都是这份快照，Linky 后续怎么改都不会让在跑的批次含义漂移。
+ *
+ * 看板（/stories）是实时的、只读的；这里是冻结的、一次性的。两者刻意不共用同一个按钮。
  */
 function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batch: ReviewBatch; canManage: boolean }) {
   const [selected, setSelected] = useState<string[]>([])
-  const [allowMissingAttachments, setAllowMissingAttachments] = useState(false)
+  const [scope, setScope] = useState<{ workspaceName: string | null; releaseWindow: string | null }>({
+    workspaceName: null,
+    releaseWindow: null,
+  })
+  const [watchedImportId, setWatchedImportId] = useState<string | null>(null)
   const { message } = AntApp.useApp()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
@@ -1490,18 +1496,54 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
     queryFn: () => listReviewStoryAttachments(importedStories.map((story) => story.id)),
     enabled: importedStories.length > 0,
   })
-  const importMutation = useMutation({
-    mutationFn: () =>
-      importLinkyStoriesFromCatalog({ batchId, issueIds: selected, allowMissingAttachments }),
-    onSuccess: (result) => {
-      message.success(`已导入 ${result.inserted} 条新需求、更新 ${result.updated} 条，附件 ${result.attachments} 个`)
-      setSelected([])
-      queryClient.invalidateQueries({ queryKey: ['stories', batchId] })
-      queryClient.invalidateQueries({ queryKey: ['review-story-attachments', batchId] })
-      queryClient.invalidateQueries({ queryKey: ['batch', batchId] })
-      queryClient.invalidateQueries({ queryKey: ['batch-workspace', batchId] })
-      queryClient.invalidateQueries({ queryKey: ['batches'] })
+  const latestImportQuery = useQuery({
+    queryKey: ['linky-batch-import', batchId],
+    queryFn: () => getLatestLinkyBatchImport(batchId),
+    // 有在途单子时才轮询：导入是秒级的，但要等 Worker 的一次轮询间隔。
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status === 'QUEUED' || status === 'RUNNING' ? 2000 : false
+    },
+  })
+  const latestImport = latestImportQuery.data ?? null
+  const importing = latestImport?.status === 'QUEUED' || latestImport?.status === 'RUNNING'
+
+  // 单子跑完就刷新批次里的需求与附件。
+  useEffect(() => {
+    if (watchedImportId === null || latestImport === null) return
+    if (latestImport.id !== watchedImportId) return
+    if (latestImport.status !== 'SUCCEEDED' && latestImport.status !== 'FAILED') return
+    setWatchedImportId(null)
+    setSelected([])
+    queryClient.invalidateQueries({ queryKey: ['stories', batchId] })
+    queryClient.invalidateQueries({ queryKey: ['review-story-attachments', batchId] })
+    queryClient.invalidateQueries({ queryKey: ['batch', batchId] })
+    queryClient.invalidateQueries({ queryKey: ['batch-workspace', batchId] })
+    queryClient.invalidateQueries({ queryKey: ['batches'] })
+    if (latestImport.status === 'SUCCEEDED') {
+      message.success(
+        `已冻结 ${latestImport.stories_committed} 条需求、${latestImport.attachments_stored} 个附件`,
+      )
       navigate(`/batches/${batchId}/ai-result`)
+    } else {
+      message.error(`需求导入失败：${latestImport.error_code ?? ''} ${latestImport.error_message ?? ''}`)
+    }
+  }, [watchedImportId, latestImport, batchId, queryClient, message, navigate])
+
+  const importMutation = useMutation({
+    mutationFn: () => {
+      if (scope.workspaceName === null) throw new Error('LINKY_IMPORT_WORKSPACE_REQUIRED')
+      return requestLinkyBatchImport({
+        batchId,
+        workspaceName: scope.workspaceName,
+        releaseWindow: scope.releaseWindow,
+        storyCodes: selected,
+      })
+    },
+    onSuccess: (requestId) => {
+      setWatchedImportId(requestId)
+      void latestImportQuery.refetch()
+      message.info('已提交导入：内网侧 Worker 正在取需求正文与附件')
     },
     onError: (error) => message.error(describeLinkyError(error)),
   })
@@ -1516,12 +1558,74 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
           description={canManage ? '批次完成后默认只读，如需继续导入请先在统计看板重新打开批次。' : '只有管理员或该批次的创建者可以导入需求。'}
         />
       ) : null}
+
+      {latestImport !== null ? (
+        <Card title="上一次导入">
+          <Space direction="vertical" size="small" className="full-width">
+            <Text>
+              {latestImport.workspace_name}
+              {latestImport.release_window ? ` / ${latestImport.release_window}` : ''}
+              {' · '}
+              勾选 {latestImport.stories_total} 条 · 已冻结 {latestImport.stories_committed} 条 · 附件{' '}
+              {latestImport.attachments_stored} 个
+              {latestImport.attachments_failed > 0 ? `（失败 ${latestImport.attachments_failed} 个）` : ''}
+              {' · '}
+              <Tag
+                color={
+                  latestImport.status === 'SUCCEEDED'
+                    ? 'green'
+                    : latestImport.status === 'FAILED'
+                      ? 'red'
+                      : 'blue'
+                }
+              >
+                {latestImport.status}
+              </Tag>
+            </Text>
+            {importing ? (
+              <Progress
+                percent={
+                  latestImport.stories_total === 0
+                    ? 0
+                    : Math.round((latestImport.stories_committed / latestImport.stories_total) * 100)
+                }
+                status="active"
+              />
+            ) : null}
+            {latestImport.error_code ? (
+              <Alert
+                type="error"
+                showIcon
+                title={`导入失败：${latestImport.error_code}`}
+                description={latestImport.error_message ?? ''}
+              />
+            ) : null}
+            {latestImport.stories_failed.length > 0 ? (
+              <Alert
+                type="warning"
+                showIcon
+                title={`${latestImport.stories_failed.length} 条需求没有导入`}
+                description={
+                  <Space direction="vertical" size={2}>
+                    {latestImport.stories_failed.slice(0, 10).map((failure) => (
+                      <span key={failure.story_code}>
+                        {failure.story_code}：{failure.code} {failure.message}
+                      </span>
+                    ))}
+                  </Space>
+                }
+              />
+            ) : null}
+          </Space>
+        </Card>
+      ) : null}
+
       {importedStories.length > 0 ? (
-        <Card title={`本批次已导入 ${importedStories.length} 条需求`}>
+        <Card title={`本批次已冻结 ${importedStories.length} 条需求`}>
           <Space direction="vertical" size="small" className="full-width">
             <Text type="secondary">
-              附件 {attachmentsQuery.data?.length ?? 0} 个已随批次冻结；分析时会物化到 Agent 的
-              workspace（requirements/ 目录），并按 sha256 校验。
+              附件 {attachmentsQuery.data?.length ?? 0} 个已随批次冻结（按 sha256 对账）；分析时会物化到
+              Agent 的 workspace 的 requirements/ 目录。
             </Text>
             <Table
               rowKey="id"
@@ -1554,35 +1658,33 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
           </Space>
         </Card>
       ) : null}
+
       {readOnly ? null : (
         <>
           <Alert
             type="info"
             showIcon
-            title="从 Linky 直接导入"
-            description="勾选需求后导入即可；正文、关联特性、迭代、发布窗口与需求/开发/测试负责人全部按结构化字段落库，附件字节随批次冻结。重复导入同一条需求是更新而不是新增。"
+            title="选定这批需求的来源"
+            description="先选项目组（必选，它定义了这批需求属于谁），再按发布窗口收窄，然后勾选需求。点「确认导入」后平台才去取正文与附件并冻结进本批次——在那之前什么都不会入库。同一条需求重复导入是更新而不是新增。"
           />
           <LinkyStoryPicker
-            canSync={canManage}
             selectable
-            selectedIssueIds={selected}
-            onSelectionChange={setSelected}
+            selectedCodes={selected}
+            onSelectionChange={(codes) => setSelected(codes)}
+            onScopeChange={setScope}
             actions={
               <Space>
-                <Checkbox
-                  checked={allowMissingAttachments}
-                  onChange={(event) => setAllowMissingAttachments(event.target.checked)}
-                >
-                  允许缺少附件
-                </Checkbox>
-                <Text type="secondary">已选 {selected.length} 条</Text>
+                <Text type="secondary">
+                  {scope.workspaceName === null ? '未选项目组' : scope.workspaceName}
+                  {scope.releaseWindow ? ` / ${scope.releaseWindow}` : ''} · 已选 {selected.length} 条
+                </Text>
                 <Button
                   type="primary"
-                  disabled={selected.length === 0}
-                  loading={importMutation.isPending}
+                  disabled={selected.length === 0 || scope.workspaceName === null || importing}
+                  loading={importMutation.isPending || importing}
                   onClick={() => importMutation.mutate()}
                 >
-                  导入到本批次
+                  确认导入并冻结
                 </Button>
               </Space>
             }
@@ -1613,7 +1715,20 @@ function formatDuration(startedAt: string | null, finishedAt: string | null) {
   return `${pad(hh)}:${pad(mm)}:${pad(ss)}`
 }
 
-const REQUIRED_REPOSITORIES = ['kdmanage-backend', 'kdmanage-frontend', 'tmanage-backend', 'tmanage-frontend']
+/**
+ * 「待准备仓库」提示用的白名单。
+ *
+ * 它只驱动一句提示文案（哪些仓还没出现在快照里），真正的准入在 Worker 的
+ * `REPOSITORIES` 与数据库的 `analysis_repository_catalog()`。但漏改这里会让提示少报一个仓，
+ * 于是"卡在准备中"看起来像已经准备齐了 —— 所以它必须跟着白名单一起改。
+ */
+const REQUIRED_REPOSITORIES = [
+  'kdmanage-backend',
+  'kdmanage-frontend',
+  'kwork-server',
+  'tmanage-backend',
+  'tmanage-frontend',
+]
 
 /**
  * AI 自动分析卡片：主入口。

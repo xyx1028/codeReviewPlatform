@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { REPOSITORY_NAMES } from '../git/repositories.js'
 import { GitLabReadonlyClient, GitLabReadonlyError } from '../git/gitlab-readonly-client.js'
 import { gitEmailDiscoveryErrorCode } from '../index.js'
 
@@ -74,6 +75,7 @@ describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
       },
       [mrListKey('kwork/manage/kdmanage-frontend', '1001')]: { body: [] },
       [mrListKey('kwork/manage/tmanage-frontend', '1001')]: { body: [] },
+      [mrListKey('kwork/kwork-server', '1001')]: { body: [] },
       [mrCommitsKey('kwork/manage/tmanage-backend', 3725)]: {
         body: [
           {
@@ -161,7 +163,10 @@ describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
     ])
     expect(result.excludedCandidateCount).toBe(0)
     // 四个白名单仓库各问一次 MR 列表，且只问白名单
-    expect(calls.filter((call) => call.includes('/merge_requests?')).length).toBe(4)
+    // 每个受评审仓库各查一次 MR 列表。
+    expect(calls.filter((call) => call.includes('/merge_requests?')).length).toBe(
+      REPOSITORY_NAMES.length,
+    )
     expect(calls.some((call) => call.includes('not-in-whitelist'))).toBe(false)
   })
 
@@ -181,6 +186,7 @@ describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
       [mrListKey('kwork/manage/kdmanage-frontend', '2956')]: { body: [] },
       [mrListKey('kwork/manage/tmanage-backend', '2956')]: { body: [] },
       [mrListKey('kwork/manage/tmanage-frontend', '2956')]: { body: [] },
+      [mrListKey('kwork/kwork-server', '2956')]: { body: [] },
       [mrCommitsKey('kwork/manage/kdmanage-backend', 1796)]: {
         body: [
           // 别人的提交占绝大多数：过滤前它会排在第一个候选
@@ -242,6 +248,7 @@ describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
       [mrListKey('kwork/manage/kdmanage-frontend', '2956')]: { body: [] },
       [mrListKey('kwork/manage/tmanage-backend', '2956')]: { body: [] },
       [mrListKey('kwork/manage/tmanage-frontend', '2956')]: { body: [] },
+      [mrListKey('kwork/kwork-server', '2956')]: { body: [] },
       [mrCommitsKey('kwork/manage/kdmanage-backend', 1796)]: {
         body: [
           { id: 'a'.repeat(40), author_email: 'jin_gu@kingdee.com', author_name: 'jin_gu' },
@@ -275,6 +282,7 @@ describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
       [mrListKey('kwork/manage/kdmanage-frontend', '8')]: { body: [] },
       [mrListKey('kwork/manage/tmanage-backend', '8')]: { body: [] },
       [mrListKey('kwork/manage/tmanage-frontend', '8')]: { body: [] },
+      [mrListKey('kwork/kwork-server', '8')]: { body: [] },
     })
     const client = new GitLabReadonlyClient({
       baseUrl: BASE, apiToken: 'test-token', fetchImpl: impl, now: () => NOW,
@@ -325,6 +333,7 @@ describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
         body: [{ iid: 1, updated_at: '2026-09-19T02:00:00Z' }],
       },
       [mrListKey('kwork/manage/tmanage-frontend', '1001')]: { body: [] },
+      [mrListKey('kwork/kwork-server', '1001')]: { body: [] },
       [mrCommitsKey('kwork/manage/tmanage-backend', 1)]: {
         body: [{
           id: 'f'.repeat(40),
@@ -356,6 +365,7 @@ describe('GitLabReadonlyClient.discoverAuthorCommitEmails', () => {
       },
       [mrListKey('kwork/manage/tmanage-backend', '1001')]: { body: many },
       [mrListKey('kwork/manage/tmanage-frontend', '1001')]: { body: [] },
+      [mrListKey('kwork/kwork-server', '1001')]: { body: [] },
       [mrListKey('kwork/manage/kdmanage-backend', '1001')]: { body: [] },
       [mrListKey('kwork/manage/kdmanage-frontend', '1001')]: { body: [] },
     }

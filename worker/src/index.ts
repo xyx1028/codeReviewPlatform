@@ -29,7 +29,10 @@ import { SupabaseSkillStorageClient, type SkillStorageClient } from './ai/skills
 import { cleanOrphanedOverlays } from './ai/workspace/overlay-cleaner.js'
 import { SupabaseStoryAttachmentStorage, type StoryAttachmentStorage } from './linky/attachment-storage.js'
 import { LinkyApiError, LinkyClient } from './linky/client.js'
-import { runLinkySync, type LinkySyncClaim } from './linky/sync-runner.js'
+import {
+  runLinkyBatchImport,
+  type LinkyBatchImportClaim,
+} from './linky/batch-import-runner.js'
 import { loadConfig, type WorkerConfig } from './config.js'
 import { SlotPool } from './coordination/concurrency.js'
 import { Heartbeat } from './coordination/heartbeat.js'
@@ -734,26 +737,26 @@ export async function runGitEmailDiscovery(
 
 
 /**
- * 一次 Linky 同步（V1.20）。
+ * 一次「批次需求导入」（V1.20 修订）。
  *
  * 失败分三类，处理方式不同：
- *   租约丢了（LINKY_SYNC_LEASE_LOST）—— 说明已经被别的副本接管，这里**什么都不写**，
- *     否则会把别人正在做的请求改成 FAILED。
- *   Worker 正在关闭 —— 归还 claim，让请求回到 QUEUED，下一个副本接着做。
- *   其它 —— 写 FAILED 与稳定错误码，页面要能说清"上次同步为什么失败"。
+ *   租约丢了（LINKY_IMPORT_LEASE_LOST）—— 已被别的副本接管，这里**什么都不写**，
+ *     否则会把别人正在做的导入改成 FAILED。
+ *   Worker 正在关闭 —— 归还 claim，单子回到 QUEUED，下一个副本接着做。
+ *   其它 —— 写 FAILED 与稳定错误码，批次页要能说清"这次导入为什么没成"。
  */
-export async function runLinkySyncTask(
+export async function runLinkyBatchImportTask(
   config: WorkerConfig,
   jobsDb: JobsDb,
   storage: StoryAttachmentStorage,
   client: LinkyClient,
-  claim: LinkySyncClaim,
+  claim: LinkyBatchImportClaim,
   logger: Logger,
   signal: AbortSignal,
 ): Promise<void> {
-  const log = logger.child({ linky_sync_id: claim.id })
+  const log = logger.child({ linky_import_id: claim.id, batch_id: claim.batch_id })
   try {
-    const outcome = await runLinkySync({
+    const outcome = await runLinkyBatchImport({
       claim,
       workerId: config.workerId,
       client,
@@ -762,67 +765,61 @@ export async function runLinkySyncTask(
       limits: {
         attachmentMaxBytes: config.linky.attachmentMaxBytes,
         storyAttachmentMaxBytes: config.linky.storyAttachmentMaxBytes,
-        maxDetailsPerSync: config.linky.maxDetailsPerSync,
         leaseSeconds: config.linky.syncLeaseSeconds,
       },
       logger: log,
       signal,
       webBaseUrl: config.linky.webBaseUrl,
     })
-    await jobsDb.completeLinkySync({
-      syncId: claim.id,
+    await jobsDb.completeLinkyBatchImport({
+      requestId: claim.id,
       workerId: config.workerId,
       claimToken: claim.claim_token,
-      storiesSynced: outcome.storiesSynced,
-      detailsSynced: outcome.detailsSynced,
-      attachmentsStored: outcome.attachmentsStored,
-      attachmentsFailed: outcome.attachmentsFailed,
-      bytesDownloaded: outcome.bytesDownloaded,
     })
-    log.info('linky_sync_completed', {
-      event: 'linky_sync_completed',
-      depth: claim.depth,
-      stories_synced: outcome.storiesSynced,
-      details_synced: outcome.detailsSynced,
+    log.info('linky_import_completed', {
+      event: 'linky_import_completed',
+      stories_requested: claim.story_codes.length,
+      stories_committed: outcome.storiesCommitted,
+      stories_failed: outcome.storiesFailed,
       attachments_stored: outcome.attachmentsStored,
       attachments_failed: outcome.attachmentsFailed,
       attachments_skipped: outcome.attachmentsSkipped,
       bytes_downloaded: outcome.bytesDownloaded,
-      story_failures: outcome.storyFailures.length,
     })
   } catch (error) {
     const code =
       error instanceof LinkyApiError
         ? error.code
-        : ((error as { code?: string } | null)?.code ?? 'LINKY_SYNC_FAILED')
-    if (code === 'LINKY_SYNC_LEASE_LOST' || (error as Error)?.name === 'LinkySyncLeaseLost') {
-      log.warn('linky_sync_lease_lost', { event: 'linky_sync_lease_lost', depth: claim.depth })
+        : ((error as { code?: string } | null)?.code ?? 'LINKY_IMPORT_FAILED')
+    if (code === 'LINKY_IMPORT_LEASE_LOST' || (error as Error)?.name === 'LinkyImportLeaseLost') {
+      log.warn('linky_import_lease_lost', { event: 'linky_import_lease_lost' })
       return
     }
     if (signal.aborted) {
       await jobsDb
-        .releaseLinkySyncClaim({
-          syncId: claim.id,
+        .releaseLinkyBatchImportClaim({
+          requestId: claim.id,
           workerId: config.workerId,
           claimToken: claim.claim_token,
         })
         .catch(() => false)
-      log.warn('linky_sync_released_on_shutdown', { event: 'linky_sync_released_on_shutdown' })
+      log.warn('linky_import_released_on_shutdown', {
+        event: 'linky_import_released_on_shutdown',
+      })
       return
     }
-    log.error('linky_sync_failed', {
-      event: 'linky_sync_failed',
-      depth: claim.depth,
+    log.error('linky_import_failed', {
+      event: 'linky_import_failed',
       error_code: code,
       error_message: redactError(error),
     })
     await jobsDb
-      .failLinkySync({
-        syncId: claim.id,
+      .failLinkyBatchImport({
+        requestId: claim.id,
         workerId: config.workerId,
         claimToken: claim.claim_token,
         errorCode: code,
-        errorMessage: error instanceof Error ? error.message.slice(0, 280) : 'Linky 同步失败',
+        errorMessage: error instanceof Error ? error.message.slice(0, 280) : 'Linky 需求导入失败',
       })
       .catch(() => false)
   }
@@ -1367,15 +1364,15 @@ export function startWorker(
 
 
   /*
-   * 第 5 条轮询：Linky 用户故事同步（V1.20）。
+   * 第 5 条轮询：Linky 批次需求导入（V1.20 修订）。
    *
-   * 没配 LINKY_API_BASE_URL 就整条不启动 —— 老部署升级后行为不变。
-   * 空闲时顺手清理"没有被任何批次引用、且超过保留期"的镜像附件字节：清理是无损的
-   * （元数据留着，下一次 FULL 同步会重新下载），被引用的对象由数据库函数排除在外。
+   * 触发点是用户在批次页点「确认导入」，所以这条循环平时是空转的 —— 它存在的理由是
+   * Linky 只在内网可达，而浏览器所在的网络不保证能写 Storage 与库。
+   * 没配 LINKY_API_BASE_URL 就整条不启动（升级后行为不变）。
    */
-  const linkySyncLoop = async (): Promise<void> => {
+  const linkyImportLoop = async (): Promise<void> => {
     if (config.linky.baseUrl === null) {
-      logger.info('linky_sync_disabled', { event: 'linky_sync_disabled' })
+      logger.info('linky_import_disabled', { event: 'linky_import_disabled' })
       return
     }
     const client = new LinkyClient({
@@ -1385,46 +1382,39 @@ export function startWorker(
       timeoutMs: config.linky.httpTimeoutMs,
       configId: config.linky.configId,
     })
-    const attachmentStorage = storyAttachmentStorage
-    logger.info('linky_sync_enabled', {
-      event: 'linky_sync_enabled',
+    logger.info('linky_import_enabled', {
+      event: 'linky_import_enabled',
       network_access_mode: config.linky.networkAccessMode,
       via_host_proxy:
         config.linky.networkAccessMode === 'HOST_PROXY' && config.modelConnectivityProxy !== null,
     })
-    let idleCycles = 0
     while (!stopped) {
       try {
         if (draining()) {
           await sleep(config.pollIntervalMs)
           continue
         }
-        const claim = await jobsDb.claimNextLinkySync(
+        const claim = await jobsDb.claimNextLinkyBatchImport(
           config.workerId,
           config.linky.syncLeaseSeconds,
         )
         if (!claim) {
-          idleCycles += 1
-          if (idleCycles % 120 === 0) {
-            await purgeUnreferencedLinkyAttachments(attachmentStorage)
-          }
           await sleep(config.pollIntervalMs)
           continue
         }
-        idleCycles = 0
         if (stopped) break
-        await runLinkySyncTask(
+        await runLinkyBatchImportTask(
           config,
           jobsDb,
-          attachmentStorage,
+          storyAttachmentStorage,
           client,
           claim,
           logger,
           shutdownController.signal,
         )
       } catch (error) {
-        logger.error('linky_sync_loop_error', {
-          event: 'linky_sync_loop_error',
+        logger.error('linky_import_loop_error', {
+          event: 'linky_import_loop_error',
           error_message: redactError(error),
         })
         await sleep(config.pollIntervalMs)
@@ -1432,36 +1422,11 @@ export function startWorker(
     }
   }
 
-  const purgeUnreferencedLinkyAttachments = async (
-    storage: StoryAttachmentStorage,
-  ): Promise<void> => {
-    try {
-      const candidates = await jobsDb.listLinkyCatalogAttachmentsForCleanup({
-        retentionDays: config.linky.catalogAttachmentRetentionDays,
-        limit: 200,
-      })
-      if (candidates.length === 0) return
-      await storage.remove(candidates.map((entry) => entry.storage_path))
-      for (const entry of candidates) {
-        await jobsDb.markLinkyCatalogAttachmentPurged(entry.id).catch(() => false)
-      }
-      logger.info('linky_attachment_cache_purged', {
-        event: 'linky_attachment_cache_purged',
-        purged: candidates.length,
-      })
-    } catch (error) {
-      logger.warn('linky_attachment_cache_purge_failed', {
-        event: 'linky_attachment_cache_purge_failed',
-        error_message: redactError(error),
-      })
-    }
-  }
-
   void loop()
   modelTestLoopPromise = modelTestLoop()
   gitEmailDiscoveryLoopPromise = gitEmailDiscoveryLoop()
   skillAiOptimizationLoopPromise = skillAiOptimizationLoop()
-  linkySyncLoopPromise = linkySyncLoop()
+  linkySyncLoopPromise = linkyImportLoop()
 
   return {
     stop(): Promise<void> {

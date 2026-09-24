@@ -28,20 +28,40 @@ describe('branch enum validation', () => {
 })
 
 describe('repository whitelist', () => {
-  it('has exactly the four repositories', () => {
-    expect(REPOSITORY_NAMES).toHaveLength(4)
+  it('has exactly the five reviewed repositories', () => {
+    expect(REPOSITORY_NAMES).toHaveLength(5)
     expect(new Set(REPOSITORY_NAMES)).toEqual(
-      new Set(['kdmanage-backend', 'kdmanage-frontend', 'tmanage-backend', 'tmanage-frontend']),
+      new Set([
+        'kdmanage-backend',
+        'kdmanage-frontend',
+        'kwork-server',
+        'tmanage-backend',
+        'tmanage-frontend',
+      ]),
     )
   })
 
   it('resolves whitelisted names to kingdee git URLs', () => {
     for (const r of REPOSITORIES) {
       expect(getRepositoryUrl(r.name)).toBe(r.url)
-      expect(r.url.startsWith('https://git.kingdee.com/kwork/manage/')).toBe(true)
+      expect(r.url.startsWith('https://git.kingdee.com/kwork/')).toBe(true)
       expect(isRepositoryName(r.name)).toBe(true)
       expect(assertRepositoryName(r.name)).toBe(r.name)
     }
+  })
+
+  /*
+   * 路径不是从名字推导出来的，这一条把它钉死。
+   *
+   * 前四个仓在 `kwork/manage/` 下，`kwork-server` 直接在 `kwork/` 下。任何"用名字拼前缀"的
+   * 简化都会让 kwork-server 指向一个不存在的 `kwork/manage/kwork-server.git`，而表现是
+   * 准备阶段 clone 失败 —— 一个看起来像网络问题的错误。
+   */
+  it('keeps each repository path explicit rather than derived from its name', () => {
+    const byName = new Map(REPOSITORIES.map((r) => [r.name, r.path]))
+    expect(byName.get('kwork-server')).toBe('/kwork/kwork-server.git')
+    expect(byName.get('kdmanage-backend')).toBe('/kwork/manage/kdmanage-backend.git')
+    expect(byName.get('tmanage-frontend')).toBe('/kwork/manage/tmanage-frontend.git')
   })
 
   it('supports a trusted custom origin while keeping every repository path fixed', () => {

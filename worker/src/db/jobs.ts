@@ -11,9 +11,9 @@ import type {
 } from '../git/gitlab-readonly-client.js'
 import type { DbClient } from './client.js'
 import type {
-  LinkySyncClaim,
-  LinkySyncPendingAttachment as LinkySyncPendingAttachmentRow,
-} from '../linky/sync-runner.js'
+  CommittedAttachment,
+  LinkyBatchImportClaim,
+} from '../linky/batch-import-runner.js'
 import type {
   RuntimeEventBatchResult,
   RuntimeEventTarget,
@@ -1748,18 +1748,17 @@ export class JobsDb {
   }
 
   // --------------------------------------------------------------------------
-  // V1.20 Linky 同步队列。
+  // V1.20 Linky 批次需求导入队列。
   //
-  // 与模型连接测试队列同一套形状：claim 拿到一次性 token，之后每一次写入都带
-  // token 过 fencing。镜像写入之所以也要 fencing，是因为一个丢了租约的 Worker
-  // 继续往镜像里写，会让页面上"上次同步"的时间与内容对不上。
+  // 与模型连接测试队列同一套形状：claim 拿到一次性 token，之后每一次写入都带 token 过
+  // fencing。逐条提交而不是整批提交，所以进度条是真的，中途失败也不会把已落库的需求回滚。
   // --------------------------------------------------------------------------
 
-  async claimNextLinkySync(
+  async claimNextLinkyBatchImport(
     workerId: string,
     leaseSeconds: number,
-  ): Promise<LinkySyncClaim | null> {
-    const data = await this.db.rpc<unknown>('claim_next_linky_sync', {
+  ): Promise<LinkyBatchImportClaim | null> {
+    const data = await this.db.rpc<unknown>('claim_next_linky_batch_import', {
       p_worker_id: workerId,
       p_lease_seconds: leaseSeconds,
     })
@@ -1767,28 +1766,31 @@ export class JobsDb {
     if (!row?.id) return null
     const claimToken = row.claim_token
     if (typeof claimToken !== 'string' || claimToken.length === 0) {
-      throw new Error('claim_next_linky_sync returned no claim token')
+      throw new Error('claim_next_linky_batch_import returned no claim token')
     }
-    const depth = row.depth === 'FULL' ? 'FULL' : 'LIST'
+    const codes = Array.isArray(row.story_codes)
+      ? row.story_codes.filter((code): code is string => typeof code === 'string')
+      : []
     return {
       id: String(row.id),
-      depth,
+      batch_id: String(row.batch_id),
       workspace_id: typeof row.workspace_id === 'string' ? row.workspace_id : null,
-      workspace_name: typeof row.workspace_name === 'string' ? row.workspace_name : null,
+      workspace_name: typeof row.workspace_name === 'string' ? row.workspace_name : '',
       release_window: typeof row.release_window === 'string' ? row.release_window : null,
+      story_codes: codes,
       claim_token: claimToken,
       attempt: typeof row.attempt === 'number' ? row.attempt : 0,
     }
   }
 
-  async heartbeatLinkySync(input: {
-    syncId: string
+  async heartbeatLinkyBatchImport(input: {
+    requestId: string
     workerId: string
     claimToken: string
     leaseSeconds: number
   }): Promise<boolean> {
-    const data = await this.db.rpc<unknown>('heartbeat_linky_sync', {
-      p_sync_id: input.syncId,
+    const data = await this.db.rpc<unknown>('heartbeat_linky_batch_import', {
+      p_request_id: input.requestId,
       p_worker_id: input.workerId,
       p_claim_token: input.claimToken,
       p_lease_seconds: input.leaseSeconds,
@@ -1796,119 +1798,66 @@ export class JobsDb {
     return data === true
   }
 
-  async upsertLinkyStoryCatalog(input: {
-    syncId: string
+  async commitLinkyBatchStory(input: {
+    requestId: string
     workerId: string
     claimToken: string
-    items: unknown[]
-  }): Promise<number> {
-    const data = await this.db.rpc<unknown>('upsert_linky_story_catalog', {
-      p_sync_id: input.syncId,
+    story: Record<string, unknown>
+    attachments: CommittedAttachment[]
+  }): Promise<string> {
+    const data = await this.db.rpc<unknown>('commit_linky_batch_story', {
+      p_request_id: input.requestId,
       p_worker_id: input.workerId,
       p_claim_token: input.claimToken,
-      p_items: input.items,
-    })
-    return typeof data === 'number' ? data : 0
-  }
-
-  async upsertLinkyStoryDetail(input: {
-    syncId: string
-    workerId: string
-    claimToken: string
-    issueId: string
-    detail: Record<string, unknown>
-    attachments: unknown[]
-  }): Promise<LinkySyncPendingAttachmentRow[]> {
-    const data = await this.db.rpc<unknown>('upsert_linky_story_detail', {
-      p_sync_id: input.syncId,
-      p_worker_id: input.workerId,
-      p_claim_token: input.claimToken,
-      p_issue_id: input.issueId,
-      p_detail: input.detail,
+      p_story: input.story,
       p_attachments: input.attachments,
     })
-    const row = unwrapMaybeObject<Record<string, unknown>>(data)
-    const pending = row?.pending_attachments
-    if (!Array.isArray(pending)) return []
-    return pending.flatMap((entry) => {
-      if (typeof entry !== 'object' || entry === null) return []
-      const record = entry as Record<string, unknown>
-      if (typeof record.id !== 'string' || typeof record.filename !== 'string') return []
-      if (typeof record.linky_attachment_id !== 'string') return []
-      return [
-        {
-          id: record.id,
-          linky_attachment_id: record.linky_attachment_id,
-          filename: record.filename,
-          content_type: typeof record.content_type === 'string' ? record.content_type : null,
-          size_bytes:
-            typeof record.size_bytes === 'number'
-              ? record.size_bytes
-              : typeof record.size_bytes === 'string' && record.size_bytes !== ''
-                ? Number(record.size_bytes)
-                : null,
-        },
-      ]
-    })
+    return typeof data === 'string' ? data : ''
   }
 
-  async recordLinkyCatalogAttachment(input: {
-    syncId: string
+  async recordLinkyBatchStoryFailure(input: {
+    requestId: string
     workerId: string
     claimToken: string
-    attachmentId: string
-    status: 'STORED' | 'SKIPPED' | 'FAILED'
-    storagePath?: string | null
-    sha256?: string | null
-    sizeBytes?: number | null
-    error?: string | null
-  }): Promise<boolean> {
-    const data = await this.db.rpc<unknown>('record_linky_catalog_attachment', {
-      p_sync_id: input.syncId,
-      p_worker_id: input.workerId,
-      p_claim_token: input.claimToken,
-      p_attachment_id: input.attachmentId,
-      p_status: input.status,
-      p_storage_path: input.storagePath ?? null,
-      p_sha256: input.sha256 ?? null,
-      p_size: input.sizeBytes ?? null,
-      p_error: input.error ?? null,
-    })
-    return data === true
-  }
-
-  async completeLinkySync(input: {
-    syncId: string
-    workerId: string
-    claimToken: string
-    storiesSynced: number
-    detailsSynced: number
-    attachmentsStored: number
+    storyCode: string
+    errorCode: string
+    errorMessage: string
     attachmentsFailed: number
-    bytesDownloaded: number
   }): Promise<boolean> {
-    const data = await this.db.rpc<unknown>('complete_linky_sync', {
-      p_sync_id: input.syncId,
+    const data = await this.db.rpc<unknown>('record_linky_batch_story_failure', {
+      p_request_id: input.requestId,
       p_worker_id: input.workerId,
       p_claim_token: input.claimToken,
-      p_stories_synced: input.storiesSynced,
-      p_details_synced: input.detailsSynced,
-      p_attachments_stored: input.attachmentsStored,
+      p_story_code: input.storyCode,
+      p_error_code: input.errorCode,
+      p_error_message: input.errorMessage,
       p_attachments_failed: input.attachmentsFailed,
-      p_bytes_downloaded: input.bytesDownloaded,
     })
     return data === true
   }
 
-  async failLinkySync(input: {
-    syncId: string
+  async completeLinkyBatchImport(input: {
+    requestId: string
+    workerId: string
+    claimToken: string
+  }): Promise<boolean> {
+    const data = await this.db.rpc<unknown>('complete_linky_batch_import', {
+      p_request_id: input.requestId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+    })
+    return data === true
+  }
+
+  async failLinkyBatchImport(input: {
+    requestId: string
     workerId: string
     claimToken: string
     errorCode: string
     errorMessage: string
   }): Promise<boolean> {
-    const data = await this.db.rpc<unknown>('fail_linky_sync', {
-      p_sync_id: input.syncId,
+    const data = await this.db.rpc<unknown>('fail_linky_batch_import', {
+      p_request_id: input.requestId,
       p_worker_id: input.workerId,
       p_claim_token: input.claimToken,
       p_error_code: input.errorCode,
@@ -1917,40 +1866,25 @@ export class JobsDb {
     return data === true
   }
 
-  async releaseLinkySyncClaim(input: {
-    syncId: string
+  async releaseLinkyBatchImportClaim(input: {
+    requestId: string
     workerId: string
     claimToken: string
   }): Promise<boolean> {
-    const data = await this.db.rpc<unknown>('release_linky_sync_claim', {
-      p_sync_id: input.syncId,
+    const data = await this.db.rpc<unknown>('release_linky_batch_import_claim', {
+      p_request_id: input.requestId,
       p_worker_id: input.workerId,
       p_claim_token: input.claimToken,
     })
     return data === true
   }
 
-  async listLinkyCatalogAttachmentsForCleanup(input: {
-    retentionDays: number
-    limit: number
-  }): Promise<Array<{ id: string; storage_path: string }>> {
-    const data = await this.db.rpc<unknown>('list_linky_catalog_attachments_for_cleanup', {
-      p_retention_days: input.retentionDays,
-      p_limit: input.limit,
+  /** 附件对象的孤儿判定：批次删除会级联掉引用行，Storage 对象需要另行回收。 */
+  async unreferencedStoryAttachmentPaths(paths: string[]): Promise<string[]> {
+    if (paths.length === 0) return []
+    const data = await this.db.rpc<unknown>('unreferenced_story_attachment_paths', {
+      p_paths: paths,
     })
-    if (!Array.isArray(data)) return []
-    return data.flatMap((entry) => {
-      if (typeof entry !== 'object' || entry === null) return []
-      const record = entry as Record<string, unknown>
-      if (typeof record.id !== 'string' || typeof record.storage_path !== 'string') return []
-      return [{ id: record.id, storage_path: record.storage_path }]
-    })
-  }
-
-  async markLinkyCatalogAttachmentPurged(attachmentId: string): Promise<boolean> {
-    const data = await this.db.rpc<unknown>('mark_linky_catalog_attachment_purged', {
-      p_attachment_id: attachmentId,
-    })
-    return data === true
+    return Array.isArray(data) ? data.filter((path): path is string => typeof path === 'string') : []
   }
 }

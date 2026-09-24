@@ -1,7 +1,16 @@
 /**
  * Fixed repository whitelist. The MVP does not accept arbitrary Git URLs from
- * users or from the model. Only these four repositories may ever be prepared or
+ * users or from the model. Only these repositories may ever be prepared or
  * searched. (Plan §8.1, §6.2, §11.4)
+ *
+ * **Adding a repository touches two sources of truth.** This list, and the SQL
+ * function `public.analysis_repository_catalog()`. They are asserted to agree by
+ * `worker/src/__tests__/repository-whitelist-parity.test.ts` (needs the local
+ * Supabase) plus literal expectations in this file's unit test and in
+ * `supabase/tests/*_reviewed_repository_whitelist_*_test.sql`.
+ *
+ * Note the paths are not uniform: `kwork-server` lives directly under `kwork/`,
+ * the other four under `kwork/manage/`. Never derive a path from a name.
  */
 
 export const DEFAULT_GITLAB_BASE_URL = 'https://git.kingdee.com'
@@ -16,6 +25,11 @@ export const REPOSITORIES = [
     name: 'kdmanage-frontend',
     path: '/kwork/manage/kdmanage-frontend.git',
     url: `${DEFAULT_GITLAB_BASE_URL}/kwork/manage/kdmanage-frontend.git`,
+  },
+  {
+    name: 'kwork-server',
+    path: '/kwork/kwork-server.git',
+    url: `${DEFAULT_GITLAB_BASE_URL}/kwork/kwork-server.git`,
   },
   {
     name: 'tmanage-backend',
@@ -38,7 +52,7 @@ export const REPOSITORY_NAMES: readonly RepositoryName[] = REPOSITORIES.map(
 export const ALLOWED_BRANCHES = ['feature_dev', 'feature_sit', 'release'] as const
 export type BranchName = (typeof ALLOWED_BRANCHES)[number]
 
-/** True if the given string is one of the four whitelisted repository names. */
+/** True if the given string is one of the whitelisted repository names. */
 export function isRepositoryName(value: unknown): value is RepositoryName {
   return (
     typeof value === 'string' &&

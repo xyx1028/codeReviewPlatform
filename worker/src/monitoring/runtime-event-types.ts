@@ -6,7 +6,7 @@
  *      直通 —— 那等于把 allowlist 交给调用方自觉。
  *   2. payload 里只有稳定机器码与标量：没有 Prompt、没有工具参数/返回、没有命令、
  *      没有 stdout/stderr、没有 URL、没有绝对路径、没有任何 token。
- *      唯一的路径类字段是 `repository_name`，它是四仓枚举。
+ *      唯一的路径类字段是 `repository_name`，它是仓库白名单枚举。
  *   3. `errorCode` / `reason_code` 是稳定码，不是异常 message。数据库侧还会再校验一次
  *      并丢弃不合规的值，但正确的做法是在这里就不产生它们。
  *

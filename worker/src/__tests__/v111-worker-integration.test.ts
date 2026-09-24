@@ -11,6 +11,7 @@ import { collectRepositoryHistory, type CollectedRepositoryHistory } from '../gi
 import { runCommand } from '../git/run.js'
 import type { RepositoryName } from '../git/repositories.js'
 import { Logger } from '../logger.js'
+import { REPOSITORY_NAMES } from '../git/repositories.js'
 import { prepareJob } from '../pipeline/prepare-job.js'
 import { buildStoryScopes } from '../pipeline/story-scope.js'
 import { DISABLED_LINKY_CONFIG } from './helpers/worker-config.js'
@@ -190,16 +191,16 @@ describe('V1.11 preparation integration', () => {
       historyCollector,
       gitlabClient,
     )
+    // 每个受评审仓库一轮 history → manifest → mr → persist-mr，顺序按白名单。
     expect(calls).toEqual([
       'legacy-snapshots', 'freeze-inputs',
-      'history:kdmanage-backend', 'manifest', 'mr:kdmanage-backend', 'persist-mr',
-      'history:kdmanage-frontend', 'manifest', 'mr:kdmanage-frontend', 'persist-mr',
-      'history:tmanage-backend', 'manifest', 'mr:tmanage-backend', 'persist-mr',
-      'history:tmanage-frontend', 'manifest', 'mr:tmanage-frontend', 'persist-mr',
+      ...REPOSITORY_NAMES.flatMap((repository) => [
+        `history:${repository}`, 'manifest', `mr:${repository}`, 'persist-mr',
+      ]),
       'scopes', 'finalize',
     ])
     expect(jobsDb.saveRepositorySnapshots).toHaveBeenCalledTimes(2)
-    expect(jobsDb.saveAnalysisRepositoryMergeRequests).toHaveBeenCalledTimes(4)
+    expect(jobsDb.saveAnalysisRepositoryMergeRequests).toHaveBeenCalledTimes(REPOSITORY_NAMES.length)
     expect(vi.mocked(jobsDb.saveAnalysisRepositoryMergeRequests).mock.calls.every(
       ([input]) => input.status === 'FAILED'
         && input.errorCode === 'MR_METADATA_PERMISSION_DENIED'

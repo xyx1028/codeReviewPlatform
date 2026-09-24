@@ -2,7 +2,7 @@
  * Deployment connectivity acceptance for the AI automation Worker.
  *
  * Checks, without cloning code or sending requirements/source to the model:
- *   1. GitLab: 4 whitelisted repositories x 3 allowed branches via ls-remote.
+ *   1. GitLab: every whitelisted repository x 3 allowed branches via ls-remote.
  *   2. Supabase: PostgREST service-role access, model metadata and Vault secret RPC.
  *   3. Model API: one OpenAI-compatible `ping` request with max_tokens=1.
  *

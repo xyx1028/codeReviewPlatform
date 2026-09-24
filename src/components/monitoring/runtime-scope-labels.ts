@@ -50,7 +50,7 @@ export const SCOPE_ERROR_META: Record<string, { label: string; hint: string }> =
   },
   NO_CANDIDATE: {
     label: '没有找到任何候选提交',
-    hint: '冻结范围内没有一条提交与该需求产生关联（既没写需求号，作者也不是已验证的需求负责人），因此退化为全仓分析：AI 会在四个仓库的冻结版本里直接检索实现。',
+    hint: '冻结范围内没有一条提交与该需求产生关联（既没写需求号，作者也不是已验证的需求负责人），因此退化为全仓分析：AI 会在全部受评审仓库的冻结版本里直接检索实现。',
   },
   NO_STRONG_SCOPE: {
     label: '没有能收窄范围的候选',

@@ -1,3 +1,4 @@
+import { REPOSITORY_NAMES } from '../git/repositories.js'
 import { describe, expect, it, vi } from 'vitest'
 import type { WorkerConfig } from '../config.js'
 import type { JobsDb, PreparationClaim, RepositorySnapshotInput } from '../db/jobs.js'
@@ -90,7 +91,7 @@ describe('prepareJob single Harness workflow', () => {
 
     await prepareJob(db.jobsDb, config, claim, silentLogger(), repositoryPreparer)
 
-    expect(repositoryPreparer).toHaveBeenCalledTimes(4)
+    expect(repositoryPreparer).toHaveBeenCalledTimes(REPOSITORY_NAMES.length)
     expect(repositoryPreparer).toHaveBeenNthCalledWith(1, 'kdmanage-backend', 'feature_dev', {
       cacheRoot: '/tmp/cache',
       authMode: 'local',
@@ -109,6 +110,7 @@ describe('prepareJob single Harness workflow', () => {
     expect(snapshots.map((snapshot) => snapshot.repository_name)).toEqual([
       'kdmanage-backend',
       'kdmanage-frontend',
+      'kwork-server',
       'tmanage-backend',
       'tmanage-frontend',
     ])
@@ -117,6 +119,7 @@ describe('prepareJob single Harness workflow', () => {
     expect(snapshots.map((snapshot) => snapshot.commit_subject)).toEqual([
       'subject for kdmanage-backend',
       'subject for kdmanage-frontend',
+      'subject for kwork-server',
       'subject for tmanage-backend',
       'subject for tmanage-frontend',
     ])
@@ -157,14 +160,11 @@ describe('prepareJob single Harness workflow', () => {
 
     db.saveRepositorySnapshots.mockImplementation(async () => {
       expect(flushed.flat()).toEqual([
-        'REPOSITORY_PREPARE_STARTED',
-        'REPOSITORY_PREPARE_COMPLETED',
-        'REPOSITORY_PREPARE_STARTED',
-        'REPOSITORY_PREPARE_COMPLETED',
-        'REPOSITORY_PREPARE_STARTED',
-        'REPOSITORY_PREPARE_COMPLETED',
-        'REPOSITORY_PREPARE_STARTED',
-        'REPOSITORY_PREPARE_COMPLETED',
+        // 每个受评审仓库一对 STARTED/COMPLETED。
+        ...REPOSITORY_NAMES.flatMap(() => [
+          'REPOSITORY_PREPARE_STARTED',
+          'REPOSITORY_PREPARE_COMPLETED',
+        ]),
       ])
     })
 

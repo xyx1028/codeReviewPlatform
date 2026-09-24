@@ -1,5 +1,5 @@
 /**
- * V1.20：Linky 映射与同步执行器。
+ * V1.20：Linky 映射与「批次需求导入」执行器。
  *
  * 用例都对着实测数据写（2026-09-24 对 feature.kingdee.com:2055 的探测）：
  * 正文在 field_values.gf_description、详情没有可读迭代名、附件列表 content_type 不可信、
@@ -8,6 +8,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   assertCatalogAttachmentKey,
+  batchAttachmentObjectKey,
   catalogAttachmentObjectKey,
   isAllowedAttachment,
   sanitizeAttachmentFileName,
@@ -15,13 +16,19 @@ import {
   toCatalogDetailPayload,
   toCatalogItemPayload,
 } from '../linky/mapping.js'
-import { runLinkySync, type LinkySyncClaim, type LinkySyncDb } from '../linky/sync-runner.js'
+import {
+  runLinkyBatchImport,
+  type CommittedAttachment,
+  type LinkyBatchImportClaim,
+  type LinkyBatchImportDb,
+} from '../linky/batch-import-runner.js'
 import { LinkyApiError, type LinkyClient } from '../linky/client.js'
 import type { StoryAttachmentStorage } from '../linky/attachment-storage.js'
 import { Logger } from '../logger.js'
 
 const silentLogger = new Logger({ sink: () => undefined, minLevel: 'error' })
 const WORKSPACE = '3bb2fffc-1b01-49a5-8e01-f1890d687894'
+const BATCH = '9f1d0c2a-1111-4c2a-8d3e-000000000001'
 const ISSUE = '3677a47f-94ef-45ce-b279-c3ee8e97be13'
 
 function listItem(overrides: Record<string, unknown> = {}) {
@@ -41,9 +48,8 @@ function listItem(overrides: Record<string, unknown> = {}) {
 }
 
 describe('toCatalogItemPayload', () => {
-  it('把列表项映射成镜像行，可读的迭代与发布窗口只能来自这里', () => {
+  it('把列表项映射成结构化字段，可读的迭代与发布窗口只能来自这里', () => {
     const payload = toCatalogItemPayload(listItem())
-    expect(payload).not.toBeNull()
     expect(payload?.story_code).toBe('US-2026-012147')
     expect(payload?.iteration).toBe('202610-1（0928-1016）')
     expect(payload?.release_window).toBe('R20261016')
@@ -52,7 +58,7 @@ describe('toCatalogItemPayload', () => {
     expect(payload?.story_url).toBeNull()
   })
 
-  it('缺少 issue_id / code / workspace_id 的条目返回 null 而不是塞一条半成品进镜像', () => {
+  it('缺少 issue_id / code / workspace_id 的条目返回 null', () => {
     expect(toCatalogItemPayload(listItem({ id: null }))).toBeNull()
     expect(toCatalogItemPayload(listItem({ code: '   ' }))).toBeNull()
     expect(toCatalogItemPayload(listItem({ workspace_id: 'not-a-uuid' }))).toBeNull()
@@ -60,7 +66,9 @@ describe('toCatalogItemPayload', () => {
 
   it('配了 web base 才产出回链，否则不猜 URL', () => {
     const payload = toCatalogItemPayload(listItem(), { webBaseUrl: 'https://linky.example.com/' })
-    expect(payload?.story_url).toBe(`https://linky.example.com/workspaces/${WORKSPACE}/issues/${ISSUE}`)
+    expect(payload?.story_url).toBe(
+      `https://linky.example.com/workspaces/${WORKSPACE}/issues/${ISSUE}`,
+    )
   })
 })
 
@@ -76,14 +84,15 @@ describe('toCatalogDetailPayload', () => {
     })
     expect(payload.requirement_detail).toBe('mcphub 需要支持标准 OAuth 授权码 + PKCE 模式。')
     expect(payload.team).toEqual({ req: [{ name: '何翘楚' }], dev: [{ name: '王鹏程' }], test: [] })
-    expect(payload.team_resolve_error).toBeNull()
   })
 
   it('gf_description 缺失时退到 description；两个都空就是 null', () => {
     expect(
       toCatalogDetailPayload({ field_values: {}, description: '兜底正文' }).requirement_detail,
     ).toBe('兜底正文')
-    expect(toCatalogDetailPayload({ field_values: {}, description: '  ' }).requirement_detail).toBeNull()
+    expect(
+      toCatalogDetailPayload({ field_values: {}, description: '  ' }).requirement_detail,
+    ).toBeNull()
   })
 
   it('team 解析降级时 team 为 null 且保留原因，绝不编造人名', () => {
@@ -122,14 +131,22 @@ describe('附件映射与 key 规则', () => {
     expect(isAllowedAttachment('noext')).toBe(false)
   })
 
-  it('对象 key 只含 ASCII，真实文件名留在数据库里', () => {
-    const key = catalogAttachmentObjectKey(WORKSPACE, '01a08f41-08cb-7940-9a40-05e931d46aa0', '需求说明.md')
-    expect(key).toBe(`catalog/${WORKSPACE}/01a08f41-08cb-7940-9a40-05e931d46aa0.md`)
+  it('对象 key 按批次组织且只含 ASCII，真实文件名留在数据库里', () => {
+    const key = batchAttachmentObjectKey(BATCH, '01a08f41-08cb-7940-9a40-05e931d46aa0', '需求说明.md')
+    expect(key).toBe(`batch/${BATCH}/01a08f41-08cb-7940-9a40-05e931d46aa0.md`)
     expect(assertCatalogAttachmentKey(key)).toBe(key)
   })
 
-  it('key 形状闸门拒绝路径穿越', () => {
-    expect(() => assertCatalogAttachmentKey('catalog/../secrets.md')).toThrow('LINKY_ATTACHMENT_KEY_INVALID')
+  it('仍然接受 V1.20 首版镜像层写下的 catalog/ key（历史批次还指向它们）', () => {
+    const legacy = catalogAttachmentObjectKey(WORKSPACE, 'att-1', 'a.md')
+    expect(legacy).toBe(`catalog/${WORKSPACE}/att-1.md`)
+    expect(assertCatalogAttachmentKey(legacy)).toBe(legacy)
+  })
+
+  it('key 形状闸门拒绝路径穿越与陌生前缀', () => {
+    expect(() => assertCatalogAttachmentKey('batch/../secrets.md')).toThrow(
+      'LINKY_ATTACHMENT_KEY_INVALID',
+    )
     expect(() => assertCatalogAttachmentKey('other/x.md')).toThrow('LINKY_ATTACHMENT_KEY_INVALID')
   })
 
@@ -137,37 +154,31 @@ describe('附件映射与 key 规则', () => {
     expect(sanitizeAttachmentFileName(' 需求 说明.md ')).toBe('需求 说明.md')
     expect(sanitizeAttachmentFileName('a/b/c.md')).toBe('c.md')
     expect(() => sanitizeAttachmentFileName('..')).toThrow('LINKY_ATTACHMENT_FILENAME_INVALID')
-    expect(() => sanitizeAttachmentFileName('   ')).toThrow('LINKY_ATTACHMENT_FILENAME_INVALID')
   })
 })
 
-interface FakeDbCalls {
-  catalog: unknown[][]
-  details: Array<{ issueId: string; detail: Record<string, unknown> }>
-  attachments: Array<{ attachmentId: string; status: string; error?: string | null }>
+interface FakeCalls {
+  committed: Array<{ storyCode: string; attachments: CommittedAttachment[] }>
+  failures: Array<{ storyCode: string; errorCode: string; attachmentsFailed: number }>
 }
 
-function fakeDb(options: { heartbeatOk?: boolean; pending?: Array<Record<string, unknown>> } = {}) {
-  const calls: FakeDbCalls = { catalog: [], details: [], attachments: [] }
-  const db: LinkySyncDb = {
-    heartbeatLinkySync: async () => options.heartbeatOk ?? true,
-    upsertLinkyStoryCatalog: async ({ items }) => {
-      calls.catalog.push(items as unknown[])
-      return items.length
+function fakeDb(options: { heartbeatOk?: boolean } = {}) {
+  const calls: FakeCalls = { committed: [], failures: [] }
+  const db: LinkyBatchImportDb = {
+    heartbeatLinkyBatchImport: async () => options.heartbeatOk ?? true,
+    commitLinkyBatchStory: async ({ story, attachments }) => {
+      calls.committed.push({ storyCode: String(story.story_code), attachments })
+      return 'story-id'
     },
-    upsertLinkyStoryDetail: async ({ issueId, detail }) => {
-      calls.details.push({ issueId, detail })
-      return (options.pending ?? []) as never
-    },
-    recordLinkyCatalogAttachment: async ({ attachmentId, status, error }) => {
-      calls.attachments.push({ attachmentId, status, error })
+    recordLinkyBatchStoryFailure: async ({ storyCode, errorCode, attachmentsFailed }) => {
+      calls.failures.push({ storyCode, errorCode, attachmentsFailed })
       return true
     },
   }
   return { db, calls }
 }
 
-function fakeClient(overrides: Partial<LinkyClient> = {}): LinkyClient {
+function fakeClient(overrides: Record<string, unknown> = {}): LinkyClient {
   return {
     listAllStories: vi.fn(async () => ({ items: [listItem()], total: 1, scopes: 1, pages: 1 })),
     getStory: vi.fn(async () => ({
@@ -177,29 +188,37 @@ function fakeClient(overrides: Partial<LinkyClient> = {}): LinkyClient {
       team: { req: [], dev: [{ name: '王鹏程' }], test: [] },
     })),
     listAttachments: vi.fn(async () => []),
-    downloadAttachment: vi.fn(async () => ({ body: Buffer.from('hello'), contentType: 'text/plain' })),
+    downloadAttachment: vi.fn(async () => ({
+      body: Buffer.from('hello'),
+      contentType: 'text/plain',
+    })),
     ...overrides,
   } as unknown as LinkyClient
 }
 
-const fakeStorage = (): StoryAttachmentStorage & { uploaded: string[] } => {
+function fakeStorage(): StoryAttachmentStorage & { uploaded: string[]; removed: string[] } {
   const uploaded: string[] = []
+  const removed: string[] = []
   return {
     uploaded,
+    removed,
     upload: async (key: string) => {
       uploaded.push(key)
     },
     download: async () => Buffer.from(''),
-    remove: async () => undefined,
+    remove: async (keys: string[]) => {
+      removed.push(...keys)
+    },
   }
 }
 
-const claim: LinkySyncClaim = {
+const claim: LinkyBatchImportClaim = {
   id: '11111111-1111-4111-8111-111111111111',
-  depth: 'LIST',
+  batch_id: BATCH,
   workspace_id: WORKSPACE,
   workspace_name: '工具开发组',
-  release_window: null,
+  release_window: 'R20261016',
+  story_codes: ['US-2026-012147'],
   claim_token: '22222222-2222-4222-8222-222222222222',
   attempt: 1,
 }
@@ -207,15 +226,82 @@ const claim: LinkySyncClaim = {
 const limits = {
   attachmentMaxBytes: 1024,
   storyAttachmentMaxBytes: 2048,
-  maxDetailsPerSync: 10,
-  leaseSeconds: 600,
+  leaseSeconds: 900,
 }
 
-describe('runLinkySync', () => {
-  it('LIST 深度只写列表，不碰正文与附件', async () => {
+describe('runLinkyBatchImport', () => {
+  it('把列表的可读字段与详情的正文合并后逐条提交', async () => {
     const { db, calls } = fakeDb()
-    const client = fakeClient()
-    const outcome = await runLinkySync({
+    const outcome = await runLinkyBatchImport({
+      claim,
+      workerId: 'w1',
+      client: fakeClient(),
+      db,
+      storage: fakeStorage(),
+      limits,
+      logger: silentLogger,
+    })
+    expect(outcome.storiesCommitted).toBe(1)
+    expect(calls.committed).toHaveLength(1)
+    expect(calls.committed[0]?.storyCode).toBe('US-2026-012147')
+  })
+
+  it('勾选的编号不在上游列表里时记失败，不去猜', async () => {
+    const { db, calls } = fakeDb()
+    const client = fakeClient({
+      listAllStories: vi.fn(async () => ({ items: [], total: 0, scopes: 1, pages: 1 })),
+    })
+    await expect(
+      runLinkyBatchImport({
+        claim,
+        workerId: 'w1',
+        client,
+        db,
+        storage: fakeStorage(),
+        limits,
+        logger: silentLogger,
+      }),
+    ).rejects.toThrow('全部导入失败')
+    expect(calls.failures[0]?.errorCode).toBe('LINKY_NOT_FOUND')
+  })
+
+  it('附件按允许列表与配额筛，超限跳过而不是中断', async () => {
+    const { db, calls } = fakeDb()
+    const client = fakeClient({
+      listAttachments: vi.fn(async () => [
+        { id: 'a1', filename: 'ok.md', size_bytes: 5 },
+        { id: 'a2', filename: 'evil.exe', size_bytes: 5 },
+        { id: 'a3', filename: 'huge.md', size_bytes: 99999 },
+      ]),
+    })
+    const storage = fakeStorage()
+    const outcome = await runLinkyBatchImport({
+      claim,
+      workerId: 'w1',
+      client,
+      db,
+      storage,
+      limits,
+      logger: silentLogger,
+    })
+    expect(outcome.attachmentsStored).toBe(1)
+    expect(outcome.attachmentsSkipped).toBe(2)
+    expect(storage.uploaded).toEqual([`batch/${BATCH}/a1.md`])
+    const committed = calls.committed[0]?.attachments ?? []
+    expect(committed).toHaveLength(1)
+    expect(committed[0]?.sha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(committed[0]?.size_bytes).toBe(5)
+  })
+
+  it('附件下载失败不影响故事本身入库，但计数与故事失败原因都要留痕', async () => {
+    const { db, calls } = fakeDb()
+    const client = fakeClient({
+      listAttachments: vi.fn(async () => [{ id: 'a1', filename: 'ok.md', size_bytes: 5 }]),
+      downloadAttachment: vi.fn(async () => {
+        throw new LinkyApiError('LINKY_TIMEOUT', 'timeout')
+      }),
+    })
+    const outcome = await runLinkyBatchImport({
       claim,
       workerId: 'w1',
       client,
@@ -224,88 +310,47 @@ describe('runLinkySync', () => {
       limits,
       logger: silentLogger,
     })
-    expect(outcome.storiesSynced).toBe(1)
-    expect(outcome.detailsSynced).toBe(0)
-    expect(calls.details).toHaveLength(0)
-    expect(client.getStory).not.toHaveBeenCalled()
-  })
-
-  it('FULL 深度按发布窗口收窄范围', async () => {
-    const { db, calls } = fakeDb()
-    const client = fakeClient({
-      listAllStories: vi.fn(async () => ({
-        items: [listItem(), listItem({ id: '44444444-4444-4444-4444-444444444444', code: 'US-9', release_window: 'R20260101' })],
-        total: 2,
-        scopes: 1,
-        pages: 1,
-      })),
-    } as never)
-    const outcome = await runLinkySync({
-      claim: { ...claim, depth: 'FULL', release_window: 'R20261016' },
-      workerId: 'w1',
-      client,
-      db,
-      storage: fakeStorage(),
-      limits,
-      logger: silentLogger,
-    })
-    expect(outcome.storiesSynced).toBe(2)
-    expect(outcome.detailsSynced).toBe(1)
-    expect(calls.details[0]?.issueId).toBe(ISSUE)
-  })
-
-  it('附件按允许列表与配额筛，超限记 SKIPPED 而不是中断整次同步', async () => {
-    const { db, calls } = fakeDb({
-      pending: [
-        { id: 'p1', linky_attachment_id: 'a1', filename: 'ok.md', content_type: null, size_bytes: 5 },
-        { id: 'p2', linky_attachment_id: 'a2', filename: 'evil.exe', content_type: null, size_bytes: 5 },
-        { id: 'p3', linky_attachment_id: 'a3', filename: 'huge.md', content_type: null, size_bytes: 99999 },
-      ],
-    })
-    const storage = fakeStorage()
-    const outcome = await runLinkySync({
-      claim: { ...claim, depth: 'FULL' },
-      workerId: 'w1',
-      client: fakeClient(),
-      db,
-      storage,
-      limits,
-      logger: silentLogger,
-    })
-    expect(outcome.attachmentsStored).toBe(1)
-    expect(outcome.attachmentsSkipped).toBe(2)
-    expect(storage.uploaded).toEqual([`catalog/${WORKSPACE}/a1.md`])
-    expect(calls.attachments.map((entry) => entry.status)).toEqual(['STORED', 'SKIPPED', 'SKIPPED'])
-  })
-
-  it('附件下载失败记 FAILED，故事本身仍算同步成功', async () => {
-    const { db, calls } = fakeDb({
-      pending: [{ id: 'p1', linky_attachment_id: 'a1', filename: 'ok.md', content_type: null, size_bytes: 5 }],
-    })
-    const client = fakeClient({
-      downloadAttachment: vi.fn(async () => {
-        throw new LinkyApiError('LINKY_TIMEOUT', 'timeout')
-      }),
-    } as never)
-    const outcome = await runLinkySync({
-      claim: { ...claim, depth: 'FULL' },
-      workerId: 'w1',
-      client,
-      db,
-      storage: fakeStorage(),
-      limits,
-      logger: silentLogger,
-    })
-    expect(outcome.detailsSynced).toBe(1)
+    expect(outcome.storiesCommitted).toBe(1)
     expect(outcome.attachmentsFailed).toBe(1)
-    expect(calls.attachments[0]?.status).toBe('FAILED')
-    expect(calls.attachments[0]?.error).toContain('LINKY_TIMEOUT')
+    expect(calls.committed[0]?.attachments).toHaveLength(0)
   })
 
-  it('租约丢了立刻抛出，不继续往镜像里写', async () => {
+  it('故事提交失败时回滚本条已上传的附件字节，不留孤儿对象', async () => {
+    const calls: string[] = []
+    const db: LinkyBatchImportDb = {
+      heartbeatLinkyBatchImport: async () => true,
+      commitLinkyBatchStory: async () => {
+        throw new Error('LINKY_IMPORT_STORY_TEXT_REQUIRED')
+      },
+      recordLinkyBatchStoryFailure: async ({ errorCode }) => {
+        calls.push(errorCode)
+        return true
+      },
+    }
+    const storage = fakeStorage()
+    const client = fakeClient({
+      listAttachments: vi.fn(async () => [{ id: 'a1', filename: 'ok.md', size_bytes: 5 }]),
+    })
+    await expect(
+      runLinkyBatchImport({
+        claim,
+        workerId: 'w1',
+        client,
+        db,
+        storage,
+        limits,
+        logger: silentLogger,
+      }),
+    ).rejects.toThrow('全部导入失败')
+    expect(storage.uploaded).toEqual([`batch/${BATCH}/a1.md`])
+    expect(storage.removed).toEqual([`batch/${BATCH}/a1.md`])
+    expect(calls).toEqual(['LINKY_IMPORT_STORY_FAILED'])
+  })
+
+  it('租约丢了立刻抛出，不继续提交', async () => {
     const { db } = fakeDb({ heartbeatOk: false })
     await expect(
-      runLinkySync({
+      runLinkyBatchImport({
         claim,
         workerId: 'w1',
         client: fakeClient(),
@@ -314,19 +359,19 @@ describe('runLinkySync', () => {
         limits,
         logger: silentLogger,
       }),
-    ).rejects.toThrow('LINKY_SYNC_LEASE_LOST')
+    ).rejects.toThrow('LINKY_IMPORT_LEASE_LOST')
   })
 
-  it('目标故事全部失败时整次同步失败，避免页面显示"成功"而正文一条没有', async () => {
+  it('一条都没成功时整单失败，避免页面显示"导入完成"而批次是空的', async () => {
     const { db } = fakeDb()
     const client = fakeClient({
       getStory: vi.fn(async () => {
         throw new LinkyApiError('LINKY_NOT_FOUND', 'gone', 404)
       }),
-    } as never)
+    })
     await expect(
-      runLinkySync({
-        claim: { ...claim, depth: 'FULL' },
+      runLinkyBatchImport({
+        claim,
         workerId: 'w1',
         client,
         db,
@@ -334,6 +379,6 @@ describe('runLinkySync', () => {
         limits,
         logger: silentLogger,
       }),
-    ).rejects.toThrow('gone')
+    ).rejects.toThrow('全部导入失败')
   })
 })

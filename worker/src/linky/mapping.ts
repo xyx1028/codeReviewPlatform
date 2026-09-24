@@ -237,11 +237,32 @@ export function catalogAttachmentObjectKey(
   return `catalog/${workspaceId.toLowerCase()}/${safeId}${ext === null ? '' : `.${ext}`}`
 }
 
-const CATALOG_KEY_RE = /^catalog\/[0-9a-f-]{36}\/[0-9a-z][0-9a-z-]{0,63}(\.[a-z0-9]{1,12})?$/
+/**
+ * 按批次的附件对象 key（V1.20 修订）。
+ *
+ * `batch/<batch_id>/<attachment_id>.<ext>`。改成按批次而不是按工作区，是因为附件现在
+ * 属于**某个批次的冻结快照**：批次被删除时，凭前缀就能判断哪些对象成了孤儿。
+ */
+export function batchAttachmentObjectKey(
+  batchId: string,
+  attachmentId: string,
+  filename: string,
+): string {
+  if (!UUID_RE.test(batchId)) throw new Error('LINKY_BATCH_ID_INVALID')
+  const safeId = attachmentId.trim().toLowerCase()
+  if (!/^[0-9a-z][0-9a-z-]{0,63}$/.test(safeId)) throw new Error('LINKY_ATTACHMENT_ID_INVALID')
+  const ext = attachmentExtension(filename)
+  return `batch/${batchId.toLowerCase()}/${safeId}${ext === null ? '' : `.${ext}`}`
+}
+
+// 两种形态都要认：`batch/...` 是现在写的，`catalog/...` 是 V1.20 首版镜像层写过的，
+// 历史批次的 review_story_attachment 里仍然指向它们。
+const ATTACHMENT_KEY_RE =
+  /^(catalog|batch)\/[0-9a-f-]{36}\/[0-9a-z][0-9a-z-]{0,63}(\.[a-z0-9]{1,12})?$/
 
 /** 下载前再校验一次形状：冻结值本该可信，但"本该可信"不是不检查的理由。 */
 export function assertCatalogAttachmentKey(objectKey: string): string {
-  if (!CATALOG_KEY_RE.test(objectKey)) {
+  if (!ATTACHMENT_KEY_RE.test(objectKey)) {
     throw new Error('LINKY_ATTACHMENT_KEY_INVALID')
   }
   return objectKey

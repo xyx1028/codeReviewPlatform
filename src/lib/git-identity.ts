@@ -177,7 +177,7 @@ export function describeGitEmailDiscoveryPhase(
       }
       return {
         kind: 'DONE_EMPTY',
-        hint: `在四个仓库近 ${discovery.lookback_days} 天里没有找到 ${discovery.gitlab_username} 提的合并申请`
+        hint: `在受评审仓库近 ${discovery.lookback_days} 天里没有找到 ${discovery.gitlab_username} 提的合并申请`
           + `，所以查不到提交邮箱${partialHint}。`,
       }
     }

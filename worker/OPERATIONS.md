@@ -1868,41 +1868,39 @@ RUN_V119_LOCAL_INTEGRATION=1 RUN_V119_WORKER_LOOP=1 npx vitest run \
 
 ---
 
-# 21. V1.20 用户故事直连 Linky（镜像 + 同步队列 + 需求附件）
+# 21. V1.20 用户故事直连 Linky（实时看板 + 批次冻结导入）
 
-## 21.1 先知道这三条
+## 21.1 先知道这四条
 
-**1）Linky 取数接口是内网/VPN 专属服务。** 2026-09-24 在开发机上的实测：
+**1）看板是浏览器直连 Linky，平台不存它。** `/stories` 打开即取数，「刷新」就是重新请求。
+所以它需要**使用者连着公司内网/VPN**：页面本身从公网加载，但取数接口只在内网可达
+（2026-09-24 实测：`feature.kingdee.com` 在内网 DNS 下解析到 `172.18.2.177`，经 `utun7`
+才通；强制走公网 IP `114.119.32.43:2055` 连宿主机自己都超时）。不在内网时页面**明确报错**。
 
-| 发起方 | 解析到 | 结果 |
-|---|---|---|
-| macOS 宿主机（默认解析器） | `feature.kingdee.com → 172.18.2.177` | **200**，走 VPN 隧道 `utun7` |
-| 宿主机强制走公网 IP `114.119.32.43:2055` | — | **超时** |
-| Docker 容器（默认 bridge） | 同一个内网 IP | **超时**（容器没有 VPN 路由） |
-| 容器 + `--dns 8.8.8.8` / `--resolve` 公网 IP | `114.119.32.43` | **超时** |
-| 容器 → 宿主机代理（放开 2055） | 代理在宿主机侧解析并出隧道 | **200，1.5 s** |
+**2）导入不走浏览器。** 批次页只提交「项目组 + 发布窗口 + 勾选编号」，正文与附件由 Worker
+在内网侧取。理由是让前端把抓到的正文直接写库，等于让它提供"需求正文"这一评审输入，平台
+无从判断是否真的来自 Linky。代价：点「确认导入并冻结」后要等一次 Worker 轮询（默认 5 秒）。
 
-推论：Supabase Edge Function 与浏览器直连都不可行（云端与公网用户到不了 `172.18.x.x`），
-所以取数只能由 Worker 做；而**容器化 Worker 必须经宿主机代理**。
+**3）容器化 Worker 必须经宿主机代理。** 容器默认 bridge 里解析到同一个内网 IP 但没有 VPN
+路由（`nc` 对 2055 与 443 都超时；换 `--dns 8.8.8.8` 也一样）。经宿主机代理且代理放开 2055
+后 200（1.5 s）。默认端口白名单只有 `80,443`，表现为 `CONNECT tunnel failed, 403`。
 
-**2）看板不直连 Linky。** 前端只读平台镜像（`linky_story_catalog`），所以 Linky 挂掉、
-或使用者不在内网时，看板照常浏览已同步的数据。「刷新」是往 `linky_sync_request` 下单，
-由内网侧 Worker 执行。
+**4）附件字节按批次冻结。** bucket `story-attachments`，key
+`batch/<batch_id>/<attachment_id>.<ext>`；`review_story_attachment.content_sha256` 在导入时
+记下，Worker 物化到 attempt workspace 时重算比对，不符即
+`REQUIREMENT_ATTACHMENT_DIGEST_MISMATCH` fail closed。一条故事提交失败时，它刚上传的对象会
+被立刻删掉（不留孤儿字节）。
 
-**3）附件字节只存一份。** 镜像层对象（bucket `story-attachments`，key
-`catalog/<workspace_id>/<attachment_id>.<ext>`）被批次导入时**直接引用**，不拷贝；
-被引用的对象永不删除（`linky_catalog_attachment_is_referenced` + storage.objects 上的
-`protect_referenced_story_attachment_objects` 触发器，后者在没有权限时降级为通知）。
-`review_story_attachment.content_sha256` 在导入时记下，Worker 物化到 attempt workspace
-时重算比对，不符即 `REQUIREMENT_ATTACHMENT_DIGEST_MISMATCH` fail closed。
+**导入门禁是「至少一个需求来源」**：正文或附件有其一即可。实测存在 `gf_description` 为 null、
+需求全写在 PRD 附件里的故事（`US-2026-010727`），把它整条挡掉等于这类团队没法用平台；
+两者都没有才以 `LINKY_IMPORT_STORY_NO_REQUIREMENT_SOURCE` 拒绝。
 
 ## 21.2 配置
 
-Worker env 见 `.docker/worker.env.example` 的 V1.20 段（`LINKY_API_BASE_URL` /
-`LINKY_NETWORK_ACCESS_MODE` / `LINKY_WEB_BASE_URL` / `LINKY_CONFIG_ID` /
-`LINKY_HTTP_TIMEOUT_MS` / `LINKY_SYNC_LEASE_SECONDS` / `LINKY_ATTACHMENT_MAX_BYTES` /
-`LINKY_STORY_ATTACHMENT_MAX_BYTES` / `LINKY_MAX_DETAILS_PER_SYNC` /
-`LINKY_CATALOG_ATTACHMENT_RETENTION_DAYS`）。
+前端（进构建产物，无凭据）：`VITE_LINKY_API_BASE_URL`，见 `.env.example`。留空用代码默认值。
+
+Worker env 见 `.docker/worker.env.example` 的 V1.20 段。`LINKY_API_BASE_URL` 留空则导入循环
+不启动（日志 `linky_import_disabled`），其余功能不受影响 —— 这也是这个特性的关闭开关。
 
 宿主机代理必须放开 Linky 端口：
 
@@ -1917,46 +1915,36 @@ docker run --rm curlimages/curl:latest -sS -m 20 \
   "https://feature.kingdee.com:2055/quality-platform/api/linky/stories?page_size=1"
 ```
 
-`LINKY_API_BASE_URL` 留空则同步循环不启动（日志 `linky_sync_disabled`），其余功能不受影响
-—— 这也是这个特性的关闭开关。
-
 ## 21.3 上线顺序
 
-1. 本地：`supabase migration up --local` → 跑迁移测试 → `npm test` 全绿 → 真实同步一次。
+1. 本地：`supabase migration up --local` → 跑两份迁移测试 → `npm test` 全绿 → 真实导入一次。
 2. 宿主机代理放开 2055/90 并用上面那条 curl 验证。
 3. `supabase db push`（只前滚，不 reset）。
-4. `.docker/worker.env` 补 V1.20 段。
-5. 前端发布（看板 `/stories` + 批次内「从 Linky 导入」）。
+4. `.docker/worker.env` 补 V1.20 段；前端构建环境补 `VITE_LINKY_API_BASE_URL`。
+5. 前端发布（看板 `/stories` + 批次内「原始需求导入」）。
 6. Worker 镜像重建 + 排空重启：`npm run worker:release`。
-7. 验收：选一个组 + 一个发布窗口做 FULL 同步，导入 2~3 条（含带附件的），跑一次分析。
+7. 验收：看板选一个组能出数据 → 建批次 → 选组 + 窗口 → 勾 2~3 条（含带附件的）→ 确认导入
+   → 进度跑完 → 跑一次分析。
 
-**能力契约没有变**：`v4-capability-contract.json` 与 manifest revision 保持 3，附件走
-workspace 文件而不是新工具。所以新旧 Worker 可以混跑同一批次，不需要同时替换。
+**能力契约没有变**：`v4-capability-contract.json` 与 manifest revision 保持 3，附件走 workspace
+文件而不是新工具。新旧 Worker 可以混跑同一批次。
 
 ## 21.4 运行检查
 
 ```sql
--- 同步队列近况
-select id, depth, workspace_name, release_window, status, attempt,
-       stories_synced, details_synced, attachments_stored, attachments_failed,
+-- 导入单近况
+select id, batch_id, workspace_name, release_window, status, attempt,
+       stories_total, stories_committed, attachments_stored, attachments_failed,
+       jsonb_array_length(stories_failed) as failed_stories,
        error_code, left(coalesce(error_message,''),80) as err, created_at, finished_at
-from public.linky_sync_request order by created_at desc limit 10;
+from public.linky_batch_import_request order by created_at desc limit 10;
 
--- 镜像规模与正文覆盖率（正文为空的故事导入时会被拒）
-select workspace_name,
-       count(*) as stories,
-       count(detail_synced_at) as with_detail,
-       count(requirement_detail) as with_text,
-       sum(attachment_count) as attachments,
-       max(list_synced_at) as last_list_sync
-from public.linky_story_catalog group by workspace_name order by stories desc;
+-- 逐条失败原因
+select id, jsonb_pretty(stories_failed) from public.linky_batch_import_request
+where jsonb_array_length(stories_failed) > 0 order by created_at desc limit 3;
 
--- 附件落盘状态
-select fetch_status, count(*), sum(size_bytes) from public.linky_story_catalog_attachment
-group by fetch_status;
-
--- 卡住的租约（Worker 崩了会留 RUNNING；下一次 claim 会在租约过期后接管）
-select id, worker_id, lease_expires_at, heartbeat_at from public.linky_sync_request
+-- 卡住的租约（Worker 崩了会留 RUNNING；下一次 claim 在租约过期后接管）
+select id, worker_id, lease_expires_at, heartbeat_at from public.linky_batch_import_request
 where status='RUNNING' and lease_expires_at < now();
 
 -- 某个批次里被冻结的需求与附件
@@ -1967,12 +1955,15 @@ from public.review_story s
 left join public.review_story_attachment a on a.story_id = s.id
 where s.batch_id = '<batch-uuid>'
 group by s.id order by s.story_code;
+
+-- 孤儿附件对象判定（先用 Storage API 列出 batch/ 前缀下的 key，再问它）
+select public.unreferenced_story_attachment_paths(array['batch/<batch>/<att>.md']);
 ```
 
-日志事件（都在 Worker stdout）：`linky_sync_enabled` / `linky_sync_disabled` /
-`linky_sync_listed` / `linky_sync_detail_scope` / `linky_sync_completed` /
-`linky_sync_failed` / `linky_sync_lease_lost` / `linky_sync_released_on_shutdown` /
-`linky_attachment_failed` / `linky_attachment_cache_purged` /
+日志事件：`linky_import_enabled` / `linky_import_disabled` / `linky_import_listed` /
+`linky_import_completed` / `linky_import_failed` / `linky_import_lease_lost` /
+`linky_import_released_on_shutdown` / `linky_import_story_failed` /
+`linky_import_attachment_failed` / `linky_import_attachment_rollback_failed` /
 `requirement_attachments_materialized` / `requirement_attachment_unavailable`。
 日志里没有需求正文、没有附件内容、没有 signed URL。
 
@@ -1980,37 +1971,36 @@ group by s.id order by s.story_code;
 
 | 码 | 含义 | 处置 |
 |---|---|---|
-| `LINKY_PROXY_PORT_BLOCKED` | 宿主机代理拒绝隧道（通常 403） | 放开 `MODEL_VPN_PROXY_ALLOWED_PORTS` 的 2055/90 并重装服务 |
-| `LINKY_PROXY_UNREACHABLE` | 代理没起 | `launchctl` 查 `com.codereviewplatform.model-vpn-proxy` |
+| `LINKY_PROXY_PORT_BLOCKED` | 宿主机代理拒绝隧道（通常 403） | 放开代理的 2055/90 并重装服务 |
+| `LINKY_PROXY_UNREACHABLE` | 代理没起 | 查 `com.codereviewplatform.model-vpn-proxy` |
 | `LINKY_TIMEOUT` / `LINKY_NETWORK_ERROR` | 上游或链路抖动 | 重试；持续失败先确认 Mac 还连着 VPN |
-| `LINKY_NOT_FOUND` | 编号或附件在上游不存在 | 刷新列表；上游删了故事属正常 |
-| `LINKY_RESPONSE_INVALID` / `_TOO_LARGE` | 响应不是 JSON / 超过上限 | 查上游改动；附件超限调 `LINKY_ATTACHMENT_MAX_BYTES` |
-| `LINKY_SYNC_LEASE_LOST` | 租约被接管 | 无需处理，另一个副本在做 |
-| `LINKY_SYNC_TOO_FREQUENT` | 同一用户 30 秒内重复触发 | 等一会儿再点 |
-| `LINKY_SYNC_SCOPE_REQUIRED` | FULL 同步没选项目组 | 选定项目组（可再选发布窗口） |
-| `LINKY_SYNC_FORBIDDEN` | 角色不是 ADMIN/REVIEWER | 正常门禁 |
-| `LINKY_DETAIL_NOT_SYNCED` | 所选故事没有正文 | 先对该组做一次 FULL 同步 |
-| `LINKY_ATTACHMENTS_NOT_READY` | 有附件还没落盘 | 重试同步，或显式「允许缺少附件」 |
-| `LINKY_STORY_NOT_IN_CATALOG` | 选了镜像里没有的故事 | 刷新列表 |
+| `LINKY_NOT_FOUND` | 编号在上游不存在（勾选后被删） | 刷新看板重新勾选 |
+| `LINKY_IMPORT_WORKSPACE_REQUIRED` | 没选项目组 | 项目组定义这批需求属于谁，必选 |
+| `LINKY_IMPORT_EMPTY_SELECTION` / `_TOO_MANY_STORIES` | 没勾选 / 超过 500 条 | 勾选或拆批次 |
+| `LINKY_IMPORT_STORY_NO_REQUIREMENT_SOURCE` | 该需求既无正文也无附件 | 去 Linky 补需求描述或附件 |
+| `LINKY_IMPORT_STORY_NOT_REQUESTED` | 提交了不在单子上的编号 | 不该发生；重新发起导入 |
+| `LINKY_IMPORT_LEASE_LOST` | 租约被接管 | 无需处理，另一个副本在做 |
 | `ACTIVE_JOB_EXISTS` / `BATCH_READ_ONLY` | 批次在跑任务 / 已完成或已有 AI 结果 | 先停止任务或换批次 |
 | `REQUIREMENT_ATTACHMENT_DIGEST_MISMATCH` | 物化时 sha256 与冻结值不符 | 不是"少一份资料"，是资料被换过：查 Storage 与导入记录，重新导入 |
 
 ## 21.6 清理归属
 
-`linky_story_catalog` 行长期保留（体量小，是看板的离线可用性来源）。
-镜像附件字节由 Worker 同步循环在**空闲时**清理：超过
-`LINKY_CATALOG_ATTACHMENT_RETENTION_DAYS` 且没有被任何批次引用的对象会被删除，
-元数据行状态回到 `PENDING`（下一次 FULL 同步重新下载）。被引用的对象由
-`list_linky_catalog_attachments_for_cleanup` 直接排除，`mark_linky_catalog_attachment_purged`
-也会再判一次 —— 两道闸门，因为误删它等于让某个历史批次的需求附件永久缺失。
+- **故事提交失败**：该条故事刚上传的附件对象由 Worker 立刻删除（`linky_import_attachment_rollback_failed`
+  只在删不掉时出现，此时留下孤儿字节，不影响正确性）。
+- **批次删除**：级联掉 `review_story_attachment` 行，但 Storage 对象留在 bucket 里（与
+  `review-files` 的现状一致）。用 `unreferenced_story_attachment_paths` 判定后批量删。
+- **V1.20 首版的镜像三表已删除**（`20260924064500_drop_retired_linky_mirror.sql`，2026-09-24
+  经确认执行）：`linky_story_catalog` / `linky_story_catalog_attachment` / `linky_sync_request`
+  及其 17 个专属函数一并删掉，`unreferenced_story_attachment_paths` 同时改成只看
+  `review_story_attachment`。bucket 里 `catalog/` 前缀的旧对象也已清空。
+  批次里冻结的需求与附件（`review_story` / `review_story_attachment` / `batch/` 前缀对象）
+  一个字都没动。
 
 ## 21.7 回滚
 
-- 只清空 `LINKY_API_BASE_URL` 并重启 Worker：同步循环不启动，已导入批次与在跑分析不受影响。
-- 前端回滚上一版即可（旧 Excel 导入页在上一版里还在）。
-- 迁移只增列增表 + `create or replace` 函数，没有删改既有对象。真要退，再写一个把
-  `freeze_analysis_job_scope_inputs` 的 `requirement_context` 表达式 replace 回旧形态的前滚迁移。
-  **任何情况下都不 reset 数据库。**
+- 清空 `LINKY_API_BASE_URL` 并重启 Worker：导入循环不启动，已冻结批次与在跑分析不受影响。
+- 前端回滚上一版（旧 Excel 导入页在 V1.20 之前的版本里）。
+- 迁移只增表增函数 + `create or replace`，没有删改既有对象。
 
 ## 21.8 怎么复跑验证
 
@@ -2018,15 +2008,17 @@ group by s.id order by s.story_code;
 # 数据库契约（自带 begin…rollback，不留数据）
 docker exec -i supabase_db_codeReviewPlatform psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
   < supabase/tests/20260924051800_linky_story_direct_import_test.sql
+docker exec -i supabase_db_codeReviewPlatform psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  < supabase/tests/20260924061500_linky_live_board_and_batch_import_test.sql
 
-# 单测：映射 / 同步执行器 / 附件物化
-npx vitest run worker/src/__tests__/v120-linky-sync.test.ts \
+# 单测：映射 / 导入执行器 / 附件物化 / 前端错误码
+npx vitest run worker/src/__tests__/v120-linky-import.test.ts \
   worker/src/__tests__/v120-requirement-attachments.test.ts
 npx vitest run -c vitest.web.config.ts src/lib/__tests__/v120-linky-errors.test.ts
 
-# 真实链路（会真的调 Linky 并写本地镜像与 Storage）
+# 真实链路（会真的调 Linky、建一个临时批次、写 Storage，跑完自己清理）
 export SUPABASE_URL=http://127.0.0.1:54321
 export SUPABASE_SERVICE_ROLE_KEY=$(supabase status -o env | grep '^SERVICE_ROLE_KEY=' | cut -d= -f2- | tr -d '"')
-npx tsx scripts/v120-linky-e2e.mts                 # 完整：同步 + 核对 + 物化
-E2E_SKIP_SYNC=1 npx tsx scripts/v120-linky-e2e.mts # 只核对与物化，复用上次镜像
+npx tsx scripts/v120-linky-e2e.mts          # 跑完删除临时批次与对象
+E2E_KEEP=1 npx tsx scripts/v120-linky-e2e.mts   # 保留，用于在页面上肉眼看
 ```

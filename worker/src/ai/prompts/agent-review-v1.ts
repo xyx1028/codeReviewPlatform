@@ -26,6 +26,12 @@ export interface AgentReviewStory {
   attachments?: ReadonlyArray<{ relativePath: string; filename: string; sizeBytes: number }>
   /** 取不到的附件数量。如实告知，模型不许假设它们的内容。 */
   missingAttachmentCount?: number
+  /**
+   * 需求正文在上游为空（实测存在这种故事：`gf_description` 为 null，需求写在 PRD 附件里）。
+   * 这时必须明确告诉模型"正文没有，以附件为准"，否则它会把下面那段由标题和项目名拼出来的
+   * 兜底文本当成完整需求，然后据此判定"未实现"。
+   */
+  requirementTextMissing?: boolean
 }
 
 export interface AgentReviewContext {
@@ -106,6 +112,10 @@ export function buildAgentReviewPrompt(context: AgentReviewContext): string {
     '',
     '需求描述：',
     story.description,
+    story.requirementTextMissing === true
+      ? '注意：这条需求在源系统里**没有正文**，上面这段只是由标题与项目名拼出来的兜底信息。'
+        + '真正的需求内容在下面列出的附件里，请先读附件再判断。'
+      : null,
     story.acceptanceCriteria ? `\n验收标准：\n${story.acceptanceCriteria}` : null,
     /*
      * 需求附件（V1.20）。

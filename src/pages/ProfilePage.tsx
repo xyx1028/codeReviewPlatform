@@ -482,7 +482,7 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
               {discovery === null ? '查找我的提交邮箱' : '重新查找'}
             </Button>
             <Text type="secondary">
-              平台会读取你在四个仓库里提的合并申请，从其中的提交里取出你用过的邮箱。
+              平台会读取你在受评审仓库里提的合并申请，从其中的提交里取出你用过的邮箱。
             </Text>
           </div>
 
@@ -557,7 +557,7 @@ function MyGitIdentityCard({ profileDisplayName }: { profileDisplayName: string 
 
           {phase.kind === 'DONE_EMPTY' ? (
             <Text type="secondary">
-              查不到通常有两种原因：你还没在这四个仓库提过合并申请；或者你提的都是把
+              查不到通常有两种原因：你还没在这些仓库提过合并申请；或者你提的都是把
               feature_sit 合进 release 这类集成合并申请 —— 里面是别人的提交，平台不会把它们算成你的。
               平台不提供手动填写 —— 没有 GitLab 提交作为证据的邮箱在归属分析里不会被采用。请联系管理员代录。
             </Text>

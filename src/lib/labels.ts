@@ -86,7 +86,7 @@ export const analysisErrorCodeMeta: Record<string, AnalysisErrorMeta> = {
   GIT_BRANCH_MISSING: {
     title: '代码分支不存在',
     reason: '至少一个必需仓库中找不到批次选择的分支。',
-    suggestion: '确认四个仓库均已创建该分支，或修正批次分支后重新发起分析。',
+    suggestion: '确认全部受评审仓库均已创建该分支，或修正批次分支后重新发起分析。',
     retryable: false,
   },
   GIT_FETCH_FAILED: {
@@ -656,7 +656,7 @@ export const runtimeEventTypeLabels: Record<string, string> = {
   REPOSITORY_PREPARE_STARTED: '开始拉取仓库',
   REPOSITORY_PREPARE_COMPLETED: '仓库准备完成',
   REPOSITORY_PREPARE_FAILED: '仓库准备失败',
-  JOB_SNAPSHOTS_FROZEN: '四仓快照已冻结',
+  JOB_SNAPSHOTS_FROZEN: '仓库快照已冻结',
   JOB_FINALIZATION_STARTED: '批次开始汇总',
   JOB_RETRIED: '批次已重试',
   JOB_SUCCEEDED: '批次成功',

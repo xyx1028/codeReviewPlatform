@@ -1,5 +1,5 @@
 /**
- * Read-only view over the four repositories pinned at one job's exact commits.
+ * Read-only view over the repositories pinned at one job's exact commits.
  *
  * This is the only way repository content reaches the model. It enforces the
  * repository whitelist, the blocked-path policy and hard output limits, and it
