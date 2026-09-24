@@ -33,6 +33,7 @@ import {
   contractHash,
   loadCapabilityContract,
   resolveToolsForRole,
+  type AgentRole,
   type V4CapabilityPolicy,
 } from '../policy/v4-capability-policy.js'
 import {
@@ -131,6 +132,19 @@ export interface AttemptProfileSpec {
   }
   /** V1.11：冻结 Story scope 的连续性身份；v1 缺省为 legacy。 */
   analysisScopeHash?: string
+  /**
+   * 根 Agent 的角色。缺省 `root-reviewer`（评审链路，行为与 V1.23 之前完全一致）。
+   *
+   * V1.23 产品代码问答传 `research-child`：契约里那个角色的工具面**本来就是只读的**
+   * （没有 bash / write / edit / submit_review_result）。这个参数存在的理由是
+   * `rootTools` 会进 `agent-authority-policy` 的配置，是根 Agent 工具面的**唯一**
+   * 收窄点 —— 不让它可配就意味着问答的根 Agent 必然拿到评审角色的全部工具，
+   * 包括提交评审结论的那个。
+   *
+   * 角色名必须存在于契约的 `roleTools` 里，否则 `resolveToolsForRole` 直接
+   * fail closed（`AGENT_ROLE_DENIED`）。契约本身一字不动。
+   */
+  rootRole?: AgentRole
 }
 
 export interface MaterializedAttemptProfile {
@@ -289,7 +303,8 @@ export function buildAttemptPatch(
     requestTimeoutMs: spec.broker.requestTimeoutMs ?? 30000,
   }
   const rootTools = resolveToolsForRole({
-    role: 'root-reviewer',
+    // 缺省 root-reviewer：评审链路行为不变。问答传 research-child（只读角色）。
+    role: spec.rootRole ?? 'root-reviewer',
     policy: spec.policy,
     delegationDepth: 0,
   })
@@ -766,7 +781,7 @@ export function materializeAttemptProfile(
       configHash: computeConfigHash(templateDir, patch, pluginEntries, skillCatalogHash, spec.analysisScopeHash),
       contractHash: contractHash(loadCapabilityContract()),
       rootTools: resolveToolsForRole({
-        role: 'root-reviewer',
+        role: spec.rootRole ?? 'root-reviewer',
         policy: spec.policy,
         delegationDepth: 0,
       }),

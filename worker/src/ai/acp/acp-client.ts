@@ -59,6 +59,29 @@ export interface AcpSessionOptions {
    * 提交工具"恰恰是那种场景下最需要的信息。
    */
   onToolCall?: (toolName: string) => void
+  /**
+   * 工具调用的**参数**观测点（V1.23）。
+   *
+   * 与 `onToolCall` 分开而不是给它加第二个参数：后者会改动一个已有 5 处调用的签名，
+   * 而这里要的东西只有问答用得上 —— 产品要看到「AI 到底读了哪几个文件」，而那只能从
+   * `read` / `read_snapshot_code` 的入参里拿到。
+   *
+   * 参数里可能含代码路径，绝不能进日志；调用方只用它生成给用户看的证据。
+   */
+  onToolCallDetail?: (detail: {
+    toolName: string
+    rawInput?: Record<string, unknown>
+  }) => void
+  /**
+   * Agent 回复正文的分片（V1.23）。
+   *
+   * 评审那条路不需要它：结论通过 `submit_review_result` 工具走 Broker 落库，正文从不
+   * 经过这里。而产品问答**没有提交工具** —— 回答就是 Agent 说的话本身，所以必须有一个
+   * 出口把它交给调用方，否则一次成功的问答在 Worker 侧只剩下 `stopReason: 'end_turn'`。
+   *
+   * 分片按到达顺序回调，调用方自己拼接。
+   */
+  onAgentMessageChunk?: (text: string) => void
   /** 每一次 permission 判定的观测点，用于审计与诊断。 */
   onPermissionDecision?: (decision: {
     toolName: string
@@ -93,6 +116,79 @@ export interface AcpSessionOptions {
 }
 
 const DEFAULT_PERMITTED_TOOLS = ['submit_review_result']
+
+/**
+ * 一条 `session/update` 的形状（只取本模块会读的字段）。
+ *
+ * 字段全部可选：ACP 的 update 是一个联合类型，不同 `sessionUpdate` 带的键不同，
+ * 而这里刻意只做"有就取、没有就跳过"，不做穷举 —— 新增一种 update 类型不应该让
+ * turn 失败。
+ */
+interface SessionUpdateShape {
+  sessionUpdate?: string
+  title?: string
+  toolName?: string
+  rawInput?: Record<string, unknown>
+  content?: unknown
+}
+
+/** 从 `agent_message_chunk` 的 content 里取出文本。导出供单测钉住形状兼容性。 */
+export function readTextContent(content: unknown): string | null {
+  if (typeof content === 'string') return content
+  if (content === null || typeof content !== 'object') return null
+  const record = content as { type?: unknown; text?: unknown }
+  if (record.type === 'text' && typeof record.text === 'string') return record.text
+  // 有些实现把 content 包成数组。
+  if (Array.isArray(content)) {
+    const parts = content.map((item) => readTextContent(item)).filter((part) => part !== null)
+    return parts.length > 0 ? parts.join('') : null
+  }
+  return null
+}
+
+/**
+ * 把一条 update 分发到各个观测回调。
+ *
+ * 抽出来是因为它必须在**两条路径**上行为一致：`session/new` 的 builder 循环，和
+ * resume 的低层 `onNotification`。V4 之前这两处各自内联处理 tool_call，结果 resume
+ * 路径少上报了一类观测 —— 同样的分叉不能在正文捕获上再发生一次。
+ *
+ * 回调抛出的异常一律吞掉：观测绝不影响 turn。
+ */
+export function dispatchUpdateObservations(
+  update: SessionUpdateShape,
+  options: Pick<
+    AcpSessionOptions,
+    'onToolCall' | 'onToolCallDetail' | 'onAgentMessageChunk'
+  >,
+  collected: { toolNames: string[] },
+): void {  if (update.sessionUpdate === 'tool_call') {
+    const name = update.toolName ?? update.title
+    if (name) {
+      try {
+        options.onToolCall?.(name)
+        options.onToolCallDetail?.({
+          toolName: name,
+          ...(update.rawInput ? { rawInput: update.rawInput } : {}),
+        })
+      } catch {
+        // 观测绝不影响 turn。
+      }
+      if (!collected.toolNames.includes(name)) collected.toolNames.push(name)
+    }
+    return
+  }
+  if (update.sessionUpdate === 'agent_message_chunk') {
+    const text = readTextContent(update.content)
+    if (text !== null && text !== '') {
+      try {
+        options.onAgentMessageChunk?.(text)
+      } catch {
+        // 同上。
+      }
+    }
+  }
+}
 
 /**
  * Names a permission request may carry for the tool being approved.
@@ -243,18 +339,11 @@ export async function runSingleAcpTurn(
       : app.onNotification(methods.client.session.update, ({ params }) => {
           const notification = params as {
             sessionId?: string
-            update?: { sessionUpdate?: string; title?: string; toolName?: string }
+            update?: SessionUpdateShape
           }
           if (notification.sessionId !== options.resumeSessionId) return
           resumeCollected.updates++
-          const update = notification.update ?? {}
-          if (update.sessionUpdate === 'tool_call') {
-            const name = update.toolName ?? update.title
-            if (name) {
-              options.onToolCall?.(name)
-              if (!resumeCollected.toolNames.includes(name)) resumeCollected.toolNames.push(name)
-            }
-          }
+          dispatchUpdateObservations(notification.update ?? {}, options, resumeCollected)
         })
 
   const stream = ndJsonStream(
@@ -365,17 +454,13 @@ export async function runSingleAcpTurn(
             }
           }
           updates++
-          const update = message.update as { sessionUpdate?: string; title?: string; toolName?: string }
-          if (update.sessionUpdate === 'tool_call') {
-            const name = update.toolName ?? update.title
-            if (name) {
-              // 逐次上报，而不是只在 turn 正常结束时返回：turn 抛错（例如预算耗尽）
-              // 时这份观测同样需要，否则无法区分"模型没调用提交工具"和
-              // "调用了但没到达 Worker"。
-              options.onToolCall?.(name)
-              if (!toolNames.includes(name)) toolNames.push(name)
-            }
-          }
+          // 逐条分发观测：tool_call 与正文分片都在这里出去。turn 抛错（例如预算耗尽）
+          // 时这份观测同样需要，否则无法区分"模型没调用提交工具"和"调用了但没到达 Worker"。
+          dispatchUpdateObservations(
+            message.update as SessionUpdateShape,
+            options,
+            { toolNames },
+          )
         }
       } finally {
         signal.removeEventListener('abort', onCancel)

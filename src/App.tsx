@@ -39,6 +39,8 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } fr
 import { LinkyStoryPicker } from './components/linky/LinkyStoryPicker'
 import { groupImportFailures } from './components/linky/import-failures'
 import { StoryBoardPage } from './pages/StoryBoardPage'
+// V1.23：产品代码问答首页。default export（页面内部自成一体，没有对外的子组件）。
+import CodeQaPage from './pages/CodeQaPage'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   adminDeleteUser,
@@ -597,7 +599,9 @@ function Shell({ session }: { session: Session }) {
   const accountLabel = getUserDisplayName(profileQuery.data?.display_name, session.user.email)
   const canCreateBatch = role === 'ADMIN' || role === 'REVIEWER'
   const canManageBatch = (batch: ReviewBatch) => role === 'ADMIN' || (role === 'REVIEWER' && batch.created_by === session.user.id)
-  const selectedKey = location.pathname.startsWith('/profile')
+  const selectedKey = location.pathname.startsWith('/ask')
+    ? '/ask'
+    : location.pathname.startsWith('/profile')
     ? '/profile'
     : location.pathname.startsWith('/users')
       ? '/users'
@@ -619,6 +623,8 @@ function Shell({ session }: { session: Session }) {
                   ? '/operation-log'
                   : '/batches'
   const menuItems = [
+    // V1.23：产品代码问答。放在第一项 —— 它是默认首页。
+    { key: '/ask', label: <Link to="/ask">代码问答</Link> },
     { key: '/batches', label: <Link to="/batches">代码评审</Link> },
     // V1.20：用户故事看板。三种角色都能看（VIEWER 只读），刷新与导入由 RPC 门禁裁决。
     { key: '/stories', label: <Link to="/stories">用户故事</Link> },
@@ -675,7 +681,10 @@ function Shell({ session }: { session: Session }) {
         </Sider>
         <Content className="app-content">
           <Routes>
-            <Route path="/" element={<Navigate to="/batches" replace />} />
+            {/* V1.23：登录后默认落在代码问答。它是产品经理进平台的第一个动作，
+                而评审批次是评审者的工作台 —— 两类角色的首页不该是同一个。 */}
+            <Route path="/" element={<Navigate to="/ask" replace />} />
+            <Route path="/ask" element={<CodeQaPage />} />
             <Route path="/batches" element={<BatchesPage canCreateBatch={canCreateBatch} canManageBatch={canManageBatch} />} />
             <Route path="/stories" element={<StoryBoardPage />} />
             <Route path="/operation-log" element={<OperationLogPage scope="batch" />} />
@@ -703,7 +712,7 @@ function Shell({ session }: { session: Session }) {
               element={<UsersManagementPage isAdmin={isAdmin} />}
             />
             <Route path="/batches/:batchId/*" element={<BatchPage canManageBatch={canManageBatch} />} />
-            <Route path="*" element={<Navigate to="/batches" replace />} />
+            <Route path="*" element={<Navigate to="/ask" replace />} />
           </Routes>
         </Content>
       </Layout>

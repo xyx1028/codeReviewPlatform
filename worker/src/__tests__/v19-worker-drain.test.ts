@@ -160,6 +160,8 @@ function buildConfig(root: string): WorkerConfig {
     sessionRetentionDays: 7,
     sessionVolumeMaxBytes: 64 * 1024 * 1024,
     orphanWorkspaceMaxAgeMs: 60_000,
+    // V1.23：问答轮询开关。测试里关掉 —— 这些用例验证的是评审链路。
+    codeQa: { enabled: false, leaseSeconds: 600, turnTimeoutMs: 900000 },
     runtimeEvents: {
       enabled: false,
       flushMs: 800,

@@ -1497,3 +1497,95 @@ export interface SaveMyGitIdentityFromCandidateInput {
   gitIdentityId?: string | null
   expectedRevision?: number | null
 }
+
+/* ---------------------------------------------------------------------------
+ * V1.23 产品代码问答
+ * ------------------------------------------------------------------------- */
+
+/** 轮次生命周期。与数据库 CHECK 逐字一致。 */
+export type CodeQaTurnStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
+
+/**
+ * 真实阶段。由 Worker 在实际转换点上报，页面照抄。
+ *
+ * 它与 status 是两个维度：status 回答"这一轮结束了没有"，stage 回答"此刻在做什么"。
+ */
+export type CodeQaStage = 'QUEUED' | 'PREPARING_CODE' | 'EXPLORING' | 'GENERATING' | 'DONE'
+
+/**
+ * 一轮回答的可核对证据。
+ *
+ * 全部字段可选：它由 Worker 写入，失败的轮次往往只有一部分键。页面必须能渲染缺席。
+ */
+export interface CodeQaEvidence {
+  /** 这一轮实际使用的代码快照 commit。 */
+  commit_sha?: string
+  /** Agent 真正读过的文件（快照内相对路径）。 */
+  files_read?: string[]
+  /** Agent 调用过的平台技能名。 */
+  skills_used?: string[]
+  /** 工具调用次数，用于判断它到底查了多少东西。 */
+  tool_call_count?: number
+  /** 是否续用了既有 DSH 会话上下文。false = 模型不记得更早的对话。 */
+  resumed?: boolean
+  /** 观测到的 session/update 条数，诊断用。 */
+  update_count?: number
+}
+
+export interface CodeQaTurn {
+  id: string
+  question: string
+  status: CodeQaTurnStatus
+  stage: CodeQaStage
+  answer: string | null
+  evidence: CodeQaEvidence | null
+  error_code: string | null
+  error_message: string | null
+  /** 回答这一轮用的模型显示名。 */
+  model_label: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+}
+
+/** 会话列表项。仓库与分支是会话级的（见执行方案 §5.4）。 */
+export interface CodeQaConversationSummary {
+  id: string
+  title: string
+  repository: string
+  branch: DefaultBranch
+  /** 首轮拉取后冻结的 commit；尚未拉取时为 null。 */
+  commit_sha: string | null
+  /** 是否已经有 DSH 会话可供续跑。真正的 session id 不出给浏览器。 */
+  has_session: boolean
+  turn_count: number
+  created_at: string
+  updated_at: string
+  last_turn_at: string | null
+}
+
+export interface CodeQaConversationDetail extends Omit<CodeQaConversationSummary, 'turn_count'> {
+  turns: CodeQaTurn[]
+}
+
+/** 问答页要的三份清单。技能只给人看的元数据，不含归档定位。 */
+export interface CodeQaCatalog {
+  repositories: Array<{ name: string; gitlab_project: string }>
+  branches: DefaultBranch[]
+  skills: Array<{
+    name: string
+    display_name: string | null
+    description: string | null
+    when_to_use: string | null
+  }>
+}
+
+/** 入队一轮之后立刻回给前端的那一点信息。 */
+export interface CodeQaTurnQueued {
+  id: string
+  conversation_id: string
+  question: string
+  status: CodeQaTurnStatus
+  stage: CodeQaStage
+  created_at: string
+}

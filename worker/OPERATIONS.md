@@ -2224,3 +2224,119 @@ npx vitest run -c vitest.web.config.ts src/lib/__tests__/skill-ai-optimization.t
 RUN_V119_LOCAL_INTEGRATION=1 npx vitest run \
   worker/src/__tests__/v119-skill-ai-optimization.integration.test.ts
 ```
+
+# 24. V1.23 产品代码问答（首页对话窗口）
+
+产品经理在 `/ask` 用自然语言问"某个仓库某个分支上这个功能现在是怎么做的"。回答由 Worker
+侧的 DeepSeek Harness 会话产生：Agent 在**钉死 commit 的只读快照**上自己 grep / 读文件 /
+按需调平台技能。链路与评审完全并行，互不影响。
+
+执行方案：`代码评审平台需求文档/V1.23-产品代码问答/需求开发评审一致性平台-V1.23产品代码问答-最终执行方案.md`
+
+## 24.1 环境变量
+
+| 变量 | 默认 | 含义 |
+|---|---|---|
+| `CODE_QA_ENABLED` | `true` | 第 6 条轮询开关。**这是回滚手段**（见 §24.5） |
+| `CODE_QA_LEASE_SECONDS` | `600` | 认领租约。崩掉的 Worker 最多堵住那个会话这么久 |
+| `CODE_QA_TURN_TIMEOUT_MS` | `900000` | 单轮硬上限（15 分钟）。到点终态失败，不无限续租 |
+
+不需要新增卷。会话 JSONL 与评审共用 `AGENT_SESSION_ROOT`，但目录前缀独立
+（`<AGENT_SESSION_ROOT>/code-qa/`），Broker socket 在
+`<AGENT_ATTEMPTS_ROOT>/code-qa-sockets/`。
+
+## 24.2 正常一轮的日志序列
+
+每条都对应一个**真实转换点**，没有按时间猜的阶段：
+
+```text
+code_qa_enabled              启动时一次（没有它说明开关是 false）
+code_qa_skills_provisioned   skill_catalog_count / cache_hits / cache_misses
+code_qa_snapshot_ready       repository / branch / commit_sha / cached
+code_qa_inert_tools_exposed  见 §24.4，正常出现，不是故障
+code_qa_profile_ready        tool_count / resume_target=new|load
+code_qa_turn_observed        stop_reason / updates / tool_call_count / resumed / answer_chars
+```
+
+数据库侧 `code_qa_turn.stage` 同步推进：
+`QUEUED → PREPARING_CODE → EXPLORING → GENERATING → DONE`，**只能向前**
+（`report_code_qa_turn_stage` 拒绝回退并返回 false）。
+
+## 24.3 错误码表
+
+| 错误码 | 含义 | 该做什么 |
+|---|---|---|
+| `CODE_QA_SNAPSHOT_FAILED` | 分支拉取失败 | 确认分支存在；确认 Mac 连内网/VPN 且代理可用 |
+| `CODE_QA_SESSION_RESUME_FAILED` | DSH 会话无法续跑 | 让用户新建会话。**不要**手工改库塞 session id |
+| `CODE_QA_ANSWER_EMPTY` | 模型没产出正文 | 看 `error_message` 里的 `stopReason` / `promptError` |
+| `CODE_QA_TOOL_SURFACE_NOT_READ_ONLY` | 工具面混进写工具 | **代码缺陷，不是运行故障**。见 §24.4 第 1 条 |
+| `CODE_QA_TIMEOUT` | 超过单轮上限 | 让用户把问题拆小；必要时调 `CODE_QA_TURN_TIMEOUT_MS` |
+| `MODEL_CONFIG_NOT_FOUND` | 没有启用的模型配置 | 在「模型管理」建一个并启用 |
+| `MODEL_SECRET_MISSING` | 有配置但 Vault 里没 Key | 补 Key。**注意**：选型只挑有 Key 的配置 |
+| `MODEL_*`（其余） | 沿用模型链路既有码 | 见 §9 |
+| `TASK_LEASE_LOST` | 租约被接管 | 正常现象，轮次会被 reclaim 回 QUEUED |
+
+## 24.4 两条必须知道的边界
+
+1. **`assertCodeQaToolsReadOnly` 是 spawn 之前的 fail-closed 门禁。** 它一旦报错，说明
+   问答的工具面里出现了能改代码的工具 —— 那是代码缺陷，**不要**通过放宽断言来"修"。
+   本地实测抓到过一次真实原因：`materializeAttemptProfile` 的 `rootTools` 默认按
+   `root-reviewer` 解析，问答必须显式传 `rootRole: 'research-child'`。
+2. **`code_qa_inert_tools_exposed` 是正常日志。** `list_story_commits` /
+   `read_story_commit_diff` 不受任何 capability 开关控制，策略层去不掉，所以它们仍在
+   工具面里。它们经 Broker 路由，而问答的 Broker 没有 `analysisScope`，调用会被直接拒绝。
+   最坏情况是模型白调一次。**不需要处置。**
+
+## 24.5 回滚
+
+按代价从小到大：
+
+```bash
+# 1. 只关问答（最常用）。轮次停在 QUEUED，页面如实显示"排队中"，评审链路不受影响。
+#    在 worker.env 里设 CODE_QA_ENABLED=false，然后滚动重启：
+WORKER_ENV_FILE=.docker/worker.env docker compose -p codereviewplatform \
+  -f docker-compose.worker.yml up -d --no-build --force-recreate --scale worker=4
+
+# 2. 前端摘入口：把默认首页改回 /batches、去掉导航项。数据库可以留着。
+```
+
+**数据库不回滚。** 三个迁移全是只增不改，留着不影响任何既有链路。
+
+## 24.6 运维查询
+
+```sql
+-- 在飞轮次（应当很少，且同一会话最多一条）
+select t.id, t.stage, t.worker_id, t.lease_expires_at, c.repository, c.branch
+from public.code_qa_turn t join public.code_qa_conversation c on c.id = t.conversation_id
+where t.status in ('QUEUED','RUNNING') order by t.created_at;
+
+-- 堵住的会话：RUNNING 但租约已过期（reclaim 会处理，持续存在才是问题）
+select count(*) from public.code_qa_turn
+where status = 'RUNNING' and lease_expires_at < now();
+
+-- 近 24 小时失败分布（按错误码看该找谁）
+select error_code, count(*) from public.code_qa_turn
+where status = 'FAILED' and finished_at > now() - interval '24 hours'
+group by 1 order by 2 desc;
+
+-- 多轮续跑是否真的生效（resumed=false 且不是首轮 = 上下文断过）
+select c.id, count(*) as turns,
+       count(*) filter (where t.evidence->>'resumed' = 'true') as resumed_turns
+from public.code_qa_conversation c join public.code_qa_turn t on t.conversation_id = c.id
+where t.status = 'SUCCEEDED' group by c.id having count(*) > 1;
+```
+
+## 24.7 复跑验证
+
+```bash
+npm run worker:typecheck && npm run worker:build && npm run test:worker
+docker exec -i supabase_db_codeReviewPlatform psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  < supabase/tests/20260924104500_code_qa_conversation_test.sql
+docker exec -i supabase_db_codeReviewPlatform psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  < supabase/tests/20260924111603_code_qa_skill_catalog_test.sql
+docker exec -i supabase_db_codeReviewPlatform psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  < supabase/tests/20260924113303_code_qa_model_selection_test.sql
+```
+
+端到端：在 `/ask` 建一个会话问一个问题，然后**追问"你刚才提到的第一个文件…"** ——
+第二轮的 `evidence->>'resumed'` 必须是 `true`，否则续跑没生效。

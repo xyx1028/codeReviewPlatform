@@ -24,6 +24,15 @@ import type { ReviewRunner } from './ai/runtime/contracts.js'
 import { buildDeepSeekHarnessReview } from './ai/runtime/factory.js'
 import { enforceSessionRetention } from './ai/session/session-retention.js'
 import { SkillCache } from './ai/skills/skill-cache.js'
+// V1.23：产品代码问答。问答用"当前"技能目录，所以它自己调 provisionSkillCatalog，
+// 不复用评审那条路上按 Job 冻结值对账的封装。
+import {
+  parseFrozenSkillCatalog,
+  provisionSkillCatalog,
+  resolveCatalogLimits,
+  type ProvisionedSkill,
+} from './ai/skills/skill-provisioner.js'
+import { runCodeQaTurn } from './ai/code-qa/qa-session-runner.js'
 import { runSkillAiOptimization } from './ai/skills/skill-ai-optimizer.js'
 import { SupabaseSkillStorageClient, type SkillStorageClient } from './ai/skills/skill-storage.js'
 import { cleanOrphanedOverlays } from './ai/workspace/overlay-cleaner.js'
@@ -43,6 +52,7 @@ import {
 import { SupabaseDbClient } from './db/client.js'
 import {
   JobsDb,
+  type CodeQaTurnClaim,
   type GitEmailDiscoveryClaim,
   type ModelConnectivityTestClaim,
   type SkillAiOptimizationClaim,
@@ -629,6 +639,102 @@ export async function runSkillAiOptimizationTask(
 }
 
 /**
+ * V1.23：执行一轮产品代码问答。
+ *
+ * 与其它队列任务的差别只有一处但很关键：**技能目录取的是"当前"而不是"冻结"**。
+ * 评审要求同一批次前后可比，所以用 Job 冻结的目录；问答的使用者问的是"现在的代码
+ * 是怎么做的"，而且它没有批次可冻结。会话行上记着首轮的 `skill_catalog_hash`，
+ * 中途技能发版后续跑会因此被拒绝，而不是静默换一套知识。
+ *
+ * 技能物化失败**不让这一轮失败**：空技能目录下 Agent 仍然能读代码回答，只是少了模块
+ * 背景。反过来（技能取不到就整轮失败）会让一次技能包发布事故连带打掉首页功能。
+ */
+export async function runCodeQaTurnTask(
+  config: WorkerConfig,
+  jobsDb: JobsDb,
+  skillCache: SkillCache,
+  skillStorage: SupabaseSkillStorageClient,
+  claim: CodeQaTurnClaim,
+  logger: Logger,
+  signal: AbortSignal,
+): Promise<void> {
+  const log = logger.child({ code_qa_turn_id: claim.turn_id })
+  const claimRef = {
+    turnId: claim.turn_id,
+    workerId: config.workerId,
+    claimToken: claim.claim_token,
+  }
+  const lease = new Heartbeat({
+    taskId: claim.turn_id,
+    workerId: config.workerId,
+    intervalMs: Math.min(config.heartbeatIntervalMs, 15000),
+    send: (turnId, workerId) =>
+      jobsDb.heartbeatCodeQaTurn({
+        turnId,
+        workerId,
+        claimToken: claim.claim_token,
+        leaseSeconds: config.codeQa.leaseSeconds,
+      }),
+    onLeaseLost: () => undefined,
+    logger: log,
+  })
+  lease.start()
+
+  let skills: { catalogHash: string; bundles: readonly ProvisionedSkill[] } | undefined
+  try {
+    const raw = await jobsDb.getCodeQaSkillCatalog(claimRef)
+    const catalog = parseFrozenSkillCatalog(raw)
+    if (catalog.bundles.length > 0) {
+      const provisioned = await provisionSkillCatalog({
+        catalog,
+        cache: skillCache,
+        storage: skillStorage,
+        catalogLimits: resolveCatalogLimits(catalog),
+      })
+      skills = { catalogHash: provisioned.catalogHash, bundles: provisioned.bundles }
+      log.info('code_qa_skills_provisioned', {
+        event: 'code_qa_skills_provisioned',
+        skill_catalog_count: provisioned.bundles.length,
+        skill_cache_hits: provisioned.cacheHits,
+        skill_cache_misses: provisioned.cacheMisses,
+      })
+    }
+  } catch (error) {
+    // 降级而不是失败：空技能目录下 Agent 仍然能读代码回答。
+    log.warn('code_qa_skills_unavailable', {
+      event: 'code_qa_skills_unavailable',
+      error_message: redactError(error),
+    })
+  }
+
+  try {
+    await runCodeQaTurn(claim, {
+      jobsDb,
+      workerId: config.workerId,
+      paths: {
+        codeCacheRoot: config.codeCacheRoot,
+        agentAttemptsRoot: config.agentAttemptsRoot,
+        sessionRoot: config.sessionRoot,
+        socketRoot: join(config.agentAttemptsRoot, 'code-qa-sockets'),
+      },
+      git: {
+        authMode: config.gitAuthMode,
+        gitlabBaseUrl: config.gitlabBaseUrl,
+        deployUser: config.gitlabDeployUser,
+        deployToken: config.gitlabDeployToken,
+      },
+      modelProxy: config.modelConnectivityProxy,
+      ...(skills ? { skills } : {}),
+      logger: log,
+      signal,
+      turnTimeoutMs: config.codeQa.turnTimeoutMs,
+    })
+  } finally {
+    lease.stop()
+  }
+}
+
+/**
  * 数据库侧回填时可能抛出的稳定错误码。
  *
  * 不把它们收敛成 GIT_EMAIL_DISCOVERY_FAILED 是刻意的：本地实测过一次
@@ -970,6 +1076,8 @@ export function startWorker(
   let gitEmailDiscoveryLoopPromise: Promise<void> | null = null
   let skillAiOptimizationLoopPromise: Promise<void> | null = null
   let linkySyncLoopPromise: Promise<void> | null = null
+  // V1.23：第 6 条轮询（产品代码问答）。
+  let codeQaLoopPromise: Promise<void> | null = null
   let resolveRanOnce: () => void
   const ranOnce = new Promise<void>((resolve) => {
     resolveRanOnce = resolve
@@ -1422,11 +1530,65 @@ export function startWorker(
     }
   }
 
+  /*
+   * 第 6 条轮询：产品代码问答（V1.23）。
+   *
+   * 与连接测试、Git 邮箱反查、技能优化并排，不排在评审任务后面 —— 它们共同的性质是
+   * "用户在页面上等着"，而一个评审任务要几十分钟。
+   *
+   * `CODE_QA_ENABLED=false` 时整条不启动：轮次停在 QUEUED，页面如实显示"排队中"。
+   * 这就是这个功能的回滚开关，不需要动数据库，也不影响评审链路。
+   *
+   * 认领后没有 release 路径：认领即写 RUNNING，stopped 时不再认领；已认领的靠租约超时
+   * 被 `reclaim_stale_code_qa_turn_leases` 打回 QUEUED。并发天然是 1（同会话唯一索引），
+   * 这一点对问答尤其重要 —— 两个 Worker 同时 `session/load` 同一个 DSH 会话会破坏
+   * JSONL 的单写者约束。
+   */
+  const codeQaLoop = async (): Promise<void> => {
+    if (!config.codeQa.enabled) {
+      logger.info('code_qa_disabled', { event: 'code_qa_disabled' })
+      return
+    }
+    logger.info('code_qa_enabled', {
+      event: 'code_qa_enabled',
+      lease_seconds: config.codeQa.leaseSeconds,
+      turn_timeout_ms: config.codeQa.turnTimeoutMs,
+    })
+    while (!stopped) {
+      try {
+        if (draining()) {
+          await sleep(config.pollIntervalMs)
+          continue
+        }
+        // 先回收失联租约再认领：一个崩掉的 Worker 留下的 RUNNING 行会永久堵住那个会话
+        // （唯一索引不允许第二条在飞），用户看到的是永远转的进度条且提不了下一个问题。
+        await jobsDb.reclaimStaleCodeQaTurnLeases().catch(() => 0)
+        const claim = await jobsDb.claimNextCodeQaTurn(
+          config.workerId,
+          config.codeQa.leaseSeconds,
+        )
+        if (!claim) {
+          await sleep(config.pollIntervalMs)
+          continue
+        }
+        if (stopped) break
+        await runCodeQaTurnTask(config, jobsDb, skillCache, skillStorage, claim, logger, shutdownController.signal)
+      } catch (error) {
+        logger.error('code_qa_loop_error', {
+          event: 'code_qa_loop_error',
+          error_message: redactError(error),
+        })
+        await sleep(config.pollIntervalMs)
+      }
+    }
+  }
+
   void loop()
   modelTestLoopPromise = modelTestLoop()
   gitEmailDiscoveryLoopPromise = gitEmailDiscoveryLoop()
   skillAiOptimizationLoopPromise = skillAiOptimizationLoop()
   linkySyncLoopPromise = linkyImportLoop()
+  codeQaLoopPromise = codeQaLoop()
 
   return {
     stop(): Promise<void> {
@@ -1440,6 +1602,7 @@ export function startWorker(
         ...(gitEmailDiscoveryLoopPromise ? [gitEmailDiscoveryLoopPromise] : []),
         ...(skillAiOptimizationLoopPromise ? [skillAiOptimizationLoopPromise] : []),
         ...(linkySyncLoopPromise ? [linkySyncLoopPromise] : []),
+        ...(codeQaLoopPromise ? [codeQaLoopPromise] : []),
       ]).then(() => undefined)
       return stopPromise
     },

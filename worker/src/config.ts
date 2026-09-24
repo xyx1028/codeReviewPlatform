@@ -109,6 +109,20 @@ export interface WorkerConfig {
   /** 孤儿 Workspace 的最大存活时长。 */
   orphanWorkspaceMaxAgeMs: number
   /**
+   * V1.23 产品代码问答。
+   *
+   * `enabled = false` 时第 6 条轮询根本不启动，问答轮次停在 QUEUED，页面如实显示
+   * "排队中，等待分析服务领取"。这就是这个功能的回滚开关 —— 滚动重启即可，
+   * 不需要动数据库，也不影响评审链路。
+   */
+  codeQa: {
+    enabled: boolean
+    /** 认领租约秒数。 */
+    leaseSeconds: number
+    /** 单轮时长上限。到点即终态失败，不无限续租。 */
+    turnTimeoutMs: number
+  }
+  /**
    * 运行监控事件上报（方案 §7.9）。
    *
    * `enabled = false` 时 Worker 完全不上报，现有分析流程不受任何影响 —— 这是三级停写
@@ -457,9 +471,23 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
       60 * 1000,
       7 * 24 * 60 * 60 * 1000,
     ),
+    codeQa: {
+      // 默认开启：这是首页功能，关掉等于首页不工作。回滚时显式设 false。
+      enabled: boolFlag(env, 'CODE_QA_ENABLED', true),
+      // 10 分钟。一轮问答通常几十秒；给足余量让 Agent 多读几个文件，
+      // 同时保证一个崩掉的 Worker 最多堵住这个会话 10 分钟。
+      leaseSeconds: intInRange(env, 'CODE_QA_LEASE_SECONDS', 600, 60, 3600),
+      // 15 分钟硬上限。超过它说明问题太大或模型在打转，终态失败比让产品一直等更好。
+      turnTimeoutMs: intInRange(
+        env,
+        'CODE_QA_TURN_TIMEOUT_MS',
+        15 * 60 * 1000,
+        60 * 1000,
+        60 * 60 * 1000,
+      ),
+    },
     runtimeEvents: {
-      enabled: boolFlag(env, 'RUNTIME_EVENTS_ENABLED', true),
-      // 800ms 默认值来自方案 §7.1：必须 ≤1 秒，否则"正在调用"来不及被看见。
+      enabled: boolFlag(env, 'RUNTIME_EVENTS_ENABLED', true),      // 800ms 默认值来自方案 §7.1：必须 ≤1 秒，否则"正在调用"来不及被看见。
       flushMs: intInRange(env, 'RUNTIME_EVENT_FLUSH_MS', 800, 50, 10000),
       queueMax: intInRange(env, 'RUNTIME_EVENT_QUEUE_MAX', 512, 32, 20000),
       batchMax: intInRange(env, 'RUNTIME_EVENT_BATCH_MAX', 64, 1, 500),

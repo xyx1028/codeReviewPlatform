@@ -37,6 +37,10 @@ import type {
   BatchOperationLog,
   BatchOperationLogWithBatch,
   BatchWorkspace,
+  CodeQaCatalog,
+  CodeQaConversationDetail,
+  CodeQaConversationSummary,
+  CodeQaTurnQueued,
   DefaultBranch,
   DeveloperGitIdentityRecord,
   DeveloperIdentityStatus,
@@ -2037,5 +2041,104 @@ export function describeLinkyError(error: unknown): string {
   if (raw.includes('LINKY_IMPORT_NOT_FOUND')) return '找不到这张导入单。'
   if (raw.includes('ACTIVE_JOB_EXISTS')) return '该批次有分析任务在运行，先停止后再导入需求。'
   if (raw.includes('BATCH_READ_ONLY')) return '该批次已完成或已有 AI 结果，不能再导入需求。'
+  return raw
+}
+
+/* ---------------------------------------------------------------------------
+ * V1.23 产品代码问答
+ *
+ * 这七个 RPC 是浏览器能碰到的全部。Worker 侧那十个（claim / heartbeat / stage /
+ * bind / secret / submit / reclaim）对 authenticated **没有** execute 权限，
+ * 所以这里连封装都不存在 —— 缺席是设计，不是遗漏。
+ * ------------------------------------------------------------------------- */
+
+/** 仓库、分支、可用技能三份清单。产品在新建会话时用它选仓库与分支。 */
+export async function getCodeQaCatalog() {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('code_qa_catalog')
+  return unwrap<CodeQaCatalog>({ data, error })
+}
+
+/**
+ * 新建会话。仓库与分支在这里定下，之后不能改。
+ *
+ * 不能改是刻意的：DSH 会话的历史是连续的，中途换仓库会让模型带着 A 仓的上下文解释
+ * B 仓的代码。换仓库就开新会话。
+ */
+export async function createCodeQaConversation(input: {
+  repository: string
+  branch: DefaultBranch
+  title?: string | null
+}) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('create_code_qa_conversation', {
+    p_repository: input.repository,
+    p_branch: input.branch,
+    p_title: input.title ?? null,
+  })
+  return unwrap<CodeQaConversationSummary>({ data, error })
+}
+
+export async function listCodeQaConversations() {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('list_code_qa_conversations')
+  return unwrap<CodeQaConversationSummary[]>({ data, error })
+}
+
+/** 会话 + 全部轮次。页面在有在飞轮次时每 2 秒调一次。 */
+export async function getCodeQaConversation(conversationId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('get_code_qa_conversation', {
+    p_conversation_id: conversationId,
+  })
+  return unwrap<CodeQaConversationDetail>({ data, error })
+}
+
+export async function renameCodeQaConversation(input: { conversationId: string; title: string }) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('rename_code_qa_conversation', {
+    p_conversation_id: input.conversationId,
+    p_title: input.title,
+  })
+  return unwrap<CodeQaConversationSummary>({ data, error })
+}
+
+export async function deleteCodeQaConversation(conversationId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('delete_code_qa_conversation', {
+    p_conversation_id: conversationId,
+  })
+  return unwrap<boolean>({ data, error })
+}
+
+/**
+ * 提一个问题。
+ *
+ * 模型配置在这一刻被冻结进轮次行；没有启用模型或缺 Key 时**入队即失败**（抛错），
+ * 不会留下一条永远排队的轮次。
+ */
+export async function requestCodeQaTurn(input: { conversationId: string; question: string }) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('request_code_qa_turn', {
+    p_conversation_id: input.conversationId,
+    p_question: input.question,
+  })
+  return unwrap<CodeQaTurnQueued>({ data, error })
+}
+
+/** 把 RPC 抛出的稳定错误码翻成一句中文。页面只显示这一句。 */
+export function describeCodeQaRpcError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  if (raw.includes('CODE_QA_CONVERSATION_NOT_FOUND')) return '找不到这个会话，或它不属于你。'
+  if (raw.includes('CODE_QA_TURN_IN_FLIGHT')) return '这个会话还有一个问题正在回答，请等它结束。'
+  if (raw.includes('CODE_QA_QUESTION_REQUIRED')) return '请先输入问题。'
+  if (raw.includes('CODE_QA_TITLE_REQUIRED')) return '标题不能为空。'
+  if (raw.includes('MODEL_CONFIG_NOT_FOUND')) {
+    return '平台还没有启用任何模型配置，请联系管理员在「模型管理」里配置后再提问。'
+  }
+  if (raw.includes('MODEL_SECRET_MISSING')) {
+    return '模型配置缺少可用的 API Key，请联系管理员补齐。'
+  }
+  if (raw.includes('AUTH_REQUIRED')) return '登录状态已失效，请重新登录。'
   return raw
 }

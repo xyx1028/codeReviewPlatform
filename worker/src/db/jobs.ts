@@ -285,6 +285,57 @@ export interface SkillAiOptimizationClaimRef {
   claimToken: string
 }
 
+/* ---------------------------------------------------------------------------
+ * V1.23 产品代码问答
+ * ------------------------------------------------------------------------- */
+
+/**
+ * 一轮已认领的问答。
+ *
+ * `commit_sha` 与 `dsh_session_id` 是**会话级**的：第一轮都是 null（还没冻结、还没
+ * 建会话），第二轮起带值。Worker 靠它们决定是"解析分支头 + session/new"还是
+ * "复用冻结 SHA + session/load"。
+ */
+export interface CodeQaTurnClaim {
+  turn_id: string
+  claim_token: string
+  conversation_id: string
+  question: string
+  repository: string
+  branch: string
+  /** 会话已冻结的 commit；null = 这是第一轮，要自己解析分支头。 */
+  commit_sha: string | null
+  /** 既有 DSH 会话；null = 要 session/new。 */
+  dsh_session_id: string | null
+  /** 首轮物化的技能目录身份；用于判断能不能续跑。 */
+  skill_catalog_hash: string | null
+  owner_id: string | null
+  base_url_snapshot: string
+  model_name_snapshot: string
+  request_timeout_ms_snapshot: number
+  network_access_mode_snapshot: string | undefined
+  max_output_tokens_snapshot: number | null
+}
+
+export interface CodeQaTurnClaimRef {
+  turnId: string
+  workerId: string
+  claimToken: string
+}
+
+/** 页面显示的真实阶段。只能向前，数据库侧也会拒绝回退。 */
+export type CodeQaStageName = 'PREPARING_CODE' | 'EXPLORING' | 'GENERATING' | 'DONE'
+
+/** 一轮回答的可核对证据。写进 code_qa_turn.evidence。 */
+export interface CodeQaEvidencePayload {
+  commit_sha?: string
+  files_read?: string[]
+  skills_used?: string[]
+  tool_call_count?: number
+  resumed?: boolean
+  update_count?: number
+}
+
 export interface SkillEvidenceSampleRow {
   story_code: string
   verdict: string
@@ -1894,5 +1945,180 @@ export class JobsDb {
       p_paths: paths,
     })
     return Array.isArray(data) ? data.filter((path): path is string => typeof path === 'string') : []
+  }
+
+  // --------------------------------------------------------------------------
+  // V1.23 产品代码问答队列。
+  //
+  // 与技能优化那条队列同构：claim 拿一次性 token，之后每次写入都带 token 过 fencing。
+  // 多出来的两个 bind_* 方法是问答特有的 —— 会话级的代码基线与 DSH 会话身份必须由
+  // Worker 写回，浏览器碰不到它们（RPC 只授 service_role）。
+  // --------------------------------------------------------------------------
+
+  async claimNextCodeQaTurn(
+    workerId: string,
+    leaseSeconds: number,
+  ): Promise<CodeQaTurnClaim | null> {
+    const data = await this.db.rpc<unknown>('claim_next_code_qa_turn', {
+      p_worker_id: workerId,
+      p_lease_seconds: leaseSeconds,
+    })
+    const row = unwrapMaybeObject<Record<string, unknown>>(data)
+    if (!row?.turn_id) return null
+    const claimToken = row.claim_token
+    if (typeof claimToken !== 'string' || claimToken.length === 0) {
+      throw new Error('claim_next_code_qa_turn returned no claim token')
+    }
+    /*
+     * 逐字段显式转换而不是 `as CodeQaTurnClaim`。
+     *
+     * 理由与 claimNextSkillAiOptimization 上面那段注释相同：RPC 返回的是 jsonb，
+     * 一个键名写错会静默变成 undefined（例如 base_url 变成 undefined，请求发到
+     * `undefined/chat/completions`），而类型断言看不见它。
+     */
+    return {
+      turn_id: String(row.turn_id),
+      claim_token: claimToken,
+      conversation_id: String(row.conversation_id),
+      question: String(row.question ?? ''),
+      repository: String(row.repository),
+      branch: String(row.branch),
+      commit_sha: typeof row.commit_sha === 'string' ? row.commit_sha : null,
+      dsh_session_id: typeof row.dsh_session_id === 'string' ? row.dsh_session_id : null,
+      skill_catalog_hash:
+        typeof row.skill_catalog_hash === 'string' ? row.skill_catalog_hash : null,
+      owner_id: typeof row.owner_id === 'string' ? row.owner_id : null,
+      base_url_snapshot: String(row.base_url_snapshot),
+      model_name_snapshot: String(row.model_name_snapshot),
+      request_timeout_ms_snapshot: Number(row.request_timeout_ms_snapshot ?? 180000),
+      network_access_mode_snapshot:
+        typeof row.network_access_mode_snapshot === 'string'
+          ? row.network_access_mode_snapshot
+          : undefined,
+      max_output_tokens_snapshot:
+        typeof row.max_output_tokens_snapshot === 'number'
+          ? row.max_output_tokens_snapshot
+          : null,
+    }
+  }
+
+  heartbeatCodeQaTurn(input: CodeQaTurnClaimRef & { leaseSeconds: number }): Promise<boolean> {
+    return this.db.rpc<boolean>('heartbeat_code_qa_turn', {
+      p_turn_id: input.turnId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_lease_seconds: input.leaseSeconds,
+    })
+  }
+
+  /**
+   * 上报真实阶段。
+   *
+   * 返回 false 表示这次上报被当成回退而拒绝 —— 那是上报点写错了，不是运行故障，
+   * 所以调用方不需要处理它（数据库侧不会改值）。
+   */
+  reportCodeQaTurnStage(
+    input: CodeQaTurnClaimRef & { stage: CodeQaStageName },
+  ): Promise<boolean> {
+    return this.db.rpc<boolean>('report_code_qa_turn_stage', {
+      p_turn_id: input.turnId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_stage: input.stage,
+    })
+  }
+
+  /**
+   * 首轮把解析出的 commit SHA 冻结到会话。
+   *
+   * **返回值是权威的**：会话已经冻结过时返回既有 SHA 而不是传入的那个。Worker 必须用
+   * 返回值继续，否则两轮之间会指向不同版本的代码（而模型不会告诉你它换了版本）。
+   */
+  bindCodeQaConversationSnapshot(
+    input: CodeQaTurnClaimRef & { commitSha: string },
+  ): Promise<string> {
+    return this.db.rpc<string>('bind_code_qa_conversation_snapshot', {
+      p_turn_id: input.turnId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_commit_sha: input.commitSha,
+    })
+  }
+
+  /** 把 DSH session id 写回会话，供后续轮 session/load 续跑。 */
+  bindCodeQaConversationSession(
+    input: CodeQaTurnClaimRef & { dshSessionId: string; skillCatalogHash?: string | null },
+  ): Promise<boolean> {
+    return this.db.rpc<boolean>('bind_code_qa_conversation_session', {
+      p_turn_id: input.turnId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_dsh_session_id: input.dshSessionId,
+      p_skill_catalog_hash: input.skillCatalogHash ?? null,
+    })
+  }
+
+  getModelSecretForCodeQaTurn(input: CodeQaTurnClaimRef): Promise<string> {
+    return this.db.rpc<string>('get_model_secret_for_code_qa_turn', {
+      p_turn_id: input.turnId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+    })
+  }
+
+  /**
+   * 当前已发布的技能目录（含归档定位）。
+   *
+   * 返回形状与 `getStoryTaskSkillSnapshot` 逐字一致，所以调用方共用
+   * `parseFrozenSkillCatalog` —— 两种形状会立刻产生第二份解析代码，然后漂移。
+   * 与评审的差别是"当前"而不是"冻结"：问答没有批次可冻结（见迁移里的说明）。
+   */
+  getCodeQaSkillCatalog(input: CodeQaTurnClaimRef): Promise<unknown> {
+    return this.db.rpc<unknown>('get_code_qa_skill_catalog', {
+      p_turn_id: input.turnId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+    })
+  }
+
+  submitCodeQaTurnResult(
+    input: CodeQaTurnClaimRef & { answer: string; evidence: CodeQaEvidencePayload },
+  ): Promise<boolean> {
+    return this.db.rpc<boolean>('submit_code_qa_turn_result', {
+      p_turn_id: input.turnId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_answer: input.answer,
+      p_evidence: input.evidence,
+    })
+  }
+
+  submitCodeQaTurnFailure(
+    input: CodeQaTurnClaimRef & {
+      errorCode: string
+      errorMessage: string
+      evidence?: CodeQaEvidencePayload
+    },
+  ): Promise<boolean> {
+    return this.db.rpc<boolean>('submit_code_qa_turn_failure', {
+      p_turn_id: input.turnId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_error_code: input.errorCode,
+      p_error_message: input.errorMessage,
+      p_evidence: input.evidence ?? {},
+    })
+  }
+
+  /**
+   * 回收失联租约。
+   *
+   * 必须在 claim 之前调用：唯一索引让同一会话只能有一轮在飞，所以一个崩掉的 Worker
+   * 留下的 RUNNING 行会永久堵住那个会话 —— 用户看到的是永远转的进度条，而且提不了
+   * 下一个问题。
+   */
+  async reclaimStaleCodeQaTurnLeases(): Promise<number> {
+    const data = await this.db.rpc<number>('reclaim_stale_code_qa_turn_leases', {})
+    return typeof data === 'number' ? data : 0
   }
 }
