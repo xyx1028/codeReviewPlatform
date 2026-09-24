@@ -241,6 +241,53 @@ export interface GitEmailDiscoveryClaim {
   claim_token: string
 }
 
+/**
+ * V1.19：一条"按历史评审证据优化技能内容"的任务。
+ *
+ * 这里**必须**有请求人（`requested_by`）：AI 的产出要走与人工上传完全相同的校验 RPC，
+ * 而那些 RPC 的第一句是 `assert_actor_is_admin(p_actor_id)`。Worker 是代管理员按按钮的，
+ * 不是一个独立的身份。缺请求人时数据库在认领阶段就把任务打成终态失败，Worker 拿不到它。
+ */
+export interface SkillAiOptimizationClaim {
+  request_id: string
+  claim_token: string
+  skill_id: string
+  skill_name: string
+  requested_by: string
+  source_version_id: string
+  source_version: number
+  archive_bucket: string
+  archive_object_key: string
+  archive_sha256: string
+  /** 入队时冻结的模型端点。中途改模型配置不影响在途任务。 */
+  base_url_snapshot: string
+  model_name_snapshot: string
+  request_timeout_ms_snapshot: number
+  network_access_mode_snapshot?: string
+}
+
+/** claim 四要素里 Worker 每次都要带的那三个。 */
+export interface SkillAiOptimizationClaimRef {
+  requestId: string
+  workerId: string
+  claimToken: string
+}
+
+export interface SkillEvidenceSampleRow {
+  story_code: string
+  verdict: string
+  summary: string
+  human_review_result: string | null
+  human_review_comment: string | null
+}
+
+export interface SkillReviewEvidenceSnapshot {
+  referenced_job_count: number
+  verdict_counts: Record<string, number>
+  human_review_counts: Record<string, number>
+  sample_findings: SkillEvidenceSampleRow[]
+}
+
 export interface PreparationClaim {
   job: JobContext
   model: ModelSnapshot
@@ -1466,5 +1513,192 @@ export class JobsDb {
     })
     const row = unwrapMaybeObject<{ computed?: number; failed?: number }>(data)
     return { computed: Number(row?.computed ?? 0), failed: Number(row?.failed ?? 0) }
+  }
+
+  // -------------------------------------------------------------------------
+  // V1.19 技能 AI 优化
+  // -------------------------------------------------------------------------
+
+  /**
+   * 认领一条技能 AI 优化任务。
+   *
+   * 逐字段构造返回对象而不是 `data as Claim`：这个 mapper 漏一个字段的后果是运行时
+   * `undefined`（例如 base_url 变成 undefined，请求发到 `undefined/chat/completions`），
+   * 而类型检查看不见它。V1.7 的连接测试链路真实踩过同一个坑。
+   */
+  async claimNextSkillAiOptimization(workerId: string): Promise<SkillAiOptimizationClaim | null> {
+    const data = await this.db.rpc<unknown>('claim_next_skill_ai_optimization_task', {
+      p_worker_id: workerId,
+    })
+    const row = unwrapMaybeObject<Record<string, unknown>>(data)
+    if (!row?.request_id) return null
+    const claimToken = row.claim_token
+    if (typeof claimToken !== 'string' || claimToken.length === 0) {
+      throw new Error('claim_next_skill_ai_optimization_task returned no claim token')
+    }
+    return {
+      request_id: String(row.request_id),
+      claim_token: claimToken,
+      skill_id: String(row.skill_id),
+      skill_name: String(row.skill_name),
+      requested_by: String(row.requested_by),
+      source_version_id: String(row.source_version_id),
+      source_version: Number(row.source_version ?? 0),
+      archive_bucket: String(row.archive_bucket),
+      archive_object_key: String(row.archive_object_key),
+      archive_sha256: String(row.archive_sha256),
+      base_url_snapshot: String(row.base_url_snapshot),
+      model_name_snapshot: String(row.model_name_snapshot),
+      request_timeout_ms_snapshot: Number(row.request_timeout_ms_snapshot ?? 180000),
+      network_access_mode_snapshot:
+        typeof row.network_access_mode_snapshot === 'string'
+          ? row.network_access_mode_snapshot
+          : undefined,
+    }
+  }
+
+  heartbeatSkillAiOptimization(input: SkillAiOptimizationClaimRef): Promise<boolean> {
+    return this.db.rpc<boolean>('heartbeat_skill_ai_optimization_task', {
+      p_request_id: input.requestId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+    })
+  }
+
+  getModelSecretForSkillAiOptimization(input: SkillAiOptimizationClaimRef): Promise<string> {
+    return this.db.rpc<string>('get_model_secret_for_skill_ai_optimization', {
+      p_request_id: input.requestId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+    })
+  }
+
+  /** 与管理员侧 `admin_get_skill_review_evidence` 同口径，门禁换成 claim_token。 */
+  async getSkillReviewEvidenceForOptimization(
+    input: SkillAiOptimizationClaimRef,
+  ): Promise<SkillReviewEvidenceSnapshot> {
+    const data = await this.db.rpc<unknown>('get_skill_review_evidence_for_optimization', {
+      p_request_id: input.requestId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+    })
+    const row = unwrapMaybeObject<Record<string, unknown>>(data)
+    const samples = Array.isArray(row?.sample_findings) ? row.sample_findings : []
+    return {
+      referenced_job_count: Number(row?.referenced_job_count ?? 0),
+      verdict_counts: (row?.verdict_counts ?? {}) as Record<string, number>,
+      human_review_counts: (row?.human_review_counts ?? {}) as Record<string, number>,
+      sample_findings: samples.map((sample) => {
+        const entry = sample as Record<string, unknown>
+        return {
+          story_code: String(entry.story_code ?? ''),
+          verdict: String(entry.verdict ?? ''),
+          summary: String(entry.summary ?? ''),
+          human_review_result:
+            typeof entry.human_review_result === 'string' ? entry.human_review_result : null,
+          human_review_comment:
+            typeof entry.human_review_comment === 'string' ? entry.human_review_comment : null,
+        }
+      }),
+    }
+  }
+
+  /**
+   * 注册一次 staging 上传。
+   *
+   * `p_actor_id` 是**请求这次优化的管理员**，不是 Worker：`admin_register_skill_upload` 的
+   * 第一句是 `assert_actor_is_admin`，而 service_role 调用时 `auth.uid()` 是 null。
+   * 换句话说 AI 产出走的是与人工上传完全相同的那一条 RPC，只是替管理员按了按钮。
+   */
+  async registerSkillUpload(input: {
+    actorId: string
+    skillId: string
+    stagingObjectKey: string
+  }): Promise<string> {
+    const data = await this.db.rpc<string>('admin_register_skill_upload', {
+      p_actor_id: input.actorId,
+      p_skill_id: input.skillId,
+      p_staging_object_key: input.stagingObjectKey,
+    })
+    if (typeof data !== 'string' || data.length === 0) {
+      throw new Error('admin_register_skill_upload returned no upload id')
+    }
+    return data
+  }
+
+  /** 与人工上传共用的校验落库 RPC。数据库会用 `skill_bundle_hash()` 重算 bundle hash。 */
+  async recordSkillUploadValidation(input: {
+    actorId: string
+    uploadId: string
+    archiveSha256: string
+    archiveSizeBytes: number
+    bundleManifest: unknown
+    expandedSizeBytes: number
+    fileCount: number
+    containsScripts: boolean
+    entryFrontmatter: unknown
+  }): Promise<string> {
+    const data = await this.db.rpc<unknown>('admin_record_skill_upload_validation', {
+      p_actor_id: input.actorId,
+      p_upload_id: input.uploadId,
+      p_archive_sha256: input.archiveSha256,
+      p_archive_size_bytes: input.archiveSizeBytes,
+      p_bundle_manifest: input.bundleManifest,
+      p_expanded_size_bytes: input.expandedSizeBytes,
+      p_file_count: input.fileCount,
+      p_contains_scripts: input.containsScripts,
+      p_entry_frontmatter: input.entryFrontmatter,
+    })
+    const row = unwrapMaybeObject<{ bundle_hash?: string }>(data)
+    return String(row?.bundle_hash ?? '')
+  }
+
+  /** 校验失败也落库：只在 HTTP 响应里出现的原因，管理员刷新页面后就看不到了。 */
+  async recordSkillUploadFailure(input: {
+    actorId: string
+    uploadId: string
+    errorCode: string
+    errorMessage: string
+  }): Promise<void> {
+    await this.db.rpc<boolean>('admin_record_skill_upload_failure', {
+      p_actor_id: input.actorId,
+      p_upload_id: input.uploadId,
+      p_error_code: input.errorCode,
+      p_error_message: input.errorMessage,
+    })
+  }
+
+  submitSkillAiOptimizationResult(
+    input: SkillAiOptimizationClaimRef & {
+      uploadId: string
+      changedPaths: string[]
+      aiSummary: string
+    },
+  ): Promise<unknown> {
+    return this.db.rpc<unknown>('submit_skill_ai_optimization_result', {
+      p_request_id: input.requestId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_upload_id: input.uploadId,
+      p_changed_paths: input.changedPaths,
+      p_ai_summary: input.aiSummary,
+    })
+  }
+
+  submitSkillAiOptimizationFailure(
+    input: SkillAiOptimizationClaimRef & { errorCode: string; errorMessage: string },
+  ): Promise<unknown> {
+    return this.db.rpc<unknown>('submit_skill_ai_optimization_failure', {
+      p_request_id: input.requestId,
+      p_worker_id: input.workerId,
+      p_claim_token: input.claimToken,
+      p_error_code: input.errorCode,
+      p_error_message: input.errorMessage,
+    })
+  }
+
+  async reclaimStaleSkillAiOptimizationLeases(): Promise<number> {
+    const data = await this.db.rpc<number>('reclaim_stale_skill_ai_optimization_leases', {})
+    return typeof data === 'number' ? data : 0
   }
 }

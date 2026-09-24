@@ -2,12 +2,13 @@
 //
 // 受管 Skill Bundle 的上传、校验、发布与下载服务（方案 §6.1、§14、§15）。
 //
-// 四个动作：
+// 五个动作：
 //
 //   create-upload         校验 ADMIN → 返回 staging 的短期 signed upload 信息
 //   validate              service-role 下载 staging ZIP → 校验 → 落库校验结果
 //   publish               把校验结果提升为不可变版本 + 写不可变正式对象 + 清理 staging
 //   create-download-url   ADMIN 请求已发布 Bundle 的短期 signed URL
+//   optimization-diff     V1.19：取 AI 优化草稿与当前版本的逐文件正文，供前端渲染 diff
 //
 // 安全约束（每一条都对应 §15 的一行）：
 //
@@ -24,9 +25,11 @@
 //   admin_record_skill_upload_validation / admin_record_skill_upload_failure /
 //   admin_publish_review_skill_version / admin_set_review_skill_enabled /
 //   admin_get_skill_upload / admin_get_skill_version_locator
+// V1.19 追加（20260924034553 迁移，仅授权 service_role）：
+//   admin_get_skill_optimization_diff_sources
 
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4'
-import { BundleError, LIMITS, validateSkillArchive } from './bundle.ts'
+import { BundleError, LIMITS, readArchiveTextEntries, validateSkillArchive } from './bundle.ts'
 import { toSkillBundleSignedPath } from './download-url.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
@@ -176,6 +179,18 @@ interface CreateDownloadUrlPayload {
   version_id: string
 }
 
+/**
+ * V1.19：取一次 AI 优化草稿与当前已发布版本的逐文件正文，供前端渲染 diff。
+ *
+ * 为什么必须走服务端：两侧正文都不在数据库里（新表刻意不存正文），而 `skill-bundles`
+ * bucket **没有任何 authenticated 策略** —— 浏览器读不到任何一侧的字节。让它读就等于给
+ * 浏览器开一条读取全部技能归档的通道。
+ */
+interface OptimizationDiffPayload {
+  action: 'optimization-diff'
+  request_id: string
+}
+
 type Payload =
   | CreateSkillPayload
   | CreateUploadPayload
@@ -184,6 +199,7 @@ type Payload =
   | SetEnabledPayload
   | DeleteSkillPayload
   | CreateDownloadUrlPayload
+  | OptimizationDiffPayload
 
 async function handleCreateSkill(userId: string, payload: CreateSkillPayload): Promise<Response> {
   const svc = serviceClient()
@@ -556,6 +572,101 @@ async function handleCreateDownloadUrl(
   return json({ signed_path: signedPath, expires_in_seconds: DOWNLOAD_URL_TTL_SECONDS })
 }
 
+/**
+ * AI 优化草稿的逐文件 diff。
+ *
+ * 只回 `{ path, before, after }` 三元组，不回 signed URL、不回 manifest、不回未改动文件。
+ * 两侧定位来自 `admin_get_skill_optimization_diff_sources`（它只给 bucket/key），字节由
+ * service-role 读、在内存里解出文本后立即丢弃。
+ *
+ * `before` 为 null 表示这个路径在当前已发布版本里不存在 —— 首版白名单只有 `SKILL.md`，
+ * 所以它不该发生；真发生了也要如实显示成"新增文件"，而不是显示成空字符串。
+ */
+async function handleOptimizationDiff(
+  userId: string,
+  payload: OptimizationDiffPayload,
+): Promise<Response> {
+  const svc = serviceClient()
+  const { data: sources, error: sourcesError } = await svc.rpc(
+    'admin_get_skill_optimization_diff_sources',
+    { p_actor_id: userId, p_request_id: payload.request_id },
+  )
+  if (sourcesError || !sources) {
+    return json({ error: reason(sourcesError) ?? 'optimization result not found' }, 404)
+  }
+  const row = sources as {
+    skill_name: string
+    changed_paths: string[] | null
+    ai_summary: string | null
+    before_bucket: string
+    before_object_key: string
+    after_bucket: string
+    after_object_key: string
+  }
+  if (row.before_bucket !== BUCKET || row.after_bucket !== BUCKET) {
+    return json({ error: 'unexpected bucket for a skill bundle' }, 500)
+  }
+  const changedPaths = (row.changed_paths ?? []).filter((path) => typeof path === 'string')
+  if (changedPaths.length === 0) {
+    return json({ error: 'this optimization reports no changed files' }, 409)
+  }
+
+  const [beforeBlob, afterBlob] = await Promise.all([
+    svc.storage.from(BUCKET).download(row.before_object_key),
+    svc.storage.from(BUCKET).download(row.after_object_key),
+  ])
+  if (beforeBlob.error || !beforeBlob.data) {
+    return json({ error: 'the published archive could not be read' }, 400)
+  }
+  if (afterBlob.error || !afterBlob.data) {
+    // staging 对象 24h 后被保留期任务清理；那时这份草稿已经等于放弃了。
+    return json(
+      {
+        error: '这份 AI 优化草稿的暂存文件已过期，请重新发起一次优化',
+        error_code: 'SKILL_UPLOAD_EXPIRED',
+      },
+      409,
+    )
+  }
+
+  let before: Map<string, string>
+  let after: Map<string, string>
+  try {
+    before = await readArchiveTextEntries(
+      new Uint8Array(await beforeBlob.data.arrayBuffer()),
+      changedPaths,
+    )
+    after = await readArchiveTextEntries(
+      new Uint8Array(await afterBlob.data.arrayBuffer()),
+      changedPaths,
+    )
+  } catch (err) {
+    const code = err instanceof BundleError ? err.code : 'SKILL_BUNDLE_INVALID'
+    logEvent('optimization_diff_unreadable', {
+      userId,
+      request_id: payload.request_id,
+      error_code: code,
+    })
+    return json({ error: reason(err) ?? 'the archives could not be read', error_code: code }, 400)
+  }
+
+  logEvent('optimization_diff_issued', {
+    userId,
+    request_id: payload.request_id,
+    changed_path_count: changedPaths.length,
+  })
+  return json({
+    request_id: payload.request_id,
+    skill_name: row.skill_name,
+    ai_summary: row.ai_summary,
+    files: changedPaths.map((path) => ({
+      path,
+      before: before.get(path) ?? null,
+      after: after.get(path) ?? null,
+    })),
+  })
+}
+
 Deno.serve(async (req: Request): Promise<Response> => {
   CURRENT_CORS = corsHeaders(req)
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CURRENT_CORS })
@@ -587,6 +698,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
         return await handleDeleteSkill(admin.userId, payload)
       case 'create-download-url':
         return await handleCreateDownloadUrl(admin.userId, payload)
+      case 'optimization-diff':
+        return await handleOptimizationDiff(admin.userId, payload)
       default:
         return json({ error: 'unknown action' }, 400)
     }

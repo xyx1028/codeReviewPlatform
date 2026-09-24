@@ -2525,3 +2525,78 @@ a.dashboard-distribution-item:focus-visible {
     padding: 16px 14px 4px;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   V1.19 技能 AI 优化的逐行 diff
+   ---------------------------------------------------------------------------
+   等宽字体 + 双行号栏（旧/新）+ 颜色。颜色不是唯一信号：每行还带 `+` / `-` 号，
+   于是色觉障碍或黑白打印下仍然能分辨新增与删除。
+*/
+.skill-diff {
+  border: 1px solid var(--ant-color-border, #d9d9d9);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.skill-diff__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--ant-color-fill-quaternary, #fafafa);
+  border-bottom: 1px solid var(--ant-color-border, #d9d9d9);
+}
+
+.skill-diff__body {
+  margin: 0;
+  padding: 0;
+  max-height: 420px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.skill-diff__line {
+  display: flex;
+  align-items: baseline;
+}
+
+.skill-diff__line--added {
+  background: #f0fff4;
+}
+
+.skill-diff__line--removed {
+  background: #fff1f0;
+}
+
+.skill-diff__gutter {
+  flex: 0 0 44px;
+  padding: 0 6px;
+  text-align: right;
+  color: var(--ant-color-text-quaternary, #bfbfbf);
+  user-select: none;
+}
+
+.skill-diff__sign {
+  flex: 0 0 16px;
+  text-align: center;
+  user-select: none;
+}
+
+.skill-diff__text {
+  flex: 1 1 auto;
+  padding-right: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.skill-diff__gap {
+  padding: 2px 12px;
+  color: var(--ant-color-text-quaternary, #bfbfbf);
+  background: var(--ant-color-fill-quaternary, #fafafa);
+  user-select: none;
+}

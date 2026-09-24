@@ -24,6 +24,7 @@ import type { ReviewRunner } from './ai/runtime/contracts.js'
 import { buildDeepSeekHarnessReview } from './ai/runtime/factory.js'
 import { enforceSessionRetention } from './ai/session/session-retention.js'
 import { SkillCache } from './ai/skills/skill-cache.js'
+import { runSkillAiOptimization } from './ai/skills/skill-ai-optimizer.js'
 import { SupabaseSkillStorageClient, type SkillStorageClient } from './ai/skills/skill-storage.js'
 import { cleanOrphanedOverlays } from './ai/workspace/overlay-cleaner.js'
 import { loadConfig, type WorkerConfig } from './config.js'
@@ -38,6 +39,7 @@ import {
   JobsDb,
   type GitEmailDiscoveryClaim,
   type ModelConnectivityTestClaim,
+  type SkillAiOptimizationClaim,
   type StoryTask,
 } from './db/jobs.js'
 import { GitLabReadonlyClient, GitLabReadonlyError } from './git/gitlab-readonly-client.js'
@@ -567,6 +569,52 @@ export async function runModelConnectivityTest(
 }
 
 /**
+ * V1.19：执行一条"按历史评审证据优化技能内容"的任务。
+ *
+ * 与连接测试、Git 邮箱反查同一个形状：心跳续租 + 执行 + 终态写回。区别只在执行体更长，
+ * 所以它住在 `ai/skills/skill-ai-optimizer.ts` 里而不是摊在这个文件里。
+ *
+ * 这里刻意**不**在失败时重排队：这是管理员手动点出来的一次性动作，悄悄重试三次等于三次
+ * 模型费用，而他在页面上只会看到进度条一直转。
+ */
+export async function runSkillAiOptimizationTask(
+  config: WorkerConfig,
+  jobsDb: JobsDb,
+  storage: SupabaseSkillStorageClient,
+  claim: SkillAiOptimizationClaim,
+  logger: Logger,
+  signal: AbortSignal,
+): Promise<void> {
+  const log = logger.child({ skill_ai_optimization_id: claim.request_id })
+  const lease = new Heartbeat({
+    taskId: claim.request_id,
+    workerId: config.workerId,
+    intervalMs: Math.min(config.heartbeatIntervalMs, 15000),
+    send: (requestId, workerId) =>
+      jobsDb.heartbeatSkillAiOptimization({
+        requestId,
+        workerId,
+        claimToken: claim.claim_token,
+      }),
+    onLeaseLost: () => undefined,
+    logger: log,
+  })
+  lease.start()
+  try {
+    await runSkillAiOptimization(claim, {
+      jobsDb,
+      storage,
+      workerId: config.workerId,
+      modelProxy: config.modelConnectivityProxy,
+      logger: log,
+      signal,
+    })
+  } finally {
+    lease.stop()
+  }
+}
+
+/**
  * 数据库侧回填时可能抛出的稳定错误码。
  *
  * 不把它们收敛成 GIT_EMAIL_DISCOVERY_FAILED 是刻意的：本地实测过一次
@@ -809,6 +857,7 @@ export function startWorker(
   const inFlight = new Set<Promise<void>>()
   let modelTestLoopPromise: Promise<void> | null = null
   let gitEmailDiscoveryLoopPromise: Promise<void> | null = null
+  let skillAiOptimizationLoopPromise: Promise<void> | null = null
   let resolveRanOnce: () => void
   const ranOnce = new Promise<void>((resolve) => {
     resolveRanOnce = resolve
@@ -1156,9 +1205,54 @@ export function startWorker(
     }
   }
 
+  /**
+   * V1.19：技能 AI 优化循环。
+   *
+   * 与连接测试、Git 邮箱反查并排。它们共同的性质是"用户在页面上点一下、等几秒到几十秒"，
+   * 绝不能排在评审任务后面等几十分钟。drain 期间同样停止领取。
+   *
+   * 认领后**没有** release 路径：认领即写 RUNNING，stopped 时直接不认领；已认领的任务靠
+   * 租约超时被 `reclaim_stale_skill_ai_optimization_leases` 打回 QUEUED。这比 story task
+   * 那套两次确认更简单，而这类任务的并发天然只有 1（同技能唯一索引）。
+   */
+  const skillAiOptimizationLoop = async (): Promise<void> => {
+    while (!stopped) {
+      try {
+        if (draining()) {
+          await sleep(config.pollIntervalMs)
+          continue
+        }
+        // 先回收失联租约再认领：否则一个崩掉的 Worker 留下的 RUNNING 任务会永远卡住
+        // 那个技能（唯一索引不允许第二条在飞）。
+        await jobsDb.reclaimStaleSkillAiOptimizationLeases().catch(() => 0)
+        const claim = await jobsDb.claimNextSkillAiOptimization(config.workerId)
+        if (!claim) {
+          await sleep(config.pollIntervalMs)
+          continue
+        }
+        if (stopped) break
+        await runSkillAiOptimizationTask(
+          config,
+          jobsDb,
+          skillStorage,
+          claim,
+          logger,
+          shutdownController.signal,
+        )
+      } catch (error) {
+        logger.error('skill_ai_optimization_loop_error', {
+          event: 'skill_ai_optimization_loop_error',
+          error_message: redactError(error),
+        })
+        await sleep(config.pollIntervalMs)
+      }
+    }
+  }
+
   void loop()
   modelTestLoopPromise = modelTestLoop()
   gitEmailDiscoveryLoopPromise = gitEmailDiscoveryLoop()
+  skillAiOptimizationLoopPromise = skillAiOptimizationLoop()
 
   return {
     stop(): Promise<void> {
@@ -1170,6 +1264,7 @@ export function startWorker(
         ...inFlight,
         ...(modelTestLoopPromise ? [modelTestLoopPromise] : []),
         ...(gitEmailDiscoveryLoopPromise ? [gitEmailDiscoveryLoopPromise] : []),
+        ...(skillAiOptimizationLoopPromise ? [skillAiOptimizationLoopPromise] : []),
       ]).then(() => undefined)
       return stopPromise
     },

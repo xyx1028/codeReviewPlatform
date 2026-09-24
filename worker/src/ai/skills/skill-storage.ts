@@ -22,6 +22,17 @@ export interface SkillStorageClient {
   downloadArchive(objectKey: string): Promise<Buffer>
 }
 
+/**
+ * V1.19：AI 优化需要**写** staging 对象。
+ *
+ * 单独一个接口而不是加进 `SkillStorageClient`，是因为评审链路只需要读 —— 让它拿到一个带
+ * 上传能力的客户端等于扩大那条链路的权限面。key 形态另有闸门（`assertStagingObjectKey`）：
+ * staging 前缀之外的 key 一律拒绝，于是"把归档写到正式对象上"在结构上不可能发生。
+ */
+export interface SkillStagingWriter {
+  uploadStagingArchive(objectKey: string, bytes: Buffer): Promise<void>
+}
+
 export class SkillStorageDownloadError extends Error {
   constructor(message: string) {
     super(message)
@@ -44,7 +55,23 @@ export function assertFrozenObjectKey(objectKey: string): string {
   return objectKey
 }
 
-export class SupabaseSkillStorageClient implements SkillStorageClient {
+/**
+ * staging key 形态闸门（V1.19）。
+ *
+ * 形状与 `admin_register_skill_upload` 里那条校验**必须**一致：
+ * `staging/<actor-uuid>/<upload-uuid>.zip`。数据库那一条是准入闸门，这一条是"Worker 连
+ * 试都不会试"—— 两者一起保证一个能影响 objectKey 的 bug 也不会把字节写到
+ * `<skill-id>/versions/...` 上，也就是覆盖一个已发布的不可变对象。
+ */
+export function assertStagingObjectKey(objectKey: string): string {
+  const pattern = /^staging\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.zip$/
+  if (!pattern.test(objectKey)) {
+    throw new SkillStorageDownloadError('staging skill archive key has an unexpected shape')
+  }
+  return objectKey
+}
+
+export class SupabaseSkillStorageClient implements SkillStorageClient, SkillStagingWriter {
   private client: SupabaseClient
 
   constructor(config: Pick<WorkerConfig, 'supabaseUrl' | 'supabaseServiceRoleKey'>) {
@@ -70,5 +97,24 @@ export class SupabaseSkillStorageClient implements SkillStorageClient {
       throw new SkillStorageDownloadError('skill archive download returned zero bytes')
     }
     return bytes
+  }
+
+  /**
+   * 写一份 staging 归档。
+   *
+   * `upsert: false`：staging key 由 Worker 现生成（含一个新 uuid），撞名只可能意味着
+   * 有别的东西在往同一个 key 写 —— 让它失败比互相覆盖安全。
+   */
+  async uploadStagingArchive(objectKey: string, bytes: Buffer): Promise<void> {
+    assertStagingObjectKey(objectKey)
+    if (bytes.length === 0) {
+      throw new SkillStorageDownloadError('refusing to upload a zero-byte skill archive')
+    }
+    const { error } = await this.client.storage
+      .from(SKILL_BUNDLE_BUCKET)
+      .upload(objectKey, bytes, { contentType: 'application/zip', upsert: false })
+    if (error) {
+      throw new SkillStorageDownloadError(`skill staging upload failed: ${error.message}`)
+    }
   }
 }

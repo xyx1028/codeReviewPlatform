@@ -56,7 +56,10 @@ import type {
   ReviewSkillCatalog,
   ReviewSkillDetail,
   ReviewStory,
+  SkillAiOptimizationTask,
   SkillCatalogLimitsConfig,
+  SkillOptimizationDiff,
+  SkillReviewEvidence,
   SkillUploadTicket,
   SkillValidationResult,
   SourceStoryInput,
@@ -1910,5 +1913,65 @@ export function adminCreateSkillDownloadUrl(versionId: string) {
   return invokeSkillBundleAdmin<{ signed_path: string; expires_in_seconds: number }>({
     action: 'create-download-url',
     version_id: versionId,
+  })
+}
+
+// ---------------------------------------------------------------------------
+// V1.19 技能 AI 优化
+// ---------------------------------------------------------------------------
+
+/**
+ * 技能的历史评审证据聚合。
+ *
+ * 纯只读，函数体第一句是 `ensure_admin()`。`referenced_job_count === 0` 不是错误，
+ * 是"这个技能还没被任何 Job 引用"这一事实 —— 页面据此提前禁用 AI 优化入口，而不是等
+ * Worker 跑完才报错。
+ */
+export async function adminGetSkillReviewEvidence(skillId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_get_skill_review_evidence', {
+    p_skill_id: skillId,
+  })
+  return unwrap<SkillReviewEvidence>({ data, error })
+}
+
+/**
+ * 发起一次 AI 优化。
+ *
+ * **幂等**：同一技能已有进行中任务时返回那一条，不创建第二条（数据库侧还有一个部分唯一
+ * 索引兜底）。所以重复点击、或者关闭再打开弹窗，看到的都是同一条任务。
+ */
+export async function adminEnqueueSkillAiOptimization(skillId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_enqueue_skill_ai_optimization', {
+    p_skill_id: skillId,
+  })
+  return unwrap<SkillAiOptimizationTask>({ data, error })
+}
+
+/**
+ * 按技能查最近一条优化任务，供轮询与"刷新后恢复状态"用。
+ *
+ * 从未优化过的技能返回 null —— 页面显示"还没有优化过"，而不是报错。
+ */
+export async function adminGetSkillAiOptimizationTask(skillId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_get_skill_ai_optimization_task', {
+    p_skill_id: skillId,
+  })
+  return unwrap<SkillAiOptimizationTask | null>({ data, error })
+}
+
+/**
+ * 取优化草稿与当前已发布版本的逐文件正文。
+ *
+ * 走 Edge Function 而不是直接读 Storage：两侧正文都不在数据库里（任务表刻意不存正文），
+ * 而 `skill-bundles` bucket 对 `authenticated` **没有任何策略** —— 浏览器读不到字节，
+ * 这是设计而不是遗漏。
+ */
+export function adminGetSkillOptimizationDiff(requestId: string) {
+  return invokeSkillBundleAdmin<SkillOptimizationDiff>({
+    action: 'optimization-diff',
+    request_id: requestId,
   })
 }

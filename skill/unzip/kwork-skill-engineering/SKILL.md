@@ -12,7 +12,7 @@ whenToUse: 处理 KWork 技能模块需求、代码定位、接口联调、数�
 
 - `tmanage-backend`、`tmanage-frontend`：租户侧技能上传、导入、审核、版本、可见性、启停与展示。
 - `kdmanage-backend`、`kdmanage-frontend`：平台/原厂技能维护、包校验、审核与向 tmanage 同步。
-- 技能 ZIP、`SKILL.md`、`references`、`templates`、`assets/`、`../../scripts` 的格式与发布问题。
+- 技能 ZIP、`SKILL.md`、`references`、`templates`、`assets/`、`../../../scripts` 的格式与发布问题。
 
 不把 `kwork-server` 当作本技能的主改造范围；只有排查安装/通知等集成问题时，才沿调用链继续追踪。
 

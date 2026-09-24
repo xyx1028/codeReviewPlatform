@@ -25,7 +25,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   adminCreateSkillDownloadUrl,
   adminDeleteReviewSkill,
+  adminEnqueueSkillAiOptimization,
   adminGetReviewSkill,
+  adminGetSkillAiOptimizationTask,
+  adminGetSkillOptimizationDiff,
+  adminGetSkillReviewEvidence,
   adminListReviewSkills,
   adminPublishSkillVersion,
   adminSetReviewSkillEnabled,
@@ -34,13 +38,27 @@ import {
 import { SkillCreateWizard } from './SkillCreateWizard'
 import { getSkillBundleDownloadUrl } from '../lib/skill-download-url'
 import { formatSkillVersion } from '../lib/skill-version'
+import {
+  canOptimizeFromEvidence,
+  collapseUnchanged,
+  describeOptimizationError,
+  isOptimizationInFlight,
+  optimizationStepIndex,
+  renderFileDiff,
+  summarizeEvidence,
+  type DiffLine,
+} from '../lib/skill-ai-optimization'
 import type {
   ReviewSkillListItem,
   ReviewSkillStatus,
   ReviewSkillVersionDetail,
   SkillBundleFile,
+  SkillFileDiff,
   SkillFileRole,
+  SkillHumanReviewKey,
+  SkillReviewEvidence,
   SkillValidationResult,
+  SkillVerdictKey,
 } from '../types'
 
 const { Text } = Typography
@@ -60,6 +78,29 @@ const ROLE_LABELS: Record<SkillFileRole, string> = {
   TEMPLATE: '模板',
   SCRIPT: '脚本',
   OTHER: '其他',
+}
+
+/** V1.19 证据区块的列标签。顺序固定，与数据库返回的 key 一一对应。 */
+const VERDICT_LABELS: Array<[SkillVerdictKey, string]> = [
+  ['IMPLEMENTED', '已实现'],
+  ['PARTIAL', '部分实现'],
+  ['NOT_IMPLEMENTED', '未实现'],
+  ['UNCERTAIN', '无法确定'],
+]
+
+const HUMAN_REVIEW_LABELS: Array<[SkillHumanReviewKey, string]> = [
+  ['CORRECT', '人工：对'],
+  ['PARTIALLY_CORRECT', '人工：部分对'],
+  ['INCORRECT', '人工：错'],
+  ['NEED_DISCUSSION', '人工：需讨论'],
+]
+
+const VERDICT_TEXT: Record<string, string> = Object.fromEntries(VERDICT_LABELS)
+const HUMAN_REVIEW_TEXT: Record<string, string> = {
+  CORRECT: '对',
+  PARTIALLY_CORRECT: '部分对',
+  INCORRECT: '错',
+  NEED_DISCUSSION: '需讨论',
 }
 
 const SKILL_MODAL_STYLE = {
@@ -226,6 +267,148 @@ export function BundleFileTree({ files }: { files: SkillBundleFile[] }) {
 }
 
 /**
+ * 历史评审证据区块（V1.19）。
+ *
+ * 它回答一个问题：**这个技能上线之后，评审结果好不好？** 在这之前，`review_skill` 与
+ * `ai_review_result` 之间没有任何界面把它们关联起来，管理员只能靠回忆判断该改哪里。
+ *
+ * 没有证据时显示明确的禁用说明，而不是一张空表：空表会让人以为"数据还没加载出来"。
+ */
+export function SkillReviewEvidenceBlock({
+  evidence,
+  loading,
+}: {
+  evidence: SkillReviewEvidence | null
+  loading: boolean
+}) {
+  if (loading) return <Text type="secondary">正在汇总历史评审证据…</Text>
+  if (evidence === null) return <Text type="secondary">暂无历史评审证据。</Text>
+  if (!canOptimizeFromEvidence(evidence)) {
+    return (
+      <Alert
+        type="info"
+        showIcon
+        message="还没有历史评审证据，暂不建议 AI 优化"
+        description="这个技能还没有被任何分析任务引用过。先让它参与几次评审，累积到 AI 结论与人工复核之后，再用这些结果来优化它的内容。"
+      />
+    )
+  }
+
+  return (
+    <Space direction="vertical" size="small" className="full-width">
+      <Text>{summarizeEvidence(evidence)}</Text>
+      <Descriptions size="small" column={4} bordered>
+        {VERDICT_LABELS.map(([key, label]) => (
+          <Descriptions.Item key={key} label={label}>
+            {evidence.verdict_counts[key] ?? 0}
+          </Descriptions.Item>
+        ))}
+        {HUMAN_REVIEW_LABELS.map(([key, label]) => (
+          <Descriptions.Item key={key} label={label}>
+            {evidence.human_review_counts[key] ?? 0}
+          </Descriptions.Item>
+        ))}
+      </Descriptions>
+      {evidence.sample_findings.length === 0 ? (
+        <Text type="secondary">这些分析任务下还没有产生评审结论。</Text>
+      ) : (
+        <Table
+          dataSource={evidence.sample_findings.map((sample, index) => ({
+            ...sample,
+            key: `${sample.story_code}-${index}`,
+          }))}
+          rowKey="key"
+          size="small"
+          pagination={evidence.sample_findings.length > 5 ? { size: 'small', pageSize: 5 } : false}
+          columns={[
+            { title: '需求', dataIndex: 'story_code', width: 120, ellipsis: true },
+            {
+              title: 'AI 结论',
+              dataIndex: 'verdict',
+              width: 130,
+              render: (verdict: string) => <Tag>{VERDICT_TEXT[verdict] ?? verdict}</Tag>,
+            },
+            {
+              title: '人工复核',
+              dataIndex: 'human_review_result',
+              width: 110,
+              render: (value: string | null) =>
+                value === null ? (
+                  <Text type="secondary">未复核</Text>
+                ) : (
+                  <Tag color={value === 'CORRECT' ? 'green' : 'orange'}>
+                    {HUMAN_REVIEW_TEXT[value] ?? value}
+                  </Tag>
+                ),
+            },
+            {
+              title: '摘要 / 人工意见',
+              key: 'text',
+              render: (_unused: unknown, row: SkillReviewEvidence['sample_findings'][number]) => (
+                <Space direction="vertical" size={0}>
+                  <Text>{row.summary === '' ? '—' : row.summary}</Text>
+                  {row.human_review_comment === null ? null : (
+                    <Text type="secondary">人工：{row.human_review_comment}</Text>
+                  )}
+                </Space>
+              ),
+            },
+          ]}
+        />
+      )}
+    </Space>
+  )
+}
+
+/**
+ * 逐行 diff。
+ *
+ * 只渲染服务端认定为"改动过"的文件，两侧正文都由服务端从两个归档里解出来 —— 浏览器
+ * 不解 ZIP、也读不到 `skill-bundles`（那个 bucket 对 `authenticated` 没有任何策略）。
+ *
+ * 大段未改动内容折叠：一份 SKILL.md 可能几百行而只改三处，全量渲染会让"确认发布"前的
+ * 审阅退化成滚屏。
+ */
+export function SkillFileDiffView({ file }: { file: SkillFileDiff }) {
+  const rendered = renderFileDiff(file)
+  const rows = collapseUnchanged(rendered.lines)
+  return (
+    <div className="skill-diff">
+      <div className="skill-diff__header">
+        <Text code>{file.path}</Text>
+        <Space size={4}>
+          <Tag color="green">+{rendered.stats.added}</Tag>
+          <Tag color="red">-{rendered.stats.removed}</Tag>
+          {file.before === null ? <Tag color="blue">新增文件</Tag> : null}
+          {rendered.lineEndingChanged ? <Tag color="orange">仅行尾符变化</Tag> : null}
+        </Space>
+      </div>
+      <pre className="skill-diff__body">
+        {rows.map((row: DiffLine | null, index: number) =>
+          row === null ? (
+            <div key={`gap-${index}`} className="skill-diff__gap">
+              ⋯ 省略未改动内容 ⋯
+            </div>
+          ) : (
+            <div
+              key={`${row.kind}-${index}`}
+              className={`skill-diff__line skill-diff__line--${row.kind.toLowerCase()}`}
+            >
+              <span className="skill-diff__gutter">{row.beforeLineNumber ?? ''}</span>
+              <span className="skill-diff__gutter">{row.afterLineNumber ?? ''}</span>
+              <span className="skill-diff__sign">
+                {row.kind === 'ADDED' ? '+' : row.kind === 'REMOVED' ? '-' : ' '}
+              </span>
+              <span className="skill-diff__text">{row.text === '' ? ' ' : row.text}</span>
+            </div>
+          ),
+        )}
+      </pre>
+    </div>
+  )
+}
+
+/**
  * ADMIN 维护多文件 Skill Bundle。
  *
  * 页面的核心约束来自方案 §14：
@@ -249,6 +432,8 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
   const [uploadedBundleName, setUploadedBundleName] = useState<string | null>(null)
   const [detailSkill, setDetailSkill] = useState<ReviewSkillListItem | null>(null)
   const [historySkillId, setHistorySkillId] = useState<string | null>(null)
+  /** V1.19：正在查看/发起 AI 优化的技能。 */
+  const [optimizeSkill, setOptimizeSkill] = useState<ReviewSkillListItem | null>(null)
 
   const catalogQuery = useQuery({
     queryKey: ['admin-review-skills'],
@@ -264,6 +449,65 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
     queryKey: ['admin-review-skill', historySkillId],
     enabled: historySkillId !== null,
     queryFn: () => adminGetReviewSkill(historySkillId!),
+  })
+
+  /*
+   * ---- V1.19 技能 AI 优化 -------------------------------------------------
+   *
+   * 三个查询、一个 mutation：
+   *
+   *   evidenceQuery   详情弹窗与优化弹窗共用的证据聚合（只读）
+   *   taskQuery       轮询任务状态，终态即停（与 ProfilePage 的 Git 邮箱反查同一模式）
+   *   diffQuery       任务成功后才取两侧正文
+   *
+   * 轮询靠 `refetchInterval` 返回 false 停下，而不是靠一个 `useEffect` 清定时器：
+   * 后者在弹窗快速开关时会留下孤儿定时器，表现为"关掉弹窗后还在请求"。
+   */
+  const evidenceSkillId = optimizeSkill?.id ?? detailSkill?.id ?? null
+  const evidenceQuery = useQuery({
+    queryKey: ['admin-skill-review-evidence', evidenceSkillId],
+    enabled: isAdmin && evidenceSkillId !== null,
+    queryFn: () => adminGetSkillReviewEvidence(evidenceSkillId!),
+  })
+
+  const taskQuery = useQuery({
+    queryKey: ['admin-skill-ai-optimization', optimizeSkill?.id],
+    enabled: optimizeSkill !== null,
+    queryFn: () => adminGetSkillAiOptimizationTask(optimizeSkill!.id),
+    refetchInterval: (query) =>
+      isOptimizationInFlight(query.state.data?.status ?? null) ? 2500 : false,
+  })
+  const task = taskQuery.data ?? null
+
+  const diffQuery = useQuery({
+    queryKey: ['admin-skill-optimization-diff', task?.id, task?.result_upload_id],
+    enabled: task !== null && task.status === 'SUCCEEDED' && task.result_upload_id !== null,
+    queryFn: () => adminGetSkillOptimizationDiff(task!.id),
+    retry: false,
+  })
+
+  const enqueueOptimizationMutation = useMutation({
+    mutationFn: (skillId: string) => adminEnqueueSkillAiOptimization(skillId),
+    onSuccess: (created) => {
+      // 幂等：已有进行中任务时返回的就是那一条，所以直接写进缓存不会覆盖掉真实状态。
+      queryClient.setQueryData(['admin-skill-ai-optimization', created.skill_id], created)
+      queryClient.invalidateQueries({
+        queryKey: ['admin-skill-ai-optimization', created.skill_id],
+      })
+    },
+    onError: (error: Error) => message.error(error.message),
+  })
+
+  const publishOptimizationMutation = useMutation({
+    mutationFn: (uploadId: string) =>
+      // 与人工上传完全同一条发布路径：upload_id 不同，代码路径相同。
+      adminPublishSkillVersion({ uploadId, acknowledgeScripts: true }),
+    onSuccess: (result) => {
+      message.success(`已发布 ${formatSkillVersion(result.version)}；只影响之后新建的 Job`)
+      setOptimizeSkill(null)
+      invalidate()
+    },
+    onError: (error: Error) => message.error(error.message),
   })
 
   const invalidate = () => {
@@ -536,6 +780,21 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
           >
             版本历史
           </Button>
+          {/*
+            AI 优化只对「有已发布版本」的技能开放：优化的输入是当前已发布版本的正文 +
+            它的历史评审结果，两者都需要这个技能真的上过线。是否有证据由弹窗里的证据区块
+            如实说明，而不是在这里悄悄隐藏按钮 —— 隐藏会让管理员以为功能没上线。
+          */}
+          {row.current_version_id !== null ? (
+            <Button
+              size="small"
+              type="link"
+              className="table-action-link"
+              onClick={() => setOptimizeSkill(row)}
+            >
+              AI 优化
+            </Button>
+          ) : null}
           {row.current_version_id !== null ? (
             <Button
               size="small"
@@ -768,6 +1027,27 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
                   </Descriptions>
                 </>
               ) : null}
+
+              {/*
+                V1.19 历史评审证据。放在详情弹窗里而不是单开一页：管理员判断"这个技能该不该
+                改"的时候看的就是这一屏，把证据和版本信息拆到两个地方等于让他自己去关联。
+              */}
+              <Text strong>历史评审证据</Text>
+              <SkillReviewEvidenceBlock
+                evidence={evidenceQuery.data ?? null}
+                loading={evidenceQuery.isLoading}
+              />
+              {canOptimizeFromEvidence(evidenceQuery.data ?? null) ? (
+                <Button
+                  type="primary"
+                  onClick={() => {
+                    setOptimizeSkill(detailSkill)
+                    setDetailSkill(null)
+                  }}
+                >
+                  用这些证据做 AI 优化
+                </Button>
+              ) : null}
             </div>
 
             {/* 文件列表区独立滚动：只有它随页码切换，顶部信息区保持不动。 */}
@@ -976,6 +1256,145 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
             </Descriptions>
           ) : null}
 
+          </Space>
+        )}
+      </Modal>
+
+      {/*
+        V1.19 AI 优化弹窗。
+        流程固定三段：排队中 → AI 生成中 → 等待确认。最后一段必须由管理员看完 diff 再点
+        「确认发布」—— 平台里没有任何一条让 AI 自己发布的路径。
+      */}
+      <Modal
+        title={
+          optimizeSkill === null ? 'AI 优化技能' : `AI 优化：${optimizeSkill.display_name}`
+        }
+        open={optimizeSkill !== null}
+        width={960}
+        centered
+        style={SKILL_MODAL_STYLE}
+        styles={SKILL_MODAL_STYLES}
+        onCancel={() => setOptimizeSkill(null)}
+        footer={
+          task !== null && task.status === 'SUCCEEDED' && task.result_upload_id !== null ? (
+            <Space>
+              <Button onClick={() => setOptimizeSkill(null)}>放弃此次优化</Button>
+              <Button
+                type="primary"
+                loading={publishOptimizationMutation.isPending}
+                disabled={diffQuery.data === undefined}
+                onClick={() => {
+                  const uploadId = task.result_upload_id
+                  if (uploadId === null) return
+                  modal.confirm({
+                    title: `发布 ${optimizeSkill?.name ?? ''} 的 AI 优化结果？`,
+                    content:
+                      '这份内容已经通过与人工上传完全相同的服务端校验。发布后不可替换，' +
+                      '只能再发一个新版本；发布只影响之后新建的 Job，不影响历史或在途 Job。',
+                    okText: '确认发布',
+                    onOk: () => publishOptimizationMutation.mutateAsync(uploadId),
+                  })
+                }}
+              >
+                确认发布
+              </Button>
+            </Space>
+          ) : (
+            <Button onClick={() => setOptimizeSkill(null)}>关闭</Button>
+          )
+        }
+        destroyOnHidden
+      >
+        {optimizeSkill === null ? null : (
+          <Space direction="vertical" size="middle" className="full-width">
+            <Steps
+              size="small"
+              current={optimizationStepIndex(task?.status ?? null)}
+              status={task?.status === 'FAILED' ? 'error' : undefined}
+              items={[{ title: '排队中' }, { title: 'AI 生成中' }, { title: '等待确认' }]}
+            />
+
+            <Alert
+              type="info"
+              showIcon
+              message="AI 只会改写 SKILL.md 正文，且必须由你确认后才发布"
+              description="其余文件（参考资料、模板、图片、脚本）在重新打包时保持字节级不变。产出内容会先通过与人工上传完全相同的 fail-closed 校验，任何一项不合规都不会产出可发布的草稿。"
+            />
+
+            <Text strong>历史评审证据</Text>
+            <SkillReviewEvidenceBlock
+              evidence={evidenceQuery.data ?? null}
+              loading={evidenceQuery.isLoading}
+            />
+
+            {task === null || task.status === 'FAILED' ? (
+              <Space direction="vertical" size="small" className="full-width">
+                {task?.status === 'FAILED' ? (
+                  <Alert
+                    type="error"
+                    showIcon
+                    message={`上次优化失败（${task.error_code ?? '未知错误码'}）`}
+                    description={describeOptimizationError(task.error_code, task.error_message)}
+                  />
+                ) : null}
+                <Button
+                  type="primary"
+                  loading={enqueueOptimizationMutation.isPending}
+                  disabled={!canOptimizeFromEvidence(evidenceQuery.data ?? null)}
+                  onClick={() => enqueueOptimizationMutation.mutate(optimizeSkill.id)}
+                >
+                  {task?.status === 'FAILED' ? '重新发起 AI 优化' : '开始 AI 优化'}
+                </Button>
+              </Space>
+            ) : null}
+
+            {isOptimizationInFlight(task?.status ?? null) ? (
+              <Space direction="vertical" size="small" className="full-width">
+                <Progress percent={task?.status === 'RUNNING' ? 70 : 20} status="active" showInfo={false} />
+                <Text type="secondary">
+                  {task?.status === 'QUEUED'
+                    ? '已排队，等待一个在线的 Worker 认领。如果长时间停在这一步，请确认至少有一个 Worker 在运行。'
+                    : 'Worker 正在下载当前版本、读取评审证据并调用模型。这一步通常需要几十秒。'}
+                </Text>
+              </Space>
+            ) : null}
+
+            {task !== null && task.status === 'SUCCEEDED' ? (
+              <Space direction="vertical" size="middle" className="full-width">
+                <Descriptions size="small" column={2} bordered title="AI 优化结果">
+                  <Descriptions.Item label="改动文件">
+                    {task.changed_paths.length === 0
+                      ? '—'
+                      : task.changed_paths.map((path) => (
+                          <Tag key={path}>
+                            <Text code>{path}</Text>
+                          </Tag>
+                        ))}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="完成时间">
+                    {task.finished_at === null ? '—' : new Date(task.finished_at).toLocaleString()}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="AI 修改理由" span={2}>
+                    {task.ai_summary ?? <Text type="secondary">模型没有给出说明</Text>}
+                  </Descriptions.Item>
+                </Descriptions>
+
+                {diffQuery.isLoading ? (
+                  <Text type="secondary">正在取两侧正文以渲染 diff…</Text>
+                ) : diffQuery.isError ? (
+                  <Alert
+                    type="error"
+                    showIcon
+                    message="无法渲染 diff"
+                    description={(diffQuery.error as Error).message}
+                  />
+                ) : diffQuery.data === undefined ? null : (
+                  diffQuery.data.files.map((file) => (
+                    <SkillFileDiffView key={file.path} file={file} />
+                  ))
+                )}
+              </Space>
+            ) : null}
           </Space>
         )}
       </Modal>

@@ -1208,6 +1208,82 @@ export interface SkillValidationResult {
   frontmatter: SkillEntryFrontmatter
 }
 
+// ---------------------------------------------------------------------------
+// V1.19 技能 AI 优化
+// ---------------------------------------------------------------------------
+
+export type SkillVerdictKey = 'IMPLEMENTED' | 'PARTIAL' | 'NOT_IMPLEMENTED' | 'UNCERTAIN'
+export type SkillHumanReviewKey =
+  | 'CORRECT'
+  | 'PARTIALLY_CORRECT'
+  | 'INCORRECT'
+  | 'NEED_DISCUSSION'
+
+/**
+ * 一条抽样证据。
+ *
+ * `summary` / `human_review_comment` 都是服务端截断过的（500 / 300 字符）。前端不再截断：
+ * 再截一次会让"我在页面上看到的"和"模型看到的"不是同一段文本。
+ */
+export interface SkillReviewEvidenceSample {
+  story_code: string
+  verdict: string
+  summary: string
+  human_review_result: string | null
+  human_review_comment: string | null
+}
+
+/**
+ * 技能的历史评审证据聚合（`admin_get_skill_review_evidence`）。
+ *
+ * `referenced_job_count === 0` 是一个**功能状态**，不是错误：它意味着这个技能还没被任何
+ * Job 冻结过，没有可依据的证据，AI 优化入口应当禁用并说明原因。
+ */
+export interface SkillReviewEvidence {
+  skill_id: string
+  referenced_job_count: number
+  verdict_counts: Record<SkillVerdictKey, number>
+  human_review_counts: Record<SkillHumanReviewKey, number>
+  sample_findings: SkillReviewEvidenceSample[]
+}
+
+export type SkillAiOptimizationStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
+
+/**
+ * 一次 AI 优化任务的浏览器可见投影。
+ *
+ * 刻意**没有** worker_id / lease_expires_at / claim_token_digest：浏览器拿到它们就能伪造
+ * 心跳或抢结果。写回只能由 service-role 的 Worker 完成。
+ */
+export interface SkillAiOptimizationTask {
+  id: string
+  skill_id: string
+  source_version_id: string
+  status: SkillAiOptimizationStatus
+  result_upload_id: string | null
+  changed_paths: string[]
+  ai_summary: string | null
+  error_code: string | null
+  error_message: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+}
+
+/** 一个被改动文件的两侧正文。`before === null` 表示新增文件。 */
+export interface SkillFileDiff {
+  path: string
+  before: string | null
+  after: string | null
+}
+
+export interface SkillOptimizationDiff {
+  request_id: string
+  skill_name: string
+  ai_summary: string | null
+  files: SkillFileDiff[]
+}
+
 
 export type DeveloperIdentityStatus = 'VERIFIED' | 'UNVERIFIED' | 'CONFLICT' | 'DISABLED'
 

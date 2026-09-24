@@ -657,3 +657,56 @@ export async function validateSkillArchive(
     frontmatter,
   }
 }
+
+/**
+ * 只取指定路径的文本正文（V1.19，diff 视图用）。
+ *
+ * 与 `validateSkillArchive` 的分工是刻意的：那个函数回答"这份归档能不能发布"，所以它必须
+ * 走完全部校验；这个函数回答"这两份归档的某个文件正文差在哪"，输入的两侧**都已经是被
+ * 服务端校验过的归档**（一侧是已发布版本，一侧是 VALIDATED 的 staging upload）。
+ *
+ * 即便如此仍然保留三道闸门，因为"已经校验过"是一个关于过去的判断，而字节是现在读的：
+ * 路径规范化、严格 UTF-8、以及只读白名单请求的那几个路径。绝不遍历整档解码 —— 一个
+ * 带 200 个文件的包不该因为要看一行 diff 就被全解一遍。
+ */
+export async function readArchiveTextEntries(
+  archive: Uint8Array,
+  wantedPaths: readonly string[],
+): Promise<Map<string, string>> {
+  if (archive.length === 0) invalid('the archive is empty')
+  if (archive.length > LIMITS.archiveBytes) {
+    overLimit(`the archive is larger than ${LIMITS.archiveBytes} bytes`)
+  }
+  const wanted = new Set(wantedPaths)
+  if (wanted.size === 0) return new Map()
+
+  const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength)
+  const central = readCentralDirectory(view, archive)
+  const texts = new Map<string, string>()
+
+  for (const entry of central) {
+    if ((entry.flags & 0x1) !== 0) invalid('encrypted archives are not accepted')
+    if (entry.method !== 0 && entry.method !== 8) {
+      invalid('only stored and deflated entries are accepted')
+    }
+    const canonical = canonicalizeEntryPath(entry.rawName)
+    if (canonical.isDirectory) continue
+    if (!wanted.has(canonical.path)) continue
+    if (entry.uncompressedSize > LIMITS.fileBytes) {
+      overLimit(`entry exceeds the ${LIMITS.fileBytes} byte per-file limit`)
+    }
+    const bytes = await readEntryBytes(view, archive, entry)
+    if (crc32(bytes) !== (entry.crc >>> 0)) {
+      invalid('entry CRC32 does not match the archive header')
+    }
+    const role = roleForPath(canonical.path)
+    if (role === 'ASSET') {
+      // 图片没有"逐行 diff"这回事，请求它只能是调用方传错了路径。
+      invalid(`refusing to render a binary asset as text: ${canonical.path}`)
+    }
+    assertStrictUtf8(bytes, canonical.path)
+    texts.set(canonical.path, new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+  }
+
+  return texts
+}

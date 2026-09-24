@@ -1712,3 +1712,120 @@ from analysis_job order by created_at desc limit 5;
 - 排空 V2 在途任务后回滚 Worker/前端；
 - 删除 Worker 环境中的 `GITLAB_API_TOKEN` 可立即停止后续 MR 采集；
 - 数据库不执行 down migration、不删除表、不 reset；已冻结 V2 数据保留只读，修复通过新前滚 migration 完成。
+
+
+# 20. V1.19 技能 AI 优化
+
+管理员在 `/skills` 用一个技能的**历史评审结果**驱动模型改写它的 `SKILL.md`，看完逐文件 diff
+后手动发布成下一个版本。Worker 侧新增一个与连接测试、Git 邮箱反查并排的独立循环。
+
+## 20.1 它不做什么（运维最需要先知道的三条）
+
+- **不会自动发布。** 代码里没有任何一条从优化任务通向 `admin_publish_review_skill_version`
+  的路径；发布只能由管理员在前端看完 diff 后触发，走的是与人工上传完全相同的那一条链路。
+- **不会改二进制或脚本。** 首版白名单只有 `SKILL.md`；其余文件在重新打包时用原归档里的
+  **原始字节**，不做任何再编码。模型试图写白名单外的路径即 fail closed，且**不产出任何
+  草稿**（不会在技能详情页留下一条待发布的 upload）。
+- **不影响历史与在途 Job。** 技能版本发布只对之后新建的 Job 生效，这条 V1.6 的边界没有变。
+
+## 20.2 配置
+
+没有新增环境变量。它复用两样已有的东西：
+
+| 依赖 | 来源 | 缺失行为 |
+|---|---|---|
+| 模型端点与 Key | `ai_model_config` + Vault（与连接测试同一条解析路径） | 入队即 `MODEL_CONFIG_NOT_FOUND` / `MODEL_SECRET_MISSING`，不会排一条跑不完的队 |
+| 宿主机代理 | `MODEL_CONNECTIVITY_PROXY_*` | 模型是内网模型且 Worker 没配代理时 `MODEL_PROXY_NOT_CONFIGURED`，**绝不静默直连** |
+
+模型选择不由前端决定：入队时取"引用过这个技能的最近一个 Job 所用的模型配置"并**冻结**进
+任务行（`base_url_snapshot` / `model_name_snapshot` / 超时 / 网络类型）。之后改模型配置不影响
+在途任务。那个模型被停用时退回最早创建的启用配置。
+
+## 20.3 上线顺序
+
+1. 用户执行 `supabase migration list --linked` 与 `supabase db push --linked --dry-run --skip-vault`
+   确认目标项目，再 `supabase db push`（两个迁移：`20260924033000`、`20260924034553`）；
+2. 部署 Edge Function：`supabase functions deploy skill-bundle-admin`（新增 `optimization-diff`
+   action；**`db push` 不会部署 Function**）；
+3. 排空后更新 Worker（新循环在 `startWorker` 里挂载，旧版本不认识这三个新 RPC，但它不会
+   因此报错 —— 它只是不领这类任务）；
+4. 发布前端。
+
+顺序可以宽松：数据库先上、Worker 后上期间，入队的任务只是排队；Worker 先上、数据库没上时
+新循环会每个轮询周期记一条 `skill_ai_optimization_loop_error`（RPC 不存在），不影响评审链路。
+
+## 20.4 运行检查
+
+```sql
+-- 在飞任务（同一技能最多一条，由部分唯一索引保证）
+select id, skill_id, status, worker_id, lease_expires_at, error_code
+from public.skill_ai_optimization_request
+where status in ('QUEUED', 'RUNNING')
+order by created_at;
+
+-- 最近失败分布：按错误码看该谁处理
+select error_code, count(*), max(finished_at)
+from public.skill_ai_optimization_request
+where status = 'FAILED' and finished_at > now() - interval '7 days'
+group by error_code order by 2 desc;
+
+-- 产出但一直没被发布的草稿（24h 后随 staging 对象一起被保留期任务清理）
+select r.id, r.skill_id, u.status, u.expires_at
+from public.skill_ai_optimization_request r
+join public.review_skill_upload u on u.id = r.result_upload_id
+where r.status = 'SUCCEEDED' and u.status = 'VALIDATED';
+```
+
+告警判据：
+
+- 任何 `QUEUED` 超过 10 分钟 → 没有 Worker 在线，或全部 Worker 处于 drain；
+- 同一技能连续 3 次 `SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID` → 模型不遵守输出约定，
+  先看是不是模型配置换了，再考虑调整 Prompt；不要放宽校验；
+- `RUNNING` 且 `lease_expires_at < now()` 存在超过一个轮询周期 → 回收循环没在跑
+  （`reclaim_stale_skill_ai_optimization_leases` 在每次认领前执行一次）。
+
+日志字段只有 `skill_ai_optimization_id` / `skill_name` / `error_code` / 延迟与 token 计数。
+**Prompt 正文、模型输出、技能正文、API Key 一律不进日志。**
+
+## 20.5 错误码
+
+| 错误码 | 含义 | 处理 |
+|---|---|---|
+| `SKILL_NOT_PUBLISHED` | 技能没有已发布版本 | 先发一个版本 |
+| `SKILL_OPTIMIZATION_NO_EVIDENCE` | 从未被任何 Job 引用，没有证据 | 让它先参与几次评审；前端会提前禁用入口 |
+| `MODEL_CONFIG_NOT_FOUND` | 没有启用的模型配置 | 在模型配置页启用一个 |
+| `MODEL_SECRET_MISSING` | 模型配置缺 Vault Key | 补 Key |
+| `MODEL_PROXY_NOT_CONFIGURED` | 内网模型 + Worker 无代理 | 配 `MODEL_CONNECTIVITY_PROXY_*` 或改公网模型 |
+| `MODEL_HTTP_<code>` / `MODEL_TIMEOUT` / `MODEL_NETWORK_ERROR` | 模型端点问题 | 与连接测试同一套判读 |
+| `SKILL_OPTIMIZATION_MODEL_OUTPUT_INVALID` | 输出不符合约定（越界路径、改了 frontmatter 的 name、正文超长、逐字节未改动） | 可直接重试；不产出草稿 |
+| `SKILL_OPTIMIZATION_REPACK_REJECTED` | 重新打包的归档没通过与人工上传相同的校验 | 看是不是正文触了容量上限；这也是打包器自身的回归信号 |
+| `SKILL_OPTIMIZATION_ACTOR_MISSING` | 发起人账号已删除 | 重新发起（产出物必须以一个 ADMIN 身份走上传校验） |
+| `TASK_LEASE_LOST` | 租约失效（Worker 失联） | 等回收重排队，或重新发起 |
+
+## 20.6 回滚
+
+纯新增：停掉 Worker 新循环（回滚 Worker 镜像）+ 前端隐藏入口即可。已发布的技能版本沿用既有
+方式（发新版本覆盖），不需要数据库回滚脚本，也不执行 down migration。
+
+## 20.7 怎么复跑验证
+
+```bash
+# 数据库契约
+docker exec -i supabase_db_codeReviewPlatform psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  < supabase/tests/20260924034553_skill_ai_optimization_model_and_diff_test.sql
+
+# Worker 单测（打包器/Prompt 解析/主流程）
+npx vitest run worker/src/__tests__/v119-skill-ai-optimizer.test.ts
+
+# 本地全链路：真实 Supabase + 真实 Storage + 真实 Edge Function，只有模型是假的
+RUN_V119_LOCAL_INTEGRATION=1 npx vitest run \
+  worker/src/__tests__/v119-skill-ai-optimization.integration.test.ts
+
+# 额外验证"循环真的挂在运行中的 Worker 容器里"（需要本地 Worker 在跑）
+RUN_V119_LOCAL_INTEGRATION=1 RUN_V119_WORKER_LOOP=1 npx vitest run \
+  worker/src/__tests__/v119-skill-ai-optimization.integration.test.ts
+```
+
+集成测试会按 id 精确清理自己建的行与 Storage 对象；`batch_operation_log` 是 append-only 且
+`performed_by` 为 `no action`，所以它也会把自己写下的那几行按 `performed_by` 删掉 —— 否则
+`admin_delete_user` 会以 `USER_HAS_REFERENCES` 正确地拒绝删除测试账号。
