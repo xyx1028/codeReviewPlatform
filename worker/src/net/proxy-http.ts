@@ -17,6 +17,7 @@
  */
 import http from 'node:http'
 import https from 'node:https'
+import tls from 'node:tls'
 import type { ClientRequest, IncomingHttpHeaders, IncomingMessage } from 'node:http'
 import type { Socket } from 'node:net'
 
@@ -57,6 +58,34 @@ export function proxyAuthHeader(proxy: HostProxySettings): Record<string, string
   return { 'Proxy-Authorization': `Basic ${encoded}` }
 }
 
+/**
+ * 「连代理这一跳本身失败」的 errno 集合。
+ *
+ * 只有这一跳才允许被解释成 `PROXY_UNREACHABLE`。隧道建成之后再出现同样的 errno，
+ * 含义完全不同（目标或 TLS 的问题），把它也报成"代理不可用"会把排查引向错的方向。
+ */
+const PROXY_HOP_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'EHOSTUNREACH',
+  'ENOTFOUND',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+])
+
+export function isProxyHopErrorCode(code: string | undefined): boolean {
+  return code !== undefined && PROXY_HOP_ERROR_CODES.has(code)
+}
+
+function mapProxyHopError(error: unknown): ProxyHttpError {
+  if (error instanceof ProxyHttpError) return error
+  const code = (error as { code?: string } | null)?.code
+  if (isProxyHopErrorCode(code)) {
+    return new ProxyHttpError('PROXY_UNREACHABLE', '宿主机代理不可用，请确认代理已启动')
+  }
+  return new ProxyHttpError('NETWORK_ERROR', '连接宿主机代理失败')
+}
+
 /** 经代理建立 CONNECT 隧道。HTTPS 目标用它，TLS 仍在调用方与目标之间端到端。 */
 export function openProxyTunnel(
   proxy: HostProxySettings,
@@ -92,10 +121,50 @@ export function openProxyTunnel(
     request.once('timeout', () => {
       request.destroy(new ProxyHttpError('PROXY_TUNNEL_TIMEOUT', '宿主机代理建立隧道超时'))
     })
-    request.once('error', reject)
+    // 这一跳连的就是代理，所以 ECONNREFUSED / ENOTFOUND 在这里确实等于"代理不可用"。
+    request.once('error', (error: unknown) => reject(mapProxyHopError(error)))
     request.end()
   })
 }
+
+export interface TunneledHttpsRequestOptions {
+  /** `openProxyTunnel` 返回的原始 socket。 */
+  tunnel: Socket
+  target: URL
+  method: string
+  headers: Record<string, string>
+  timeoutMs: number
+}
+
+/**
+ * 在已建立的 CONNECT 隧道上发起一次 HTTPS 请求。TLS 端到端，代理只看到密文。
+ *
+ * 为什么不能写成 `https.request({ createConnection: () => tunnel, agent: false })`：
+ * Node 在 `agent === false` 时会**新建一个默认 Agent**，请求随后走 Agent 自己的
+ * `createConnection`，options 里传进去的那个函数被完全忽略；options 里又没有 host/port，
+ * 于是它去连 `127.0.0.1:443` 并以 ECONNREFUSED 失败。2026-09-24 实测到的表象是 Linky
+ * 导入报 `LINKY_PROXY_UNREACHABLE`，而代理其实是好的（CONNECT 返回 200、宿主机 curl 200）——
+ * 隧道建成了，请求根本没往里写一个字节。这条路径从引入起就没成功过。
+ *
+ * 正确做法是把 `createConnection` 挂在 Agent **实例**上：实例属性遮蔽
+ * `Agent.prototype.createConnection`，而 Agent 的 `createSocket` 调用的正是
+ * `this.createConnection`。
+ */
+export function tunneledHttpsRequest(options: TunneledHttpsRequestOptions): ClientRequest {
+  const agent = new https.Agent({ keepAlive: false, maxSockets: 1 })
+  agent.createConnection = () =>
+    tls.connect({ socket: options.tunnel, servername: options.target.hostname })
+  return https.request({
+    agent,
+    host: options.target.hostname,
+    port: urlPort(options.target),
+    method: options.method,
+    path: `${options.target.pathname}${options.target.search}`,
+    headers: options.headers,
+    timeout: options.timeoutMs,
+  })
+}
+
 
 export interface ProxyHttpGetOptions {
   url: string
@@ -132,15 +201,12 @@ export async function proxyHttpGet(options: ProxyHttpGetOptions): Promise<ProxyH
     let request: ClientRequest
     if (options.proxy && target.protocol === 'https:') {
       tunnel = await openProxyTunnel(options.proxy, target, timeoutMs)
-      const tunneledSocket = tunnel
-      request = https.request({
-        createConnection: () => tunneledSocket,
-        agent: false,
-        servername: target.hostname,
+      request = tunneledHttpsRequest({
+        tunnel,
+        target,
         method: 'GET',
-        path: `${target.pathname}${target.search}`,
         headers,
-        timeout: timeoutMs,
+        timeoutMs,
       })
     } else if (options.proxy) {
       const proxyUrl = new URL(options.proxy.url)
@@ -220,10 +286,10 @@ export async function proxyHttpGet(options: ProxyHttpGetOptions): Promise<ProxyH
   } catch (error) {
     if (error instanceof ProxyHttpError) throw error
     const code = (error as { code?: string } | null)?.code
-    if (
-      options.proxy &&
-      (code === 'ECONNREFUSED' || code === 'EHOSTUNREACH' || code === 'ECONNRESET')
-    ) {
+    // 只有明文 HTTP 经代理转发这一条路径是"直接连代理"：它的 ECONNREFUSED 才等于代理不可用。
+    // HTTPS 走 CONNECT 隧道，连代理那一跳的失败已经在 openProxyTunnel 里映射过了；
+    // 到这里的错误发生在隧道建成之后，属于目标或 TLS，不能再报成"代理不可用"。
+    if (options.proxy && target.protocol === 'http:' && isProxyHopErrorCode(code)) {
       throw new ProxyHttpError('PROXY_UNREACHABLE', '宿主机代理不可用，请确认代理已启动')
     }
     throw new ProxyHttpError('NETWORK_ERROR', '网络请求失败')

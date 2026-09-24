@@ -18,6 +18,14 @@ import https from 'node:https'
 import type { ClientRequest, IncomingMessage } from 'node:http'
 import type { Socket } from 'node:net'
 
+import {
+  ProxyHttpError,
+  isProxyHopErrorCode,
+  openProxyTunnel,
+  proxyAuthHeader,
+  tunneledHttpsRequest,
+  urlPort as defaultPort,
+} from '../net/proxy-http.js'
 import type { ModelProxySettings } from './probe.js'
 
 export interface ChatCompletionRequest {
@@ -55,52 +63,44 @@ export class ChatCompletionError extends Error {
 /** 响应体上限。模型端点故障时可能返回一个巨大的 HTML 错误页，不能无界读进内存。 */
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
-function proxyAuthHeader(proxy: ModelProxySettings): Record<string, string> {
-  if (!proxy.username || !proxy.password) return {}
-  const encoded = Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64')
-  return { 'Proxy-Authorization': `Basic ${encoded}` }
-}
-
-function defaultPort(target: URL): number {
-  if (target.port !== '') return Number(target.port)
-  return target.protocol === 'https:' ? 443 : 80
-}
-
-/** 经代理建立 CONNECT 隧道，TLS 仍在 Worker 与模型端点之间端到端建立。 */
-function openTunnel(
+/**
+ * 经代理建立 CONNECT 隧道，TLS 仍在 Worker 与模型端点之间端到端建立。
+ *
+ * 隧道、代理认证与默认端口都来自 `net/proxy-http.ts`（V1.20 起共用），这里只把共享原语的
+ * 错误码翻译成模型侧错误码 —— 之前这里是第三份拷贝，漂移的代价是 CONNECT 成功之后请求
+ * 根本没写进隧道。
+ */
+async function openTunnel(
   proxy: ModelProxySettings,
   target: URL,
   timeoutMs: number,
 ): Promise<Socket> {
-  const proxyUrl = new URL(proxy.url)
-  return new Promise<Socket>((resolve, reject) => {
-    const request = http.request({
-      host: proxyUrl.hostname,
-      port: defaultPort(proxyUrl),
-      method: 'CONNECT',
-      path: `${target.hostname}:${defaultPort(target)}`,
-      headers: proxyAuthHeader(proxy),
-      timeout: timeoutMs,
-    })
-    request.once('connect', (response: IncomingMessage, socket: Socket) => {
-      if (response.statusCode !== 200) {
-        socket.destroy()
-        reject(
-          new ChatCompletionError(
-            `MODEL_PROXY_HTTP_${response.statusCode ?? 0}`,
-            `Mac 代理拒绝建立隧道（HTTP ${response.statusCode ?? 0}）`,
-          ),
-        )
-        return
+  try {
+    return await openProxyTunnel(proxy, target, timeoutMs)
+  } catch (error) {
+    if (error instanceof ProxyHttpError) {
+      if (error.code === 'PROXY_TUNNEL_TIMEOUT') {
+        throw new ChatCompletionError('MODEL_TIMEOUT', '模型请求超时')
       }
-      resolve(socket)
-    })
-    request.once('timeout', () =>
-      request.destroy(new ChatCompletionError('MODEL_TIMEOUT', '模型请求超时')),
-    )
-    request.once('error', reject)
-    request.end()
-  })
+      if (error.code === 'PROXY_UNREACHABLE') {
+        throw new ChatCompletionError(
+          'MODEL_PROXY_UNREACHABLE',
+          'Mac 宿主机代理不可用，请确认代理已启动',
+        )
+      }
+      if (error.code === 'NETWORK_ERROR') {
+        throw new ChatCompletionError(
+          'MODEL_NETWORK_ERROR',
+          '无法连接模型端点，请确认 Mac 已连接公司网络或 VPN',
+        )
+      }
+      throw new ChatCompletionError(
+        `MODEL_PROXY_HTTP_${error.statusCode ?? 0}`,
+        `Mac 代理拒绝建立隧道（HTTP ${error.statusCode ?? 0}）`,
+      )
+    }
+    throw error
+  }
 }
 
 /** 从 OpenAI 兼容响应里取出正文。形状不对就是"模型端点不兼容"，不是"内容不合规"。 */
@@ -169,16 +169,7 @@ export async function requestChatCompletion(
     let request: ClientRequest
     if (input.proxy && target.protocol === 'https:') {
       tunnel = await openTunnel(input.proxy, target, timeoutMs)
-      const tunneledSocket = tunnel
-      request = https.request({
-        createConnection: () => tunneledSocket,
-        agent: false,
-        servername: target.hostname,
-        method: 'POST',
-        path: `${target.pathname}${target.search}`,
-        headers,
-        timeout: timeoutMs,
-      })
+      request = tunneledHttpsRequest({ tunnel, target, method: 'POST', headers, timeoutMs })
     } else if (input.proxy) {
       const proxyUrl = new URL(input.proxy.url)
       request = http.request({
@@ -265,7 +256,9 @@ export async function requestChatCompletion(
   } catch (error) {
     if (error instanceof ChatCompletionError) throw error
     const code = (error as { code?: string } | null)?.code
-    if (input.proxy && (code === 'ECONNREFUSED' || code === 'EHOSTUNREACH' || code === 'ECONNRESET')) {
+    // 只有"直接连代理"的明文 HTTP 转发路径，ECONNREFUSED 才等于代理不可用；
+    // HTTPS 的代理跳已经在 openTunnel 里映射过，隧道之后的错误属于目标或 TLS。
+    if (input.proxy && target.protocol === 'http:' && isProxyHopErrorCode(code)) {
       throw new ChatCompletionError(
         'MODEL_PROXY_UNREACHABLE',
         'Mac 宿主机代理不可用，请确认代理已启动',

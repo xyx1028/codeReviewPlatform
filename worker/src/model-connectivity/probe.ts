@@ -14,8 +14,10 @@ import type { Socket } from 'node:net'
 import {
   type HostProxySettings,
   ProxyHttpError,
+  isProxyHopErrorCode,
   openProxyTunnel,
   proxyAuthHeader,
+  tunneledHttpsRequest,
   urlPort as defaultPort,
 } from '../net/proxy-http.js'
 
@@ -65,6 +67,18 @@ async function openTunnel(
       if (error.code === 'PROXY_TUNNEL_TIMEOUT') {
         throw new ModelConnectivityProbeError('MODEL_TIMEOUT', '模型连接测试超时')
       }
+      if (error.code === 'PROXY_UNREACHABLE') {
+        throw new ModelConnectivityProbeError(
+          'MODEL_PROXY_UNREACHABLE',
+          'Mac 宿主机代理不可用，请确认代理已启动',
+        )
+      }
+      if (error.code === 'NETWORK_ERROR') {
+        throw new ModelConnectivityProbeError(
+          'MODEL_NETWORK_ERROR',
+          '无法连接模型端点，请确认 Mac 已连接公司网络或 VPN',
+        )
+      }
       throw new ModelConnectivityProbeError(
         `MODEL_PROXY_HTTP_${error.statusCode ?? 0}`,
         `Mac 代理拒绝建立隧道（HTTP ${error.statusCode ?? 0}）`,
@@ -108,17 +122,8 @@ export async function probeModelConnectivity(
     let request: ClientRequest
     if (input.proxy && target.protocol === 'https:') {
       tunnel = await openTunnel(input.proxy, target, timeoutMs)
-      const tunneledSocket = tunnel
-      request = https.request({
-        // 复用 CONNECT 隧道：TLS 在 Worker 与模型端点之间端到端建立，代理看不到明文。
-        createConnection: () => tunneledSocket,
-        agent: false,
-        servername: target.hostname,
-        method: 'POST',
-        path: `${target.pathname}${target.search}`,
-        headers,
-        timeout: timeoutMs,
-      })
+      // 复用 CONNECT 隧道：TLS 在 Worker 与模型端点之间端到端建立，代理看不到明文。
+      request = tunneledHttpsRequest({ tunnel, target, method: 'POST', headers, timeoutMs })
     } else if (input.proxy) {
       const proxyUrl = new URL(input.proxy.url)
       request = http.request({
@@ -180,7 +185,9 @@ export async function probeModelConnectivity(
         : error
     }
     const code = (error as { code?: string } | null)?.code
-    if (input.proxy && (code === 'ECONNREFUSED' || code === 'EHOSTUNREACH' || code === 'ECONNRESET')) {
+    // 与 net/proxy-http.ts 同一条判据：只有"直接连代理"的明文 HTTP 转发路径，
+    // ECONNREFUSED 才等于代理不可用；HTTPS 的代理跳已经在 openTunnel 里映射过。
+    if (input.proxy && target.protocol === 'http:' && isProxyHopErrorCode(code)) {
       throw new ModelConnectivityProbeError(
         'MODEL_PROXY_UNREACHABLE',
         'Mac 宿主机代理不可用，请确认代理已启动',
