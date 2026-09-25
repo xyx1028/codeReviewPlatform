@@ -223,8 +223,125 @@ a {
 }
 
 .app-sider {
+  height: calc(100vh - 64px);
   background: #fff;
   border-right: 1px solid #edf0f5;
+}
+
+.app-sider > .ant-layout-sider-children {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  overflow: hidden;
+}
+
+.app-account-menu {
+  position: fixed;
+  z-index: 10;
+  bottom: 0;
+  left: 0;
+  box-sizing: border-box;
+  width: 220px;
+  flex: 0 0 auto;
+  margin-top: auto;
+  padding: 8px 10px;
+  border-top: 1px solid #edf0f5;
+  background: #fff;
+}
+
+.app-account-summary.ant-btn {
+  display: flex;
+  width: 100%;
+  height: 48px;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 6px;
+  text-align: left;
+  color: inherit;
+  border-radius: 8px;
+}
+
+.app-account-summary.ant-btn:hover {
+  color: inherit;
+  background: #f5f7fb;
+}
+
+.app-account-avatar {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  background: linear-gradient(135deg, #2563eb, #7c3aed);
+}
+
+.app-account-details {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.app-account-name.ant-typography {
+  display: block;
+  min-width: 0;
+  flex: 1 1 auto;
+  color: #303442;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.app-account-role.ant-tag {
+  margin-inline-end: 0;
+  font-size: 10px;
+  line-height: 17px;
+}
+
+.app-account-popover {
+  display: flex;
+  min-width: 144px;
+  flex-direction: column;
+  gap: 2px;
+}
+
+
+.app-review-log-group {
+  flex: 0 0 auto;
+  margin: 0 8px 64px;
+  padding-top: 10px;
+  border-top: 1px solid #edf0f5;
+}
+
+.app-review-log-title.ant-typography {
+  display: block;
+  padding: 0 12px 5px;
+  color: #8a8f9f;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.app-review-log-menu.ant-menu {
+  border-inline-end: 0;
+  background: transparent;
+}
+
+.app-review-log-menu .ant-menu-submenu-title {
+  margin-inline: 0;
+  border-radius: 8px;
+}
+.app-account-popover .ant-btn {
+  justify-content: flex-start;
+}
+
+.app-account-popover-divider.ant-divider {
+  margin: 4px 0;
 }
 
 .app-content {
@@ -405,10 +522,19 @@ a {
 
 .code-qa-layout {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: 232px minmax(0, 1fr);
+  gap: 20px;
   height: calc(100vh - 64px - 48px);
   min-height: 420px;
+}
+
+/* 平台全局导航已经在左侧；首次进入时不再叠加一列空的会话栏。 */
+.code-qa-layout--welcome {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.code-qa-layout--welcome .code-qa-sidebar {
+  display: none;
 }
 
 .code-qa-sidebar {
@@ -417,29 +543,30 @@ a {
   gap: 12px;
   padding: 12px;
   overflow-y: auto;
-  background: #fff;
-  border: 1px solid #f0f0f0;
-  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid #e8eaf0;
+  border-radius: 14px;
 }
 
 .code-qa-conv {
   cursor: pointer;
-  border-radius: 8px;
+  border-radius: 9px;
   padding-inline: 8px !important;
 }
 
 .code-qa-conv:hover {
-  background: #f5f7fa;
+  background: #f2f4fa;
 }
 
 .code-qa-conv-active {
-  background: #e6f0ff;
+  background: #e9edff;
 }
 
 /* 键盘焦点必须看得见：这些列表项是 role="button"，靠 Tab 访问。 */
-.code-qa-conv:focus-visible {
-  outline: 2px solid #1677ff;
-  outline-offset: -2px;
+.code-qa-conv:focus-visible,
+.code-qa-welcome-suggestion:focus-visible {
+  outline: 2px solid #5c67d8;
+  outline-offset: 2px;
 }
 
 .code-qa-main {
@@ -447,6 +574,127 @@ a {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+}
+
+/* 无会话页只有一个记忆点：从这里提问。其余元素保持克制，避免变成信息说明页。 */
+.code-qa-welcome {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: 32px 24px 72px;
+}
+
+.code-qa-welcome-inner {
+  width: min(100%, 760px);
+}
+
+.code-qa-welcome-title.ant-typography {
+  margin: 0 0 12px;
+  color: #181926;
+  font-size: clamp(32px, 4vw, 48px);
+  font-weight: 650;
+  letter-spacing: -0.045em;
+  line-height: 1.18;
+  text-align: center;
+}
+
+.code-qa-welcome-description.ant-typography {
+  max-width: 560px;
+  margin: 0 auto 30px;
+  color: #777b8c;
+  font-size: 15px;
+  line-height: 1.7;
+  text-align: center;
+}
+
+.code-qa-welcome-composer {
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #e6e7ee;
+  border-radius: 20px;
+  box-shadow: 0 12px 30px rgba(31, 36, 68, 0.08), 0 2px 8px rgba(31, 36, 68, 0.04);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.code-qa-welcome-composer:focus-within {
+  border-color: #7b85ec;
+  box-shadow: 0 0 0 4px rgba(92, 103, 216, 0.12), 0 16px 34px rgba(31, 36, 68, 0.1);
+}
+
+.code-qa-welcome-input.ant-input {
+  min-height: 112px !important;
+  padding: 22px 24px 12px;
+  color: #282b3a;
+  font-size: 16px;
+  line-height: 1.65;
+  border: 0;
+  box-shadow: none;
+  resize: none;
+}
+
+.code-qa-welcome-input.ant-input:focus {
+  box-shadow: none;
+}
+
+.code-qa-welcome-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px 12px 18px;
+  border-top: 1px solid #f0f1f5;
+}
+
+.code-qa-welcome-hint {
+  color: #9195a5;
+  font-size: 12px;
+}
+
+.code-qa-welcome-start.ant-btn {
+  height: 36px;
+  padding-inline: 15px;
+  color: #fff;
+  font-weight: 600;
+  background: #5965d8;
+  border-color: #5965d8;
+  border-radius: 10px;
+}
+
+.code-qa-welcome-start.ant-btn:hover,
+.code-qa-welcome-start.ant-btn:focus-visible {
+  background: #4854c8;
+  border-color: #4854c8;
+}
+
+.code-qa-welcome-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.code-qa-welcome-suggestion {
+  max-width: 100%;
+  padding: 8px 13px;
+  color: #575c6e;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid #e6e7ed;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
+}
+
+.code-qa-welcome-suggestion:hover {
+  color: #444fb9;
+  background: #f7f8ff;
+  border-color: #bfc5f5;
 }
 
 .code-qa-topbar {
@@ -458,8 +706,8 @@ a {
   padding: 10px 14px;
   margin-bottom: 12px;
   background: #fff;
-  border: 1px solid #f0f0f0;
-  border-radius: 10px;
+  border: 1px solid #e8eaf0;
+  border-radius: 12px;
 }
 
 .code-qa-stream {
@@ -468,8 +716,8 @@ a {
   overflow-y: auto;
   padding: 16px;
   background: #fff;
-  border: 1px solid #f0f0f0;
-  border-radius: 10px;
+  border: 1px solid #e8eaf0;
+  border-radius: 12px;
 }
 
 .code-qa-turn {
@@ -488,8 +736,8 @@ a {
 /* 用户消息靠右，AI 回答靠左 —— 与豆包/ChatGPT 的阅读习惯一致。 */
 .code-qa-bubble-user {
   align-self: flex-end;
-  background: #e6f0ff;
-  border: 1px solid #bcd7ff;
+  background: #eef0ff;
+  border: 1px solid #cbd0f6;
 }
 
 .code-qa-bubble-agent {
@@ -497,7 +745,7 @@ a {
   width: min(880px, 96%);
   max-width: none;
   background: #fafafa;
-  border: 1px solid #f0f0f0;
+  border: 1px solid #edf0f3;
 }
 
 .code-qa-composer {
@@ -505,8 +753,8 @@ a {
   margin-top: 12px;
   padding: 12px;
   background: #fff;
-  border: 1px solid #f0f0f0;
-  border-radius: 10px;
+  border: 1px solid #e8eaf0;
+  border-radius: 12px;
 }
 
 .code-qa-composer-actions {
@@ -523,9 +771,14 @@ a {
     height: auto;
   }
 
-  /* 窄屏上侧栏折成一条横向可滚的列表，避免占掉半个屏幕。 */
+  /* 窄屏上侧栏折成一条可滚区域，避免占掉半个屏幕。 */
   .code-qa-sidebar {
     max-height: 220px;
+  }
+
+  .code-qa-welcome {
+    min-height: calc(100vh - 64px - 48px);
+    padding: 40px 8px 72px;
   }
 
   .code-qa-stream {
@@ -534,5 +787,29 @@ a {
 
   .code-qa-bubble {
     max-width: 100%;
+  }
+}
+
+@media (max-width: 520px) {
+  .code-qa-welcome-title.ant-typography {
+    font-size: 31px;
+  }
+
+  .code-qa-welcome-composer {
+    border-radius: 16px;
+  }
+
+  .code-qa-welcome-input.ant-input {
+    min-height: 100px !important;
+    padding: 18px 18px 10px;
+  }
+
+  .code-qa-welcome-actions {
+    align-items: flex-end;
+    padding-left: 14px;
+  }
+
+  .code-qa-welcome-suggestions {
+    justify-content: flex-start;
   }
 }

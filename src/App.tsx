@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import type { Session } from '@supabase/supabase-js'
 import {
   Alert,
@@ -580,6 +581,8 @@ function Shell({ session }: { session: Session }) {
   const { message } = AntApp.useApp()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const [openMenuKeys, setOpenMenuKeys] = useState<string[]>([])
+  const [versionModalOpen, setVersionModalOpen] = useState(false)
   const profileQuery = useQuery({ queryKey: ['my-profile'], queryFn: getMyProfile })
   const claimAdminMutation = useMutation({
     mutationFn: claimInitialAdmin,
@@ -596,6 +599,8 @@ function Shell({ session }: { session: Session }) {
   })
 
   const role = profileQuery.data?.role
+  const isCodeQaRoute = location.pathname.startsWith('/ask')
+
   const isAdmin = role === 'ADMIN'
   const isWechatOnly = session.user.email?.endsWith('@wechat.invalid') ?? false
   const accountLabel = getUserDisplayName(profileQuery.data?.display_name, session.user.email)
@@ -624,21 +629,14 @@ function Shell({ session }: { session: Session }) {
                 : location.pathname.startsWith('/operation-log')
                   ? '/operation-log'
                   : '/batches'
-  const menuItems = [
-    // V1.23：产品代码问答。放在第一项 —— 它是默认首页。
-    { key: '/ask', label: <Link to="/ask">代码问答</Link> },
+  const reviewLogMenuItems = [
+    { key: '/operation-log', label: <Link to="/operation-log">代码评审操作日志</Link> },
+    ...(isAdmin ? [{ key: '/model-operation-log', label: <Link to="/model-operation-log">模型操作日志</Link> }] : []),
+  ]
+  const reviewMenuItems = [
     { key: '/batches', label: <Link to="/batches">代码评审</Link> },
     // V1.20：用户故事看板。三种角色都能看（VIEWER 只读），刷新与导入由 RPC 门禁裁决。
     { key: '/stories', label: <Link to="/stories">用户故事</Link> },
-    {
-      key: '/operation-logs',
-      label: '操作日志',
-      children: [
-        { key: '/operation-log', label: <Link to="/operation-log">代码评审操作日志</Link> },
-        ...(isAdmin ? [{ key: '/model-operation-log', label: <Link to="/model-operation-log">模型操作日志</Link> }] : []),
-      ],
-    },
-    { key: '/profile', label: <Link to="/profile">个人中心</Link> },
     // 导航仅 ADMIN 显示，但这不是安全边界：服务端 ensure_admin() 才是。
     ...(isAdmin ? [{ key: '/monitoring', label: <Link to="/monitoring">Agent 运行监控</Link> }] : []),
     ...(isAdmin ? [{ key: '/workers', label: <Link to="/workers">调度中心</Link> }] : []),
@@ -649,6 +647,7 @@ function Shell({ session }: { session: Session }) {
     // Git 身份由每个人在「个人中心」自助维护；这里只保留管理员的全员总览与冲突处置。
     ...(isAdmin ? [{ key: '/users', label: <Link to="/users">用户管理</Link> }] : []),
   ]
+  const activeMenuItems = reviewMenuItems
 
   return (
     <Layout className="app-shell">
@@ -660,26 +659,107 @@ function Shell({ session }: { session: Session }) {
             <Text className="subtitle">需求与代码一致性 · 智能分析</Text>
           </div>
         </div>
-        <Space>
-          <Text className="header-version">版本 V1.7</Text>
-          <Tag color={profileQuery.data?.role === 'ADMIN' ? 'green' : 'blue'}>{profileQuery.data?.role ?? '未配置角色'}</Tag>
-          {role === 'REVIEWER' ? (
-            <Button size="small" onClick={() => claimAdminMutation.mutate()} loading={claimAdminMutation.isPending}>
-              申领初始管理员
-            </Button>
-          ) : null}
-          <Text className="header-email">{accountLabel}</Text>
-          <Button onClick={() => logoutMutation.mutate()} loading={logoutMutation.isPending}>退出</Button>
-        </Space>
       </Header>
       <Layout>
-        <Sider width={220} className="app-sider">
-          <Menu
-            mode="inline"
-            selectedKeys={[selectedKey]}
-            defaultOpenKeys={['/operation-logs']}
-            items={menuItems}
-          />
+        <Sider
+          width={220}
+          className={isCodeQaRoute ? 'app-sider app-sider--code-qa app-sider--product' : 'app-sider app-sider--review'}
+        >
+          <div className="app-workspace-tabs" role="tablist" aria-label="平台模块">
+            <Button
+              type="text"
+              className={isCodeQaRoute ? 'app-workspace-tab app-workspace-tab-active' : 'app-workspace-tab'}
+              role="tab"
+              aria-selected={isCodeQaRoute}
+              onClick={() => navigate('/ask')}
+            >
+              产品
+            </Button>
+            <Button
+              type="text"
+              className={!isCodeQaRoute ? 'app-workspace-tab app-workspace-tab-active' : 'app-workspace-tab'}
+              role="tab"
+              aria-selected={!isCodeQaRoute}
+              onClick={() => navigate('/batches')}
+            >
+              评审
+            </Button>
+          </div>
+          {!isCodeQaRoute ? (
+            <>
+              <Menu
+                key="review-navigation"
+                className="app-workspace-menu"
+                mode="inline"
+                triggerSubMenuAction="click"
+                selectedKeys={[selectedKey]}
+                openKeys={openMenuKeys}
+                onOpenChange={setOpenMenuKeys}
+                items={activeMenuItems}
+              />
+              <section className="app-review-log-group" aria-label="日志">
+                <Text className="app-review-log-title">日志</Text>
+                <Menu
+                  key="review-log-navigation"
+                  className="app-review-log-menu"
+                  mode="inline"
+                  triggerSubMenuAction="click"
+                  selectedKeys={[selectedKey]}
+                  openKeys={openMenuKeys}
+                  onOpenChange={setOpenMenuKeys}
+                  items={reviewLogMenuItems}
+                />
+              </section>
+            </>
+          ) : null}
+          {createPortal(
+            <div
+              className="app-account-menu"
+              style={{ position: 'fixed', zIndex: 10, bottom: 0, left: 0, width: 220, boxSizing: 'border-box' }}
+            >
+            <Popover
+              placement="topLeft"
+              trigger="click"
+              content={(
+                <div className="app-account-popover">
+                  <Button type="text" onClick={() => navigate('/profile')}>个人中心</Button>
+                  <Button type="text" onClick={() => setVersionModalOpen(true)}>查看当前版本</Button>
+                  {role === 'REVIEWER' ? (
+                    <Button
+                      type="text"
+                      onClick={() => claimAdminMutation.mutate()}
+                      loading={claimAdminMutation.isPending}
+                    >
+                      申领管理员
+                    </Button>
+                  ) : null}
+                  <Divider className="app-account-popover-divider" />
+                  <Button
+                    danger
+                    type="text"
+                    onClick={() => logoutMutation.mutate()}
+                    loading={logoutMutation.isPending}
+                  >
+                    退出登录
+                  </Button>
+                </div>
+              )}
+            >
+              <Button type="text" className="app-account-summary" aria-label="打开账号菜单">
+                <span className="app-account-avatar" aria-hidden="true">
+                  {accountLabel.trim().charAt(0).toUpperCase()}
+                </span>
+                <span className="app-account-details">
+                  <Text className="app-account-name" ellipsis>{accountLabel}</Text>
+                  <Tag className="app-account-role" color={role === 'ADMIN' ? 'green' : 'blue'}>
+                    {role ?? '未配置角色'}
+                  </Tag>
+                </span>
+              </Button>
+            </Popover>
+            </div>,
+            document.body,
+          )}
         </Sider>
         <Content className="app-content">
           <Routes>
@@ -716,6 +796,17 @@ function Shell({ session }: { session: Session }) {
             <Route path="/batches/:batchId/*" element={<BatchPage canManageBatch={canManageBatch} />} />
             <Route path="*" element={<Navigate to="/ask" replace />} />
           </Routes>
+          <Modal
+            open={versionModalOpen}
+            title="当前版本"
+            footer={null}
+            onCancel={() => setVersionModalOpen(false)}
+          >
+            <Space direction="vertical" size={4}>
+              <Text strong>代码评审平台</Text>
+              <Text>当前版本：V1.7</Text>
+            </Space>
+          </Modal>
         </Content>
       </Layout>
     </Layout>

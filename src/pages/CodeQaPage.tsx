@@ -20,7 +20,6 @@ import {
   Alert,
   App as AntApp,
   Button,
-  Card,
   Collapse,
   Empty,
   Form,
@@ -67,6 +66,14 @@ const BRANCH_HINTS: Record<DefaultBranch, string> = {
   feature_sit: '集成测试分支',
   release: '发布分支（最接近线上）',
 }
+
+/** 无会话首页只提供真实、可回答的代码探索方向，不伪造产品能力。 */
+const WELCOME_QUESTION_SUGGESTIONS = [
+  '工单转派之后，原受理人的待办会怎么处理？',
+  '现在的审批流有哪些驳回场景，各自回到哪一步？',
+  '导出报表的字段是从哪些表和接口来的？',
+  '这个功能的关键入口、服务和数据表分别在哪里？',
+]
 
 function TurnStatusTag({ turn }: { turn: CodeQaTurn }) {
   if (turn.status === 'FAILED') return <Tag color="red">失败</Tag>
@@ -209,7 +216,10 @@ export default function CodeQaPage() {
   const { message } = AntApp.useApp()
   const queryClient = useQueryClient()
   const [activeId, setActiveId] = useState<string | null>(null)
+  // 产品页默认从居中新建会话开始；历史会话只能由用户主动选择。
+  const [isStartingConversation, setIsStartingConversation] = useState(true)
   const [draft, setDraft] = useState('')
+  const [welcomeDraft, setWelcomeDraft] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
   const [createForm] = Form.useForm<{ repositories: string[]; branch: DefaultBranch }>()
   const streamEndRef = useRef<HTMLDivElement | null>(null)
@@ -233,12 +243,12 @@ export default function CodeQaPage() {
   const turns = detail?.turns ?? []
   const inFlight = hasInFlightTurn(turns)
 
-  // 首次加载后自动选中最近一个会话，省掉一次点击。
+  // 首次加载后自动选中最近一个会话；显式新建时保持居中提问态。
   useEffect(() => {
-    if (activeId === null && conversations.length > 0) {
+    if (!isStartingConversation && activeId === null && conversations.length > 0) {
       setActiveId(conversations[0].id)
     }
-  }, [activeId, conversations])
+  }, [activeId, conversations, isStartingConversation])
 
   // 新消息进来时滚到底，行为与常见对话产品一致。
   useEffect(() => {
@@ -250,6 +260,7 @@ export default function CodeQaPage() {
     onSuccess: (created) => {
       setCreateOpen(false)
       createForm.resetFields()
+      setIsStartingConversation(false)
       setActiveId(created.id)
       queryClient.invalidateQueries({ queryKey: ['code-qa-conversations'] })
     },
@@ -270,6 +281,7 @@ export default function CodeQaPage() {
     mutationFn: deleteCodeQaConversation,
     onSuccess: () => {
       setActiveId(null)
+      setIsStartingConversation(true)
       queryClient.invalidateQueries({ queryKey: ['code-qa-conversations'] })
     },
     onError: (error) => message.error(describeCodeQaRpcError(error)),
@@ -277,7 +289,6 @@ export default function CodeQaPage() {
 
   const repositories = catalogQuery.data?.repositories ?? []
   const branches = catalogQuery.data?.branches ?? []
-  const skills = catalogQuery.data?.skills ?? []
 
   const draftCheck = useMemo(
     () => validateCodeQaQuestion({ question: draft, hasInFlightTurn: inFlight }),
@@ -293,95 +304,143 @@ export default function CodeQaPage() {
     askMutation.mutate({ conversationId: activeId, question: draft.trim() })
   }
 
+  const startNewConversation = () => {
+    setActiveId(null)
+    setDraft('')
+    setWelcomeDraft('')
+    setIsStartingConversation(true)
+  }
+
+  const selectConversation = (conversationId: string) => {
+    setIsStartingConversation(false)
+    setActiveId(conversationId)
+  }
+
+  /**
+   * 首屏先收集用户真正想问的问题，再让用户明确代码范围；不能把“未选仓库”的草稿
+   * 直接发给 Worker。创建成功后 draft 会保留在正常对话输入框中，等待用户确认发送。
+   */
+  const openConversationSetup = (question = welcomeDraft) => {
+    setDraft(question.trim())
+    setWelcomeDraft('')
+    setCreateOpen(true)
+  }
+
   return (
     <div className="code-qa-layout">
-      <aside className="code-qa-sidebar" aria-label="会话列表">
-        <Button
-          type="primary"
-          block
-          onClick={() => setCreateOpen(true)}
-          disabled={repositories.length === 0}
-        >
-          新建对话
-        </Button>
+      <aside className="code-qa-sidebar" aria-label="历史会话">
+        <div className="code-qa-sidebar-heading">
+          <Text className="code-qa-sidebar-title">历史会话</Text>
+          <Button
+            type="primary"
+            block
+            className="code-qa-new-conversation"
+            onClick={startNewConversation}
+            disabled={repositories.length === 0}
+          >
+            新建对话
+          </Button>
+        </div>
 
-        {listQuery.isLoading ? (
-          <div style={{ padding: 16, textAlign: 'center' }}>
-            <Spin size="small" />
-          </div>
-        ) : conversations.length === 0 ? (
-          <Empty
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="还没有对话"
-            style={{ marginTop: 24 }}
-          />
-        ) : (
-          <List
-            size="small"
-            dataSource={conversations}
-            renderItem={(item) => (
-              <List.Item
-                className={
-                  item.id === activeId ? 'code-qa-conv code-qa-conv-active' : 'code-qa-conv'
-                }
-                onClick={() => setActiveId(item.id)}
-                // 列表项可点，必须能用键盘操作。
-                role="button"
-                tabIndex={0}
-                aria-current={item.id === activeId}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault()
-                    setActiveId(item.id)
+        <div className="code-qa-sidebar-history">
+          {listQuery.isLoading ? (
+            <div style={{ padding: 16, textAlign: 'center' }}>
+              <Spin size="small" />
+            </div>
+          ) : conversations.length === 0 ? (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description="还没有对话"
+              style={{ marginTop: 24 }}
+            />
+          ) : (
+            <List
+              size="small"
+              dataSource={conversations}
+              renderItem={(item) => (
+                <List.Item
+                  className={
+                    item.id === activeId ? 'code-qa-conv code-qa-conv-active' : 'code-qa-conv'
                   }
-                }}
-              >
-                <Space direction="vertical" size={2} style={{ width: '100%' }}>
-                  <Text ellipsis style={{ fontWeight: item.id === activeId ? 600 : 400 }}>
-                    {item.title}
-                  </Text>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {/* 多仓库时只显示"N 个仓库"，列宽放不下全部名字。悬浮看完整清单。 */}
-                    {item.repositories.length === 1
-                      ? item.repositories[0]
-                      : `${item.repositories.length} 个仓库`}
-                    {' · '}
-                    {item.branch} · {item.turn_count} 问
-                  </Text>
-                </Space>
-              </List.Item>
-            )}
-          />
-        )}
+                  onClick={() => selectConversation(item.id)}
+                  // 列表项可点，必须能用键盘操作。
+                  role="button"
+                  tabIndex={0}
+                  aria-current={item.id === activeId}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      selectConversation(item.id)
+                    }
+                  }}
+                >
+                  <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                    <Text ellipsis style={{ fontWeight: item.id === activeId ? 600 : 400 }}>
+                      {item.title}
+                    </Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {/* 多仓库时只显示"N 个仓库"，列宽放不下全部名字。悬浮看完整清单。 */}
+                      {item.repositories.length === 1
+                        ? item.repositories[0]
+                        : `${item.repositories.length} 个仓库`}
+                      {' · '}
+                      {item.branch} · {item.turn_count} 问
+                    </Text>
+                  </Space>
+                </List.Item>
+              )}
+            />
+          )}
+        </div>
       </aside>
 
       <section className="code-qa-main" aria-label="对话">
-        {activeId === null ? (
-          <Card>
-            <Title level={4}>问问代码现在是怎么做的</Title>
-            <Paragraph type="secondary">
-              选一个仓库和分支新建对话，然后用自己的话提问。平台会拉取那个分支的真实代码，
-              让 AI 自己去翻代码回答你，并把它读过的文件列出来供你核对。
-            </Paragraph>
-            <Paragraph type="secondary" style={{ marginBottom: 8 }}>
-              适合问的问题，例如：
-            </Paragraph>
-            <ul style={{ color: 'rgba(0,0,0,0.45)' }}>
-              <li>工单转派之后，原受理人的待办会怎么处理？</li>
-              <li>现在的审批流一共有几种驳回场景，各自回到哪一步？</li>
-              <li>导出报表的字段是从哪几张表来的？</li>
-            </ul>
-            {skills.length > 0 ? (
-              <Paragraph type="secondary" style={{ marginTop: 16, marginBottom: 0 }}>
-                可参与回答的模块技能：
-                {skills.map((skill) => (
-                  <Tooltip key={skill.name} title={skill.description ?? undefined}>
-                    <Tag style={{ marginInlineStart: 4 }}>{skill.display_name ?? skill.name}</Tag>
-                  </Tooltip>
-                ))}
+        {isStartingConversation || activeId === null ? (
+          <div className="code-qa-welcome" aria-labelledby="code-qa-welcome-title">
+            <div className="code-qa-welcome-inner">
+              <Title id="code-qa-welcome-title" level={1} className="code-qa-welcome-title">
+                立即开启代码探索
+              </Title>
+              <Paragraph className="code-qa-welcome-description">
+                描述你想了解的功能或流程。选择代码范围后，AI 会基于真实代码检索回答，并保留可核对的文件依据。
               </Paragraph>
-            ) : null}
-          </Card>
+              <div className="code-qa-welcome-composer">
+                <Input.TextArea
+                  className="code-qa-welcome-input"
+                  value={welcomeDraft}
+                  onChange={(event) => setWelcomeDraft(event.target.value)}
+                  placeholder="描述你想了解的功能、流程或代码行为"
+                  autoSize={false}
+                  maxLength={CODE_QA_QUESTION_MAX_CHARS}
+                  aria-label="输入想了解的代码问题"
+                  onPressEnter={(event) => {
+                    if (!event.shiftKey) {
+                      event.preventDefault()
+                      openConversationSetup()
+                    }
+                  }}
+                />
+                <div className="code-qa-welcome-actions">
+                  <Text className="code-qa-welcome-hint">选择仓库和分支后开始提问 · Shift+Enter 换行</Text>
+                  <Button type="primary" className="code-qa-welcome-start" onClick={() => openConversationSetup()}>
+                    开始
+                  </Button>
+                </div>
+              </div>
+              <div className="code-qa-welcome-suggestions" aria-label="常见代码问题">
+                {WELCOME_QUESTION_SUGGESTIONS.map((question) => (
+                  <button
+                    key={question}
+                    className="code-qa-welcome-suggestion"
+                    type="button"
+                    onClick={() => openConversationSetup(question)}
+                  >
+                    {question}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
         ) : (
           <>
             <div className="code-qa-topbar">
