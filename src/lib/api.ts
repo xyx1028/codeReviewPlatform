@@ -405,6 +405,17 @@ export async function adminUpdateUserRole(userId: string, role: UserRole) {
 }
 
 /**
+ * 仅 ADMIN 可将仍待验证的邮箱标记为已验证。
+ *
+ * 邮箱状态、权限判定和审计均由数据库完成；客户端只传目标用户 ID。
+ */
+export async function adminConfirmUserEmail(userId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_confirm_user_email', { p_user_id: userId })
+  return unwrap<AdminUserListItem[]>({ data, error })
+}
+
+/**
  * 删除前的影响评估（只读）。
  *
  * 单独一个 RPC 而不是让前端自己查引用：判定规则必须只有一份，且必须在数据库侧 ——

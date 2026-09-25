@@ -19,6 +19,7 @@ import {
   Menu,
   Modal,
   Popover,
+  Popconfirm,
   Progress,
   Radio,
   Row,
@@ -47,6 +48,7 @@ import {
   adminGetUserDeletionImpact,
   adminListUsers,
   adminUpdateUserRole,
+  adminConfirmUserEmail,
   adminCreateModelConfig,
   adminDeleteModelConfig,
   adminListModelConfigs,
@@ -1106,6 +1108,23 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
     onError: (error) => message.error(error.message),
   })
 
+  const confirmEmailMutation = useMutation({
+    mutationFn: (userId: string) => adminConfirmUserEmail(userId),
+    onSuccess: () => {
+      message.success('邮箱已标记为已验证')
+      queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+    },
+    onError: (error) => {
+      if (error.message === 'EMAIL_ALREADY_CONFIRMED') {
+        message.warning('该邮箱已经验证，无需重复操作。')
+      } else if (error.message === 'USER_NOT_FOUND') {
+        message.error('账号不存在或已被删除。')
+      } else {
+        message.error(error.message)
+      }
+    },
+  })
+
   /**
    * 正在被评估删除的账号。
    *
@@ -1183,16 +1202,36 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
     { title: '创建时间', dataIndex: 'created_at', width: 200, render: (value) => new Date(value).toLocaleString() },
     {
       title: '操作',
-      width: 100,
+      width: 220,
       render: (_value, record) => (
-        <Button
-          danger
-          size="small"
-          loading={deleteMutation.isPending && deleteMutation.variables === record.id}
-          onClick={() => setDeleteTarget(record)}
-        >
-          删除
-        </Button>
+        <Space size="small">
+          {!record.email_confirmed_at ? (
+            <Popconfirm
+              title="确认标记该邮箱为已验证？"
+              description="仅当已核实邮箱确属该账号使用者时执行。此操作会记录管理员审计。"
+              okText="确认已验证"
+              cancelText="取消"
+              onConfirm={() => confirmEmailMutation.mutate(record.id)}
+            >
+              <Button
+                type="primary"
+                size="small"
+                disabled={confirmEmailMutation.isPending}
+                loading={confirmEmailMutation.isPending && confirmEmailMutation.variables === record.id}
+              >
+                标记已验证
+              </Button>
+            </Popconfirm>
+          ) : null}
+          <Button
+            danger
+            size="small"
+            loading={deleteMutation.isPending && deleteMutation.variables === record.id}
+            onClick={() => setDeleteTarget(record)}
+          >
+            删除
+          </Button>
+        </Space>
       ),
     },
   ]
@@ -1206,7 +1245,7 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
           type="warning"
           showIcon
           title={`有 ${pendingCount} 个账号还没验证邮箱`}
-          description="这些账号注册流程没走完，暂时登录不了。让本人在登录页点一次「重新发送验证邮件」即可；实在收不到邮件（企业邮箱网关拦截等）再去 Supabase 后台手动确认。"
+          description="这些账号暂时无法登录。优先让本人在登录页重新发送验证邮件；确认邮件确实无法送达且已核实归属时，管理员可在该账号操作列手动标记为已验证。"
         />
       ) : null}
       <Card>
