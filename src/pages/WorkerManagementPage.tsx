@@ -1,4 +1,5 @@
-import { Alert, Card, Empty, Space, Table, Tag, Typography } from 'antd'
+import { ReloadOutlined } from '@ant-design/icons'
+import { Alert, Button, Card, Empty, Space, Table, Tag, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
@@ -252,7 +253,20 @@ export function WorkerManagementPage({ isAdmin }: { isAdmin: boolean }) {
         />
       ) : null}
 
-      <Card title="Worker 列表">
+      <Card
+        title="Worker 列表"
+        extra={(
+          <Button
+            icon={<ReloadOutlined />}
+            loading={workersQuery.isFetching || recoveryLeasesQuery.isFetching}
+            onClick={() => {
+              void Promise.all([workersQuery.refetch(), recoveryLeasesQuery.refetch()])
+            }}
+          >
+            刷新
+          </Button>
+        )}
+      >
         <Table<AnalysisWorkerDetail>
           rowKey="worker_id"
           loading={workersQuery.isLoading}
