@@ -16,17 +16,18 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { DeleteOutlined, EditOutlined, MoreOutlined, PushpinOutlined } from '@ant-design/icons'
 import {
   Alert,
   App as AntApp,
   Button,
   Collapse,
+  Dropdown,
   Empty,
   Form,
   Input,
   List,
   Modal,
-  Popconfirm,
   Select,
   Space,
   Spin,
@@ -44,7 +45,9 @@ import {
   getCodeQaConversation,
   listCodeQaConversations,
   listEnabledModelConfigs,
+  renameCodeQaConversation,
   requestCodeQaTurn,
+  setCodeQaConversationPinned,
 } from '../lib/api'
 import {
   CODE_QA_QUESTION_MAX_CHARS,
@@ -53,11 +56,12 @@ import {
   describeCodeQaStage,
   hasInFlightTurn,
   isCodeQaTurnTerminal,
+  partitionCodeQaConversations,
   shouldWarnContextReset,
   summarizeCodeQaEvidence,
   validateCodeQaQuestion,
 } from '../lib/code-qa'
-import type { CodeQaTurn, DefaultBranch } from '../types'
+import type { CodeQaConversationSummary, CodeQaTurn, DefaultBranch } from '../types'
 
 const { Text, Paragraph, Title } = Typography
 
@@ -214,7 +218,7 @@ function MessageBubbles({ turn }: { turn: CodeQaTurn }) {
 }
 
 export default function CodeQaPage() {
-  const { message } = AntApp.useApp()
+  const { message, modal } = AntApp.useApp()
   const queryClient = useQueryClient()
   const [activeId, setActiveId] = useState<string | null>(null)
   // 产品页默认从居中新建会话开始；历史会话只能由用户主动选择。
@@ -222,6 +226,8 @@ export default function CodeQaPage() {
   const [draft, setDraft] = useState('')
   const [welcomeDraft, setWelcomeDraft] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
+  const [renameTarget, setRenameTarget] = useState<CodeQaConversationSummary | null>(null)
+  const [renameTitle, setRenameTitle] = useState('')
   const [createForm] = Form.useForm<{
     repositories: string[]
     branch: DefaultBranch
@@ -249,6 +255,7 @@ export default function CodeQaPage() {
   })
 
   const conversations = listQuery.data ?? []
+  const { pinned: pinnedConversations, recent: recentConversations } = partitionCodeQaConversations(conversations)
   const detail = detailQuery.data
   const turns = detail?.turns ?? []
   const inFlight = hasInFlightTurn(turns)
@@ -287,11 +294,36 @@ export default function CodeQaPage() {
     onError: (error) => message.error(describeCodeQaRpcError(error)),
   })
 
+  const renameMutation = useMutation({
+    mutationFn: (input: { conversationId: string; title: string }) => renameCodeQaConversation(input),
+    onSuccess: (updated) => {
+      if (activeId === updated.id) queryClient.invalidateQueries({ queryKey: ['code-qa-conversation', updated.id] })
+      queryClient.invalidateQueries({ queryKey: ['code-qa-conversations'] })
+      message.success('对话已重命名')
+      setRenameTarget(null)
+      setRenameTitle('')
+    },
+    onError: (error) => message.error(describeCodeQaRpcError(error)),
+  })
+
+  const pinMutation = useMutation({
+    mutationFn: (input: { conversationId: string; isPinned: boolean }) =>
+      setCodeQaConversationPinned(input),
+    onSuccess: (updated) => {
+      if (activeId === updated.id) queryClient.invalidateQueries({ queryKey: ['code-qa-conversation', updated.id] })
+      queryClient.invalidateQueries({ queryKey: ['code-qa-conversations'] })
+      message.success(updated.is_pinned ? '对话已置顶' : '已取消置顶')
+    },
+    onError: (error) => message.error(describeCodeQaRpcError(error)),
+  })
+
   const deleteMutation = useMutation({
     mutationFn: deleteCodeQaConversation,
-    onSuccess: () => {
-      setActiveId(null)
-      setIsStartingConversation(true)
+    onSuccess: (_result, deletedId) => {
+      if (activeId === deletedId) {
+        setActiveId(null)
+        setIsStartingConversation(true)
+      }
       queryClient.invalidateQueries({ queryKey: ['code-qa-conversations'] })
     },
     onError: (error) => message.error(describeCodeQaRpcError(error)),
@@ -338,6 +370,90 @@ export default function CodeQaPage() {
     setCreateOpen(true)
   }
 
+  const renderConversationGroup = (title: string, items: CodeQaConversationSummary[]) => (
+    <section className="code-qa-conversation-group" aria-label={title}>
+      <Text className="code-qa-conversation-group__title">{title}</Text>
+      <List
+        size="small"
+        dataSource={items}
+        renderItem={(item) => (
+          <List.Item
+            className={
+              item.id === activeId ? 'code-qa-conv code-qa-conv-active' : 'code-qa-conv'
+            }
+            onClick={() => selectConversation(item.id)}
+            role="button"
+            tabIndex={0}
+            aria-current={item.id === activeId}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault()
+                selectConversation(item.id)
+              }
+            }}
+          >
+            <div className="code-qa-conv__content">
+              <Text
+                className="code-qa-conv-title"
+                ellipsis
+                style={{ fontWeight: item.id === activeId ? 600 : 400 }}
+              >
+                {item.title}
+              </Text>
+              <Dropdown
+                trigger={['click']}
+                menu={{
+                  items: [
+                    {
+                      key: 'pin',
+                      icon: <PushpinOutlined />,
+                      label: item.is_pinned ? '取消置顶' : '置顶',
+                      disabled: pinMutation.isPending,
+                    },
+                    { type: 'divider' },
+                    { key: 'rename', icon: <EditOutlined />, label: '重命名' },
+                    { type: 'divider' },
+                    { key: 'delete', danger: true, icon: <DeleteOutlined />, label: '删除' },
+                  ],
+                  onClick: ({ key, domEvent }) => {
+                    domEvent.stopPropagation()
+                    if (key === 'pin') {
+                      pinMutation.mutate({ conversationId: item.id, isPinned: !item.is_pinned })
+                      return
+                    }
+                    if (key === 'rename') {
+                      setRenameTarget(item)
+                      setRenameTitle(item.title)
+                      return
+                    }
+                    modal.confirm({
+                      title: `删除“${item.title}”？`,
+                      content: '删除后历史问答不可恢复。',
+                      okText: '删除',
+                      cancelText: '取消',
+                      okButtonProps: { danger: true },
+                      onOk: () => deleteMutation.mutateAsync(item.id),
+                    })
+                  },
+                }}
+              >
+                <Button
+                  className="code-qa-conv__more"
+                  type="text"
+                  size="small"
+                  icon={<MoreOutlined />}
+                  aria-label={`管理对话：${item.title}`}
+                  onClick={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => event.stopPropagation()}
+                />
+              </Dropdown>
+            </div>
+          </List.Item>
+        )}
+      />
+    </section>
+  )
+
   return (
     <div className="code-qa-layout">
       <aside className="code-qa-sidebar" aria-label="历史会话">
@@ -366,36 +482,14 @@ export default function CodeQaPage() {
               style={{ marginTop: 24 }}
             />
           ) : (
-            <List
-              size="small"
-              dataSource={conversations}
-              renderItem={(item) => (
-                <List.Item
-                  className={
-                    item.id === activeId ? 'code-qa-conv code-qa-conv-active' : 'code-qa-conv'
-                  }
-                  onClick={() => selectConversation(item.id)}
-                  // 列表项可点，必须能用键盘操作。
-                  role="button"
-                  tabIndex={0}
-                  aria-current={item.id === activeId}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault()
-                      selectConversation(item.id)
-                    }
-                  }}
-                >
-                  <Text
-                    className="code-qa-conv-title"
-                    ellipsis
-                    style={{ fontWeight: item.id === activeId ? 600 : 400 }}
-                  >
-                    {item.title}
-                  </Text>
-                </List.Item>
-              )}
-            />
+            <>
+              {pinnedConversations.length > 0
+                ? renderConversationGroup('置顶', pinnedConversations)
+                : null}
+              {recentConversations.length > 0
+                ? renderConversationGroup('默认', recentConversations)
+                : null}
+            </>
           )}
         </div>
       </aside>
@@ -486,25 +580,6 @@ export default function CodeQaPage() {
                   </div>
                 ) : null}
               </div>
-              <Popconfirm
-                title="删除这个对话？"
-                description="删除后历史问答不可恢复。"
-                okText="删除"
-                cancelText="取消"
-                okButtonProps={{ danger: true }}
-                onConfirm={() => deleteMutation.mutate(activeId)}
-              >
-                <Button
-                  className="code-qa-delete-button"
-                  size="small"
-                  danger
-                  type="text"
-                  disabled={inFlight}
-                  loading={deleteMutation.isPending}
-                >
-                  删除
-                </Button>
-              </Popconfirm>
             </div>
 
             {shouldWarnContextReset(turns) ? (
@@ -558,21 +633,52 @@ export default function CodeQaPage() {
                 <Text className="code-qa-composer-hint" type="secondary">
                   Enter 发送 · Shift+Enter 换行
                 </Text>
-                <Button
+                <button
+                  type="button"
                   aria-label="发送问题"
+                  title="发送问题"
                   className="code-qa-send-button"
-                  type="primary"
                   onClick={submitQuestion}
-                  loading={askMutation.isPending}
                   disabled={inFlight || draft.trim() === ''}
                 >
-                  发送
-                </Button>
+                  {askMutation.isPending ? <Spin size="small" /> : <span className="code-qa-send-icon" aria-hidden="true" />}
+                </button>
               </div>
             </div>
           </>
         )}
       </section>
+
+      <Modal
+        title="重命名对话"
+        open={renameTarget !== null}
+        okText="保存"
+        cancelText="取消"
+        okButtonProps={{ disabled: renameTitle.trim() === '' }}
+        confirmLoading={renameMutation.isPending}
+        onCancel={() => {
+          setRenameTarget(null)
+          setRenameTitle('')
+        }}
+        onOk={() => {
+          if (renameTarget === null || renameTitle.trim() === '') return
+          renameMutation.mutate({ conversationId: renameTarget.id, title: renameTitle.trim() })
+        }}
+        destroyOnHidden
+      >
+        <Input
+          autoFocus
+          maxLength={200}
+          value={renameTitle}
+          placeholder="输入对话名称"
+          onChange={(event) => setRenameTitle(event.target.value)}
+          onPressEnter={() => {
+            if (renameTarget !== null && renameTitle.trim() !== '') {
+              renameMutation.mutate({ conversationId: renameTarget.id, title: renameTitle.trim() })
+            }
+          }}
+        />
+      </Modal>
 
       <Modal
         title="新建对话"

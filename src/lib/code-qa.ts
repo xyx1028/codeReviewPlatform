@@ -8,6 +8,7 @@
 
 import type {
   CodeQaConversationDetail,
+  CodeQaConversationSummary,
   CodeQaEvidence,
   CodeQaStage,
   CodeQaTurn,
@@ -109,6 +110,24 @@ export function isCodeQaTurnTerminal(status: CodeQaTurnStatus): boolean {
 
 export function hasInFlightTurn(turns: readonly CodeQaTurn[]): boolean {
   return turns.some((turn) => !isCodeQaTurnTerminal(turn.status))
+}
+
+/**
+ * 依服务端持久化的置顶事实拆分侧栏分组。
+ *
+ * 不在这里排序：`list_code_qa_conversations` 已以 pinned_at 和最近活动时间确定顺序，
+ * 再在浏览器按标题或本地时间排序会让不同设备看到不同结果。
+ */
+export function partitionCodeQaConversations(
+  conversations: readonly CodeQaConversationSummary[],
+): { pinned: CodeQaConversationSummary[]; recent: CodeQaConversationSummary[] } {
+  const pinned: CodeQaConversationSummary[] = []
+  const recent: CodeQaConversationSummary[] = []
+  for (const conversation of conversations) {
+    if (conversation.is_pinned) pinned.push(conversation)
+    else recent.push(conversation)
+  }
+  return { pinned, recent }
 }
 
 /**

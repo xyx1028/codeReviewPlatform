@@ -1569,6 +1569,8 @@ export interface CodeQaConversationSummary {
   selected_model_config_id: string | null
   /** V1.27：选择当时冻结的安全展示名，不含端点或密钥。 */
   selected_model_display_name: string | null
+  /** V1.30：由 owner 持久化的置顶状态；置顶时间不暴露给浏览器。 */
+  is_pinned: boolean
   /** 是否已经有 DSH 会话可供续跑。真正的 session id 不出给浏览器。 */
   has_session: boolean
   turn_count: number

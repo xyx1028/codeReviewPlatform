@@ -2125,6 +2125,19 @@ export async function deleteCodeQaConversation(conversationId: string) {
   return unwrap<boolean>({ data, error })
 }
 
+/** 置顶状态仅由服务端按会话 owner 持久化；浏览器不能直接更新会话表。 */
+export async function setCodeQaConversationPinned(input: {
+  conversationId: string
+  isPinned: boolean
+}) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('set_code_qa_conversation_pinned', {
+    p_conversation_id: input.conversationId,
+    p_is_pinned: input.isPinned,
+  })
+  return unwrap<CodeQaConversationSummary>({ data, error })
+}
+
 /**
  * 提一个问题。
  *

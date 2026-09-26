@@ -3873,7 +3873,7 @@ a.dashboard-distribution-item:focus-visible {
 
 .app-sider--product ~ .app-content .code-qa-sidebar,
 .app-sider--product ~ .app-content .code-qa-layout--welcome .code-qa-sidebar {
-  top: calc(50vh + 32px);
+  top: 250px;
 }
 
 @media (max-width: 900px) {
@@ -4426,9 +4426,12 @@ a.dashboard-distribution-item:focus-visible {
 
 .app-shell .app-sider--product ~ .app-content .code-qa-sidebar,
 .app-shell .app-sider--product ~ .app-content .code-qa-layout--welcome .code-qa-sidebar {
+  left: 0;
+  right: auto;
   width: 264px;
+  box-sizing: border-box;
   height: calc(50dvh - 92px);
-  bottom: 60px;
+  bottom: 36px;
   background: #f2f2f5;
   border-color: #e0e0e6;
 }
@@ -4625,8 +4628,8 @@ a.dashboard-distribution-item:focus-visible {
 /* 历史对话只保留一行标题：悬浮与选中态精确贴合文字行，不再形成两行元数据卡片。 */
 .app-shell .app-sider--product ~ .app-content .code-qa-sidebar-history .ant-list-item.code-qa-conv {
   display: flex;
-  min-height: 34px;
-  height: 34px;
+  min-height: 38px;
+  height: 38px;
   align-items: center;
   margin: 1px 0;
   padding: 0 10px !important;
@@ -4637,8 +4640,8 @@ a.dashboard-distribution-item:focus-visible {
   width: 100%;
   min-width: 0;
   color: #3b3b44;
-  font-size: 13px;
-  line-height: 34px;
+  font-size: 15px;
+  line-height: 38px;
 }
 
 
@@ -4797,7 +4800,7 @@ a.dashboard-distribution-item:focus-visible {
 
 .app-shell .code-qa-composer {
   box-sizing: border-box;
-  width: min(100%, 840px);
+  width: min(100%, 920px);
   align-self: center;
   margin: 12px auto 8px;
   padding: 9px 12px 8px;
@@ -4840,34 +4843,71 @@ a.dashboard-distribution-item:focus-visible {
   font-size: 11px;
 }
 
-.code-qa-send-button.ant-btn {
+.code-qa-send-button {
   display: inline-grid;
+  flex: 0 0 32px;
   width: 32px;
   height: 32px;
   min-width: 32px;
   padding: 0;
-  color: transparent;
+  color: #ffffff;
+  line-height: 1;
+  background: #5364ff;
+  border: 1px solid #5364ff;
   border-radius: 50%;
   box-shadow: none;
+  cursor: pointer;
+  appearance: none;
+  position: relative;
+  overflow: hidden;
   place-items: center;
 }
 
-.code-qa-send-button.ant-btn::after {
-  color: #ffffff;
-  font-size: 18px;
-  font-weight: 600;
-  line-height: 1;
-  content: '↑';
+.code-qa-send-icon {
+  position: absolute;
+  inset: 8px 9px;
+  width: 14px;
+  height: 14px;
 }
 
-.code-qa-send-button.ant-btn:disabled {
-  color: transparent;
+.code-qa-send-icon::before {
+  position: absolute;
+  top: 0;
+  left: 2px;
+  width: 0;
+  height: 0;
+  border-right: 5px solid transparent;
+  border-bottom: 7px solid #ffffff;
+  border-left: 5px solid transparent;
+  content: '';
+}
+
+.code-qa-send-icon::after {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 2px;
+  height: 8px;
+  background: #ffffff;
+  border-radius: 999px;
+  content: '';
+}
+
+.code-qa-send-button:hover:not(:disabled) {
+  background: #4353e7;
+  border-color: #4353e7;
+}
+
+.code-qa-send-button:focus-visible {
+  outline: 2px solid #5364ff;
+  outline-offset: 2px;
+}
+
+.code-qa-send-button:disabled {
+  color: #a9a9b1;
   background: #e8e8ec;
   border-color: #e8e8ec;
-}
-
-.code-qa-send-button.ant-btn:disabled::after {
-  color: #a9a9b1;
+  cursor: not-allowed;
 }
 
 @media (max-width: 900px) {

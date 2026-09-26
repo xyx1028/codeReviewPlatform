@@ -15,6 +15,7 @@ import {
   describeCodeQaStage,
   hasInFlightTurn,
   isCodeQaTurnTerminal,
+  partitionCodeQaConversations,
   shouldWarnContextReset,
   summarizeCodeQaEvidence,
   validateCodeQaQuestion,
@@ -48,6 +49,7 @@ function detail(turns: CodeQaTurn[]): CodeQaConversationDetail {
     commit_shas: { 'kdmanage-backend': 'a'.repeat(40) },
     selected_model_config_id: 'model-1',
     selected_model_display_name: 'deepseek',
+    is_pinned: false,
     has_session: true,
     created_at: '2026-09-24T10:00:00Z',
     updated_at: '2026-09-24T10:00:00Z',
@@ -247,5 +249,21 @@ describe('shouldWarnContextReset', () => {
       turn({ id: 't2', status: 'RUNNING', evidence: null }),
     ]
     expect(shouldWarnContextReset(turns)).toBe(false)
+  })
+})
+
+describe('partitionCodeQaConversations', () => {
+  it('按持久化置顶状态拆分并保持服务端给定的组内顺序', () => {
+    const conversations = [
+      { ...detail([]), id: 'pinned-newer', is_pinned: true, turn_count: 0 },
+      { ...detail([]), id: 'pinned-older', is_pinned: true, turn_count: 0 },
+      { ...detail([]), id: 'recent-newer', is_pinned: false, turn_count: 0 },
+      { ...detail([]), id: 'recent-older', is_pinned: false, turn_count: 0 },
+    ]
+
+    const groups = partitionCodeQaConversations(conversations)
+
+    expect(groups.pinned.map((conversation) => conversation.id)).toEqual(['pinned-newer', 'pinned-older'])
+    expect(groups.recent.map((conversation) => conversation.id)).toEqual(['recent-newer', 'recent-older'])
   })
 })
