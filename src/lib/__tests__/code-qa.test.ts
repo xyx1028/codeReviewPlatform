@@ -46,6 +46,8 @@ function detail(turns: CodeQaTurn[]): CodeQaConversationDetail {
     repositories: ['kdmanage-backend'],
     branch: 'release',
     commit_shas: { 'kdmanage-backend': 'a'.repeat(40) },
+    selected_model_config_id: 'model-1',
+    selected_model_display_name: 'deepseek',
     has_session: true,
     created_at: '2026-09-24T10:00:00Z',
     updated_at: '2026-09-24T10:00:00Z',
@@ -77,9 +79,11 @@ describe('describeCodeQaError', () => {
     const noModel = describeCodeQaError('MODEL_CONFIG_NOT_FOUND', null)
     const proxyDown = describeCodeQaError('MODEL_PROXY_UNREACHABLE', null)
     const snapshot = describeCodeQaError('CODE_QA_SNAPSHOT_FAILED', null)
-    expect(noModel).toContain('管理员')
+    const auth = describeCodeQaError('MODEL_AUTH_FAILED', null)
+    expect(noModel).toContain('新建对话')
     expect(proxyDown).toContain('代理')
     expect(snapshot).toContain('分支')
+    expect(auth).toContain('API Key')
     // 三种处置必须互不相同，否则用户无从判断该做什么。
     expect(new Set([noModel, proxyDown, snapshot]).size).toBe(3)
   })

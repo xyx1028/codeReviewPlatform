@@ -43,8 +43,11 @@ export function describeCodeQaStage(stage: CodeQaStage): string {
  * 找管理员配模型、连内网、还是重开会话。把它们混成一句话，用户唯一能做的就是无意义地重试。
  */
 const ERROR_HINTS: Record<string, string> = {
-  MODEL_CONFIG_NOT_FOUND: '平台还没有启用任何模型配置，请联系管理员在「模型管理」里配置。',
-  MODEL_SECRET_MISSING: '模型配置缺少可用的 API Key，请联系管理员补齐。',
+  MODEL_CONFIG_REQUIRED: '新建对话时必须先选择一个模型。',
+  MODEL_CONFIG_NOT_FOUND: '所选模型已不存在，请新建对话后重新选择模型。',
+  MODEL_CONFIG_DISABLED: '所选模型已停用，请新建对话后选择其他启用模型。',
+  MODEL_SECRET_MISSING: '所选模型配置缺少可用的 API Key，请联系管理员补齐。',
+  MODEL_AUTH_FAILED: '所选模型的 API Key 被模型服务拒绝，请联系管理员在「模型管理」中检查密钥并重新测试连接。',
   MODEL_TIMEOUT: '模型响应超时。问题较大时可以拆成几个小问题分别问。',
   MODEL_PROXY_UNREACHABLE: '模型要经宿主机代理访问，但代理当前不可用，请联系管理员。',
   MODEL_NETWORK_ERROR: '连不上模型端点，请确认运行环境已接入公司网络或 VPN。',

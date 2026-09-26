@@ -224,9 +224,10 @@ describe('classifyCodeQaError', () => {
     expect(classifyCodeQaError(new Error('TASK_LEASE_LOST'))).toBe('TASK_LEASE_LOST')
   })
 
-  it('模型配置类错误原样透出（要找管理员，不是重试）', () => {
+  it('模型配置和鉴权错误原样透出（要找管理员，不是重试）', () => {
     expect(classifyCodeQaError(new Error('MODEL_SECRET_MISSING'))).toBe('MODEL_SECRET_MISSING')
     expect(classifyCodeQaError(new Error('MODEL_CONFIG_NOT_FOUND'))).toBe('MODEL_CONFIG_NOT_FOUND')
+    expect(classifyCodeQaError(new Error('MODEL_AUTH_FAILED: invalid_api_key'))).toBe('MODEL_AUTH_FAILED')
   })
 
   it('只读工具面被破坏时有独立错误码', () => {

@@ -2079,12 +2079,15 @@ export async function getCodeQaCatalog() {
 export async function createCodeQaConversation(input: {
   repositories: string[]
   branch: DefaultBranch
+  /** 新建会话必须单选一个启用且密钥可用的模型；服务端会再次校验。 */
+  modelConfigId: string
   title?: string | null
 }) {
   const client = requireSupabase()
   const { data, error } = await client.rpc('create_code_qa_conversation', {
     p_repositories: input.repositories,
     p_branch: input.branch,
+    p_model_config_id: input.modelConfigId,
     p_title: input.title ?? null,
   })
   return unwrap<CodeQaConversationSummary>({ data, error })
@@ -2125,8 +2128,8 @@ export async function deleteCodeQaConversation(conversationId: string) {
 /**
  * 提一个问题。
  *
- * 模型配置在这一刻被冻结进轮次行；没有启用模型或缺 Key 时**入队即失败**（抛错），
- * 不会留下一条永远排队的轮次。
+ * 新会话的模型在创建时已锁定；每轮只从该会话模型冻结调用快照。所选模型停用或缺 Key 时
+ * 入队即失败（抛错），不会偷偷回退到其它模型或留下永远排队的轮次。
  */
 export async function requestCodeQaTurn(input: { conversationId: string; question: string }) {
   const client = requireSupabase()
@@ -2151,11 +2154,15 @@ export function describeCodeQaRpcError(error: unknown): string {
     return '选择的仓库不合法：至少一个、不能重复，且必须在平台支持的仓库列表内。'
   }
   if (raw.includes('CODE_QA_TITLE_REQUIRED')) return '标题不能为空。'
+  if (raw.includes('MODEL_CONFIG_REQUIRED')) return '请在新建对话时选择一个模型。'
   if (raw.includes('MODEL_CONFIG_NOT_FOUND')) {
-    return '平台还没有启用任何模型配置，请联系管理员在「模型管理」里配置后再提问。'
+    return '所选模型不存在，请刷新后重新选择。'
+  }
+  if (raw.includes('MODEL_CONFIG_DISABLED')) {
+    return '所选模型已停用，请选择其他启用模型。'
   }
   if (raw.includes('MODEL_SECRET_MISSING')) {
-    return '模型配置缺少可用的 API Key，请联系管理员补齐。'
+    return '所选模型配置缺少可用的 API Key，请联系管理员补齐。'
   }
   if (raw.includes('AUTH_REQUIRED')) return '登录状态已失效，请重新登录。'
   return raw

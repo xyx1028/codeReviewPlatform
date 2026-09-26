@@ -43,6 +43,7 @@ import {
   getCodeQaCatalog,
   getCodeQaConversation,
   listCodeQaConversations,
+  listEnabledModelConfigs,
   requestCodeQaTurn,
 } from '../lib/api'
 import {
@@ -221,10 +222,19 @@ export default function CodeQaPage() {
   const [draft, setDraft] = useState('')
   const [welcomeDraft, setWelcomeDraft] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
-  const [createForm] = Form.useForm<{ repositories: string[]; branch: DefaultBranch }>()
+  const [createForm] = Form.useForm<{
+    repositories: string[]
+    branch: DefaultBranch
+    modelConfigId: string
+  }>()
   const streamEndRef = useRef<HTMLDivElement | null>(null)
 
   const catalogQuery = useQuery({ queryKey: ['code-qa-catalog'], queryFn: getCodeQaCatalog })
+  // 只返回启用且已配置密钥的安全摘要；服务端创建 RPC 仍会再次校验，不能信任浏览器。
+  const modelsQuery = useQuery({
+    queryKey: ['enabled-model-configs'],
+    queryFn: listEnabledModelConfigs,
+  })
   const listQuery = useQuery({
     queryKey: ['code-qa-conversations'],
     queryFn: listCodeQaConversations,
@@ -289,6 +299,8 @@ export default function CodeQaPage() {
 
   const repositories = catalogQuery.data?.repositories ?? []
   const branches = catalogQuery.data?.branches ?? []
+  const models = modelsQuery.data ?? []
+  const hasNoSelectableModel = modelsQuery.isSuccess && models.length === 0
 
   const draftCheck = useMemo(
     () => validateCodeQaQuestion({ question: draft, hasInFlightTurn: inFlight }),
@@ -336,7 +348,7 @@ export default function CodeQaPage() {
             block
             className="code-qa-new-conversation"
             onClick={startNewConversation}
-            disabled={repositories.length === 0}
+            disabled={repositories.length === 0 || hasNoSelectableModel}
           >
             新建对话
           </Button>
@@ -467,6 +479,9 @@ export default function CodeQaPage() {
                       )
                     })}
                     <Tag color="geekblue">{detail.branch}</Tag>
+                    {detail.selected_model_display_name ? (
+                      <Tag color="cyan">模型：{detail.selected_model_display_name}</Tag>
+                    ) : null}
                   </>
                 ) : null}
               </Space>
@@ -559,11 +574,15 @@ export default function CodeQaPage() {
         destroyOnHidden
       >
         <Alert
-          type="info"
+          type={hasNoSelectableModel ? 'error' : 'info'}
           showIcon
           style={{ marginBottom: 16 }}
-          message="仓库和分支选定后不能再改"
-          description="可以一次选多个仓库（比如前端 + 后端），适合问跨端联动的问题。一个对话固定看这些仓库的同一版代码，这样追问时引用的文件才不会错位。要换仓库或看最新代码，新建一个对话。"
+          message={hasNoSelectableModel ? '没有可用于问答的模型' : '仓库、分支和模型选定后不能再改'}
+          description={
+            hasNoSelectableModel
+              ? '请联系管理员在「模型管理」启用模型并配置有效 API Key。'
+              : '可以一次选多个仓库（比如前端 + 后端），适合问跨端联动的问题。一个对话固定看这些仓库的同一版代码，并固定使用下方选择的一个模型；要换仓库、看最新代码或换模型，请新建一个对话。'
+          }
         />
         <Form
           form={createForm}
@@ -571,6 +590,22 @@ export default function CodeQaPage() {
           initialValues={{ branch: 'release' }}
           onFinish={(values) => createMutation.mutate(values)}
         >
+          <Form.Item
+            name="modelConfigId"
+            label="问答模型（单选）"
+            rules={[{ required: true, message: '请选择一个问答模型' }]}
+            extra="本会话后续所有问题都会使用此模型；如需换模型，请新建对话。"
+          >
+            <Select
+              placeholder="选择一个用于本会话的模型"
+              loading={modelsQuery.isLoading}
+              disabled={hasNoSelectableModel}
+              options={models.map((model) => ({
+                value: model.id,
+                label: model.display_name,
+              }))}
+            />
+          </Form.Item>
           <Form.Item
             name="repositories"
             label="仓库（可多选）"

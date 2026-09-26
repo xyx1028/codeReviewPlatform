@@ -169,6 +169,7 @@ export function classifyCodeQaError(error: unknown): string {
     'TASK_LEASE_LOST',
     'MODEL_SECRET_MISSING',
     'MODEL_CONFIG_NOT_FOUND',
+    'MODEL_AUTH_FAILED',
   ]) {
     if (message.includes(known)) return known
   }
