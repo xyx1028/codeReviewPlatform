@@ -10,16 +10,15 @@
  * 会就地弹出真实的取数错误（带接口地址与「重试」），那比一句永远挂在上面的提醒更准确 ——
  * 去掉它不会让失败变得沉默。
  */
-import { Space, Typography } from 'antd'
+import { Space } from 'antd'
+import { SidebarPageTitle } from '../components/SidebarPageTitle'
 import { LinkyStoryPicker } from '../components/linky/LinkyStoryPicker'
-
-const { Title } = Typography
 
 export function StoryBoardPage() {
   return (
     <Space direction="vertical" size="large" className="page-stack">
-      <Title level={3}>用户故事</Title>
-      <LinkyStoryPicker />
+      <SidebarPageTitle title="用户故事" />
+      <LinkyStoryPicker frameless />
     </Space>
   )
 }

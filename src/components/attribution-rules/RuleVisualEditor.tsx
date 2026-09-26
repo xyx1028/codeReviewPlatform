@@ -82,6 +82,7 @@ function RuleReadOnlyList({
       pagination={{
         pageSize: 10,
         showSizeChanger: true,
+        pageSizeOptions: [10, 20, 50, 100],
         showTotal: (total) => `共 ${String(total)} 条`,
         align: 'end',
       }}

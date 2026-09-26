@@ -1,8 +1,9 @@
-import { Alert, Card, Col, Empty, Row, Space, Statistic, Table, Tag, Typography } from 'antd'
+import { Alert, Card, Empty, Space, Table, Tag, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { adminListAnalysisWorkers, adminListRecoveryStoryLeases } from '../lib/api'
+import { SidebarPageTitle } from '../components/SidebarPageTitle'
 import type {
   AnalysisWorkerAssignment,
   AnalysisWorkerDetail,
@@ -10,7 +11,7 @@ import type {
   AnalysisRecoveryLease,
 } from '../types'
 
-const { Title, Text } = Typography
+const { Text } = Typography
 
 const phaseMeta: Record<AnalysisWorkerPhase, { label: string; color: string }> = {
   PREPARING: { label: '代码准备', color: 'cyan' },
@@ -87,16 +88,16 @@ export function WorkerManagementPage({ isAdmin }: { isAdmin: boolean }) {
     queryKey: ['admin-analysis-workers'],
     enabled: isAdmin,
     queryFn: adminListAnalysisWorkers,
-    refetchInterval: 5000,
-    refetchIntervalInBackground: false,
+    refetchOnReconnect: false,
+    refetchOnWindowFocus: false,
     staleTime: 3000,
   })
   const recoveryLeasesQuery = useQuery({
     queryKey: ['admin-analysis-recovery-leases'],
     enabled: isAdmin,
     queryFn: adminListRecoveryStoryLeases,
-    refetchInterval: 5000,
-    refetchIntervalInBackground: false,
+    refetchOnReconnect: false,
+    refetchOnWindowFocus: false,
     staleTime: 3000,
   })
 
@@ -188,25 +189,32 @@ export function WorkerManagementPage({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <Space direction="vertical" size="large" className="page-stack">
-      <div className="page-title">
-        <Title level={2}>后台任务监控</Title>
-        <Tag color="blue">每 5 秒刷新</Tag>
-      </div>
+      <SidebarPageTitle title="后台任务监控" />
 
-      <Row gutter={[16, 16]}>
-        <Col xs={12} lg={4}><Card><Statistic title="在线 Worker" value={overview?.online_count ?? 0} /></Card></Col>
-        <Col xs={12} lg={4}><Card><Statistic title="工作中" value={activeWorkerCount} /></Card></Col>
-        <Col xs={12} lg={4}><Card><Statistic title="待恢复租约" value={recoveringLeaseTotal} /></Card></Col>
-        <Col xs={12} lg={4}><Card><Statistic title="空闲" value={Math.max(0, idleWorkerCount)} /></Card></Col>
-        <Col xs={12} lg={4}>
-          <Card>
-            <Statistic
-              title="需求槽位"
-              value={overview ? `${overview.reported_current_tasks} / ${overview.total_slots}` : '0 / 0'}
-            />
-          </Card>
-        </Col>
-      </Row>
+      <section className="worker-summary" aria-label="Worker 运行概览">
+        <div className="worker-summary__item worker-summary__item--online">
+          <span className="worker-summary__label">在线 Worker</span>
+          <strong className="worker-summary__value">{overview?.online_count ?? 0}</strong>
+        </div>
+        <div className="worker-summary__item worker-summary__item--active">
+          <span className="worker-summary__label">工作中</span>
+          <strong className="worker-summary__value">{activeWorkerCount}</strong>
+        </div>
+        <div className="worker-summary__item worker-summary__item--recovery">
+          <span className="worker-summary__label">待恢复租约</span>
+          <strong className="worker-summary__value">{recoveringLeaseTotal}</strong>
+        </div>
+        <div className="worker-summary__item worker-summary__item--idle">
+          <span className="worker-summary__label">空闲</span>
+          <strong className="worker-summary__value">{Math.max(0, idleWorkerCount)}</strong>
+        </div>
+        <div className="worker-summary__item worker-summary__item--capacity">
+          <span className="worker-summary__label">需求槽位</span>
+          <strong className="worker-summary__value">
+            {overview ? `${overview.reported_current_tasks} / ${overview.total_slots}` : '0 / 0'}
+          </strong>
+        </div>
+      </section>
 
       {offlineRecoveryLeases.length > 0 ? (
         <Alert
@@ -244,16 +252,13 @@ export function WorkerManagementPage({ isAdmin }: { isAdmin: boolean }) {
         />
       ) : null}
 
-      <Card
-        title="Worker 列表"
-        extra={overview?.generated_at ? <Text type="secondary">更新时间：{new Date(overview.generated_at).toLocaleString()}</Text> : null}
-      >
+      <Card title="Worker 列表">
         <Table<AnalysisWorkerDetail>
           rowKey="worker_id"
           loading={workersQuery.isLoading}
           dataSource={workers}
           columns={columns}
-          pagination={false}
+          pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }}
           scroll={{ x: 980 }}
           locale={{ emptyText: <Empty description="当前没有在线 Worker" /> }}
         />

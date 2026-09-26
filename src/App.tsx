@@ -1,6 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { SidebarPageTitle } from './components/SidebarPageTitle'
+import { PRODUCT_VERSION } from './lib/product-version'
+import {
+  ApartmentOutlined,
+  BookOutlined,
+  CloudServerOutlined,
+  ClusterOutlined,
+  FileSearchOutlined,
+  HistoryOutlined,
+  RadarChartOutlined,
+  SlidersOutlined,
+  TeamOutlined,
+  ThunderboltOutlined,
+} from '@ant-design/icons'
 import type { Session } from '@supabase/supabase-js'
 import {
   Alert,
@@ -142,8 +156,10 @@ import type {
 } from './types'
 import './App.css'
 
-const { Header, Content, Sider } = Layout
+const { Content, Sider } = Layout
 const { Title, Text, Paragraph } = Typography
+
+const APP_SIDER_WIDTH = 264
 
 type AiResultMode = 'auto' | 'manual'
 
@@ -608,6 +624,8 @@ function Shell({ session }: { session: Session }) {
   const canManageBatch = (batch: ReviewBatch) => role === 'ADMIN' || (role === 'REVIEWER' && batch.created_by === session.user.id)
   const selectedKey = location.pathname.startsWith('/ask')
     ? '/ask'
+    : location.pathname.startsWith('/stories')
+    ? '/stories'
     : location.pathname.startsWith('/profile')
     ? '/profile'
     : location.pathname.startsWith('/users')
@@ -630,41 +648,39 @@ function Shell({ session }: { session: Session }) {
                   ? '/operation-log'
                   : '/batches'
   const reviewLogMenuItems = [
-    { key: '/operation-log', label: <Link to="/operation-log">代码评审操作日志</Link> },
-    ...(isAdmin ? [{ key: '/model-operation-log', label: <Link to="/model-operation-log">模型操作日志</Link> }] : []),
+    { key: '/operation-log', icon: <HistoryOutlined />, label: <Link to="/operation-log">代码评审操作日志</Link> },
+    ...(isAdmin ? [{ key: '/model-operation-log', icon: <HistoryOutlined />, label: <Link to="/model-operation-log">模型操作日志</Link> }] : []),
   ]
   const reviewMenuItems = [
-    { key: '/batches', label: <Link to="/batches">代码评审</Link> },
+    { key: '/batches', icon: <FileSearchOutlined />, label: <Link to="/batches">代码评审</Link> },
     // V1.20：用户故事看板。三种角色都能看（VIEWER 只读），刷新与导入由 RPC 门禁裁决。
-    { key: '/stories', label: <Link to="/stories">用户故事</Link> },
+    { key: '/stories', icon: <BookOutlined />, label: <Link to="/stories">用户故事</Link> },
     // 导航仅 ADMIN 显示，但这不是安全边界：服务端 ensure_admin() 才是。
-    ...(isAdmin ? [{ key: '/monitoring', label: <Link to="/monitoring">Agent 运行监控</Link> }] : []),
-    ...(isAdmin ? [{ key: '/workers', label: <Link to="/workers">调度中心</Link> }] : []),
-    ...(isAdmin ? [{ key: '/harness-policy', label: <Link to="/harness-policy">默认能力策略</Link> }] : []),
-    ...(isAdmin ? [{ key: '/attribution-rules', label: <Link to="/attribution-rules">归属规则</Link> }] : []),
-    ...(isAdmin ? [{ key: '/skills', label: <Link to="/skills">技能</Link> }] : []),
-    ...(isAdmin ? [{ key: '/models', label: <Link to="/models">模型管理</Link> }] : []),
+    ...(isAdmin ? [{ key: '/monitoring', icon: <RadarChartOutlined />, label: <Link to="/monitoring">Agent 运行监控</Link> }] : []),
+    ...(isAdmin ? [{ key: '/workers', icon: <ClusterOutlined />, label: <Link to="/workers">调度中心</Link> }] : []),
+    ...(isAdmin ? [{ key: '/harness-policy', icon: <SlidersOutlined />, label: <Link to="/harness-policy">默认能力策略</Link> }] : []),
+    ...(isAdmin ? [{ key: '/attribution-rules', icon: <ApartmentOutlined />, label: <Link to="/attribution-rules">归属规则</Link> }] : []),
+    ...(isAdmin ? [{ key: '/skills', icon: <ThunderboltOutlined />, label: <Link to="/skills">技能</Link> }] : []),
+    ...(isAdmin ? [{ key: '/models', icon: <CloudServerOutlined />, label: <Link to="/models">模型管理</Link> }] : []),
     // Git 身份由每个人在「个人中心」自助维护；这里只保留管理员的全员总览与冲突处置。
-    ...(isAdmin ? [{ key: '/users', label: <Link to="/users">用户管理</Link> }] : []),
+    ...(isAdmin ? [{ key: '/users', icon: <TeamOutlined />, label: <Link to="/users">用户管理</Link> }] : []),
   ]
   const activeMenuItems = reviewMenuItems
 
   return (
     <Layout className="app-shell">
-      <Header className="app-header">
-        <div className="brand-lockup">
-          <span className="brand-mark" aria-hidden="true">AI</span>
-          <div className="brand-copy">
-            <Text className="brand">代码评审平台</Text>
-            <Text className="subtitle">需求与代码一致性 · 智能分析</Text>
-          </div>
-        </div>
-      </Header>
       <Layout>
         <Sider
-          width={220}
+          width={APP_SIDER_WIDTH}
           className={isCodeQaRoute ? 'app-sider app-sider--code-qa app-sider--product' : 'app-sider app-sider--review'}
         >
+          <div className="app-sider-brand" aria-label="代码评审平台">
+            <span className="app-sider-brand-mark" aria-hidden="true">审</span>
+            <div className="app-sider-brand-copy">
+              <Text className="app-sider-brand-name">代码评审平台</Text>
+              <Text className="app-sider-brand-caption">需求与代码一致性</Text>
+            </div>
+          </div>
           <div className="app-workspace-tabs" role="tablist" aria-label="平台模块">
             <Button
               type="text"
@@ -715,7 +731,21 @@ function Shell({ session }: { session: Session }) {
           {createPortal(
             <div
               className="app-account-menu"
-              style={{ position: 'fixed', zIndex: 10, bottom: 0, left: 0, width: 220, boxSizing: 'border-box' }}
+              style={{
+                position: 'fixed',
+                zIndex: 10,
+                bottom: 0,
+                left: 0,
+                width: APP_SIDER_WIDTH,
+                height: 36,
+                minHeight: 36,
+                maxHeight: 36,
+                boxSizing: 'border-box',
+                padding: '3px 14px 6px',
+                overflow: 'hidden',
+                background: '#f2f2f5',
+                borderTop: 0,
+              }}
             >
             <Popover
               placement="topLeft"
@@ -745,13 +775,43 @@ function Shell({ session }: { session: Session }) {
                 </div>
               )}
             >
-              <Button type="text" className="app-account-summary" aria-label="打开账号菜单">
-                <span className="app-account-avatar" aria-hidden="true">
+              <Button
+                type="text"
+                className="app-account-summary"
+                aria-label="打开账号菜单"
+                style={{ height: 30, minHeight: 30, padding: '2px 4px', gap: 6, borderRadius: 7 }}
+              >
+                <span
+                  className="app-account-avatar"
+                  aria-hidden="true"
+                  style={{
+                    width: 18,
+                    height: 18,
+                    flex: '0 0 18px',
+                    color: '#777781',
+                    fontSize: 9,
+                    lineHeight: '18px',
+                    background: '#dedee3',
+                  }}
+                >
                   {accountLabel.trim().charAt(0).toUpperCase()}
                 </span>
-                <span className="app-account-details">
-                  <Text className="app-account-name" ellipsis>{accountLabel}</Text>
-                  <Tag className="app-account-role" color={role === 'ADMIN' ? 'green' : 'blue'}>
+                <span className="app-account-details" style={{ gap: 4 }}>
+                  <Text className="app-account-name" ellipsis style={{ fontSize: 12, lineHeight: '16px' }}>
+                    {accountLabel}
+                  </Text>
+                  <Tag
+                    className="app-account-role"
+                    style={{
+                      padding: '0 4px',
+                      color: '#9565df',
+                      fontSize: 10,
+                      lineHeight: '15px',
+                      background: '#f3edff',
+                      border: 0,
+                      borderRadius: 5,
+                    }}
+                  >
                     {role ?? '未配置角色'}
                   </Tag>
                 </span>
@@ -804,7 +864,7 @@ function Shell({ session }: { session: Session }) {
           >
             <Space direction="vertical" size={4}>
               <Text strong>代码评审平台</Text>
-              <Text>当前版本：V1.7</Text>
+              <Text>当前版本：{PRODUCT_VERSION}</Text>
             </Space>
           </Modal>
         </Content>
@@ -970,8 +1030,8 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
   }
 
   const columns: ColumnsType<AiModelConfigSummary> = [
-    { title: '模型名称', dataIndex: 'display_name' },
-    { title: 'Base URL', dataIndex: 'base_url', ellipsis: true },
+    { title: '模型名称', dataIndex: 'display_name', width: 200, ellipsis: true },
+    { title: 'Base URL', dataIndex: 'base_url', width: 280, ellipsis: true },
     { title: 'Model', dataIndex: 'model_name', width: 160 },
     {
       title: '网络类型',
@@ -1068,7 +1128,14 @@ function ModelConfigPage({ isAdmin }: { isAdmin: boolean }) {
   return (
     <Space direction="vertical" size="large" className="page-stack">
       <PageTitle title="模型管理" extra={<Button type="primary" onClick={openCreate}>新增模型</Button>} />
-      <Table rowKey="id" loading={modelsQuery.isLoading} columns={columns} dataSource={modelsQuery.data ?? []} pagination={false} />
+      <Table
+        rowKey="id"
+        loading={modelsQuery.isLoading}
+        columns={columns}
+        dataSource={modelsQuery.data ?? []}
+        pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }}
+        scroll={{ x: 1580 }}
+      />
       <Modal
         title={editing ? `编辑模型：${editing.display_name}` : '新增模型'}
         open={open}
@@ -1171,14 +1238,13 @@ function UsersManagementPage({ isAdmin }: { isAdmin: boolean }) {
   return (
     <Space direction="vertical" size="large" className="page-stack">
       <PageTitle title="用户管理" />
-      <Card className="users-management-card" styles={{ body: { paddingTop: 8 } }}>
-        <Tabs
-          items={[
-            { key: 'accounts', label: '账号列表', children: <AdminUsersPage isAdmin={isAdmin} /> },
-            { key: 'git-identity', label: 'Git 身份', children: <GitIdentityManagementPage isAdmin={isAdmin} /> },
-          ]}
-        />
-      </Card>
+      <Tabs
+        className="users-management-tabs"
+        items={[
+          { key: 'accounts', label: '账号列表', children: <AdminUsersPage isAdmin={isAdmin} /> },
+          { key: 'git-identity', label: 'Git 身份', children: <GitIdentityManagementPage isAdmin={isAdmin} /> },
+        ]}
+      />
     </Space>
   )
 }
@@ -1330,7 +1396,7 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
   const pendingCount = usersQuery.data?.filter((user) => !user.email_confirmed_at).length ?? 0
 
   return (
-    <Space direction="vertical" size={16} className="full-width">
+    <div className={pendingCount > 0 ? 'admin-users-list admin-users-list--with-alert' : 'admin-users-list'}>
       {pendingCount > 0 ? (
         <Alert
           type="warning"
@@ -1339,9 +1405,14 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
           description="这些账号暂时无法登录。优先让本人在登录页重新发送验证邮件；确认邮件确实无法送达且已核实归属时，管理员可在该账号操作列手动标记为已验证。"
         />
       ) : null}
-      <Card>
-        <Table rowKey="id" loading={usersQuery.isLoading} columns={columns} dataSource={usersQuery.data ?? []} />
-      </Card>
+      <Table
+        rowKey="id"
+        loading={usersQuery.isLoading}
+        columns={columns}
+        dataSource={usersQuery.data ?? []}
+        pagination={{ pageSize: 10, showSizeChanger: true,
+    pageSizeOptions: [10, 20, 50, 100] }}
+      />
       <Modal
         open={deleteTarget !== null}
         title="删除账号"
@@ -1424,7 +1495,7 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
           </Space>
         )}
       </Modal>
-    </Space>
+    </div>
   )
 }
 
@@ -1535,6 +1606,7 @@ loading={batchesQuery.isLoading}
 columns={columns}
 dataSource={batchesQuery.data ?? []}
 tableLayout="fixed"
+pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }}
       />
       <Modal title="创建每周评审批次" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={createMutation.isPending}>
         <Form
@@ -1990,7 +2062,7 @@ function FrozenStoryTable({
       size="small"
       dataSource={stories}
       loading={loading}
-      pagination={{ pageSize: 10, size: 'small', showTotal: (total) => `共 ${total} 条` }}
+      pagination={{ pageSize: 10, size: 'small', showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100], showTotal: (total) => `共 ${total} 条` }}
       locale={{ emptyText: <Empty description="这个批次还没有冻结任何需求" /> }}
       columns={[
         { title: '编码', dataIndex: 'story_code', width: 150 },
@@ -2498,7 +2570,7 @@ function AutoAnalysisSection({
                 size: 'small',
                 defaultPageSize: 10,
                 showSizeChanger: true,
-                pageSizeOptions: [10, 20, 50],
+                pageSizeOptions: [10, 20, 50, 100],
                 showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 个需求`,
               }}
               loading={storyTasksQuery.isLoading}
@@ -3596,7 +3668,8 @@ function OperationLogPage({ scope, isAdmin = false }: { scope: OperationLogScope
   ]
   const pagination = {
     pageSize: 10,
-    showSizeChanger: false,
+    showSizeChanger: true,
+    pageSizeOptions: [10, 20, 50, 100],
     showTotal: (total: number) => `共 ${total} 条`,
   }
 
@@ -3608,17 +3681,15 @@ function OperationLogPage({ scope, isAdmin = false }: { scope: OperationLogScope
   return (
     <Space direction="vertical" size="large" className="page-stack">
       <PageTitle title={pageTitle} />
-      <Card className="dashboard-card dashboard-log-card">
-        <Table
-          rowKey="id"
-          loading={operationLogQuery.isLoading}
-          columns={columns}
-          dataSource={sourceLogs}
-          locale={{ emptyText }}
-          pagination={pagination}
-          scroll={{ x: isModelScope ? 1200 : 1150 }}
-        />
-      </Card>
+      <Table
+        rowKey="id"
+        loading={operationLogQuery.isLoading}
+        columns={columns}
+        dataSource={sourceLogs}
+        locale={{ emptyText }}
+        pagination={pagination}
+        scroll={{ x: isModelScope ? 1200 : 1150 }}
+      />
     </Space>
   )
 }
@@ -3747,12 +3818,7 @@ function IssuesCard({ issues }: { issues: ValidationIssue[] }) {
 }
 
 function PageTitle({ title, extra }: { title: string; extra?: ReactNode }) {
-  return (
-    <div className="page-title">
-      <Title level={2}>{title}</Title>
-      {extra}
-    </div>
-  )
+  return <SidebarPageTitle title={title} extra={extra} />
 }
 
 type DashboardGroup = {

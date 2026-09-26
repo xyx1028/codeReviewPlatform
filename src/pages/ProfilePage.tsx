@@ -38,6 +38,7 @@ import {
   describeGitIdentityError,
 } from '../lib/git-identity'
 import type { DeveloperIdentityStatus, MyGitIdentityRecord, UserRole } from '../types'
+import { SidebarPageTitle } from '../components/SidebarPageTitle'
 
 const { Title, Text } = Typography
 
@@ -623,7 +624,7 @@ export function ProfilePage({ email, displayName, role }: ProfilePageProps) {
     <Space direction="vertical" size={24} className="profile-page">
       <div className="profile-page-header">
         <div>
-          <Title level={2}>个人中心</Title>
+          <SidebarPageTitle title="个人中心" />
           <Text type="secondary">管理你的用户名与员工号（需求里的「开发人员」就是它）、登录密码与 Git 身份。</Text>
         </div>
       </div>

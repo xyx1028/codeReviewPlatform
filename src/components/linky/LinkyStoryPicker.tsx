@@ -9,6 +9,7 @@
  */
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
+import { FilterOutlined } from '@ant-design/icons'
 import {
   Alert,
   App as AntApp,
@@ -42,6 +43,8 @@ const { Text, Paragraph } = Typography
 
 export interface LinkyStoryPickerProps {
   selectable?: boolean
+  /** 看板页使用无视觉外壳列表；批次导入页仍保留卡片承载门禁与导入操作。 */
+  frameless?: boolean
   selectedCodes?: string[]
   onSelectionChange?: (codes: string[], stories: LinkyLiveStory[]) => void
   /** 勾选摘要条右侧的操作区（导入按钮等）。 */
@@ -271,17 +274,121 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
   const columns: ColumnsType<LinkyLiveStory> = useMemo(
     () => [
       { title: '编号', dataIndex: 'storyCode', width: 150 },
-      { title: '标题', dataIndex: 'title', ellipsis: true },
+      {
+        title: '标题',
+        dataIndex: 'title',
+        width: 260,
+        ellipsis: true,
+        onHeaderCell: () => ({ style: { minWidth: 260, width: 260 } }),
+        onCell: () => ({ style: { minWidth: 260, width: 260 } }),
+      },
+      {
+        title: '项目组',
+        dataIndex: 'workspaceName',
+        width: 180,
+        ellipsis: true,
+        onHeaderCell: () => ({ style: { minWidth: 180, width: 180 } }),
+        onCell: () => ({ style: { minWidth: 180, width: 180 } }),
+        filterDropdown: ({ confirm }) => (
+          <div className="story-column-filter">
+            <Select
+              allowClear={!workspaceRequired}
+              autoFocus
+              showSearch
+              className="story-column-filter__select"
+              placeholder="全部项目组"
+              loading={workspaceCatalogQuery.isLoading}
+              value={workspaceName ?? undefined}
+              options={options(workspaces)}
+              onChange={(value) => {
+                changeWorkspace(value ?? null)
+                confirm({ closeDropdown: true })
+              }}
+            />
+          </div>
+        ),
+        filterIcon: (filtered) => (
+          <FilterOutlined className={filtered ? 'story-column-filter__icon--active' : undefined} />
+        ),
+        filteredValue: workspaceName === null ? null : [workspaceName],
+      },
       {
         title: '状态',
         dataIndex: 'statusLabel',
         width: 120,
+        filterDropdown: ({ confirm }) => (
+          <div className="story-column-filter">
+            <Select
+              allowClear
+              autoFocus
+              className="story-column-filter__select"
+              placeholder="全部状态"
+              value={statusLabel ?? undefined}
+              options={options(statuses)}
+              onChange={(value) => {
+                setStatusLabel(value ?? null)
+                confirm({ closeDropdown: true })
+              }}
+            />
+          </div>
+        ),
+        filterIcon: (filtered) => (
+          <FilterOutlined className={filtered ? 'story-column-filter__icon--active' : undefined} />
+        ),
+        filteredValue: statusLabel === null ? null : [statusLabel],
         render: (value: string | null) => (value ? <Tag>{value}</Tag> : <Text type="secondary">—</Text>),
       },
-      { title: '负责人', dataIndex: 'assigneeName', width: 100 },
-      { title: '发布窗口', dataIndex: 'releaseWindow', width: 120 },
-      { title: '迭代', dataIndex: 'iteration', width: 170, ellipsis: true },
-      { title: '关联特性', dataIndex: 'subjectName', width: 200, ellipsis: true },
+      {
+        title: '负责人',
+        dataIndex: 'assigneeName',
+        width: 100,
+        filterDropdown: ({ confirm }) => (
+          <div className="story-column-filter">
+            <Select
+              allowClear
+              autoFocus
+              showSearch
+              className="story-column-filter__select"
+              placeholder="全部负责人"
+              value={assigneeName ?? undefined}
+              options={options(assignees)}
+              onChange={(value) => {
+                setAssigneeName(value ?? null)
+                confirm({ closeDropdown: true })
+              }}
+            />
+          </div>
+        ),
+        filterIcon: (filtered) => (
+          <FilterOutlined className={filtered ? 'story-column-filter__icon--active' : undefined} />
+        ),
+        filteredValue: assigneeName === null ? null : [assigneeName],
+      },
+      {
+        title: '发布窗口',
+        dataIndex: 'releaseWindow',
+        width: 120,
+        filterDropdown: ({ confirm }) => (
+          <div className="story-column-filter">
+            <Select
+              allowClear
+              autoFocus
+              className="story-column-filter__select"
+              placeholder="全部发布窗口"
+              value={releaseWindow ?? undefined}
+              options={options(releaseWindows)}
+              onChange={(value) => {
+                setReleaseWindow(value ?? null)
+                confirm({ closeDropdown: true })
+              }}
+            />
+          </div>
+        ),
+        filterIcon: (filtered) => (
+          <FilterOutlined className={filtered ? 'story-column-filter__icon--active' : undefined} />
+        ),
+        filteredValue: releaseWindow === null ? null : [releaseWindow],
+      },
       {
         title: '',
         width: 72,
@@ -300,7 +407,20 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
         ),
       },
     ],
-    [],
+    [
+      assigneeName,
+      assignees,
+      changeWorkspace,
+      options,
+      releaseWindow,
+      releaseWindows,
+      statusLabel,
+      statuses,
+      workspaceCatalogQuery.isLoading,
+      workspaceName,
+      workspaceRequired,
+      workspaces,
+    ],
   )
 
   const detail = detailQuery.data ?? null
@@ -312,12 +432,12 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
    * `storiesQuery.error` 会让"不在内网"表现成一个空下拉，而不是一条错误。
    */
   const loadError = (listVisible ? storiesQuery.error : null) ?? workspaceCatalogQuery.error
-  const fetching = listVisible ? storiesQuery.isFetching : workspaceCatalogQuery.isFetching
-  const dataUpdatedAt = listVisible ? storiesQuery.dataUpdatedAt : workspaceCatalogQuery.dataUpdatedAt
   const refresh = () => {
     void (listVisible ? storiesQuery : workspaceCatalogQuery).refetch()
     message.info('正在从 Linky 重新取数')
   }
+
+  const ListContainer = props.frameless ? 'section' : Card
 
   return (
     <Space direction="vertical" size="large" className="page-stack">
@@ -343,42 +463,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
         * 就把真正要看的列表推下去大半屏。控件的 placeholder 已经写着「全部项目组」之类，
         * 标签是重复信息，删掉不丢语义。
         */}
-      <Card
-        className="story-board-card"
-        title={
-          <span className="story-board-card__heading">
-            用户故事
-            <Text type="secondary" className="story-board-card__count">
-              {!listVisible
-                ? '待选项目组'
-                : filtered.length === all.length
-                  ? `${String(all.length)} 条`
-                  : `筛出 ${String(filtered.length)} / ${String(all.length)} 条`}
-            </Text>
-          </span>
-        }
-        /*
-         * 卡片头只留「数据时间 + 刷新」。
-         *
-         * 之前这里还挤着勾选摘要和导入主按钮，四样东西在一行里互相挤到「刷 新」都被折成
-         * 两行。主按钮是这一页的终点动作，它该待在离勾选最近的地方（下面的摘要条），
-         * 而不是和取数时间抢同一行。
-         */
-        extra={
-          <div className="story-board-card__tools">
-            <span className="story-board-card__updated">
-              {fetching
-                ? '正在从 Linky 取数…'
-                : dataUpdatedAt > 0
-                  ? `数据时间 ${new Date(dataUpdatedAt).toLocaleTimeString()}`
-                  : ''}
-            </span>
-            <Button size="small" loading={fetching} onClick={refresh}>
-              刷新
-            </Button>
-          </div>
-        }
-      >
+      <ListContainer className={props.frameless ? 'story-board-list' : 'story-board-card'}>
         {!listVisible ? (
           /*
            * 项目组门禁。
@@ -427,47 +512,6 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
               * 栅格得跟着重算 span，flex 自己换行就行；末尾还能塞一个「清空筛选」而不占一格。
               */}
             <div className="story-filter-bar">
-              <Select
-                allowClear={!workspaceRequired}
-                className="story-filter-bar__field story-filter-bar__field--wide"
-                placeholder="全部项目组"
-                loading={workspaceCatalogQuery.isLoading}
-                value={workspaceName ?? undefined}
-                options={options(workspaces)}
-                onChange={(value) => changeWorkspace(value ?? null)}
-              />
-              <Select
-                allowClear
-                className="story-filter-bar__field"
-                placeholder="全部发布窗口"
-                value={releaseWindow ?? undefined}
-                options={options(releaseWindows)}
-                onChange={(value) => setReleaseWindow(value ?? null)}
-              />
-              <Select
-                allowClear
-                className="story-filter-bar__field"
-                placeholder="全部状态"
-                value={statusLabel ?? undefined}
-                options={options(statuses)}
-                onChange={(value) => setStatusLabel(value ?? null)}
-              />
-              <Select
-                allowClear
-                showSearch
-                className="story-filter-bar__field"
-                placeholder="全部负责人"
-                value={assigneeName ?? undefined}
-                options={options(assignees)}
-                onChange={(value) => setAssigneeName(value ?? null)}
-              />
-              <Input
-                allowClear
-                className="story-filter-bar__search"
-                placeholder="编号或标题"
-                value={keyword}
-                onChange={(event) => setKeyword(event.target.value)}
-              />
               {secondaryFilterActive ? (
                 <Tooltip title="项目组保持不变，其余条件清空">
                   <Button type="link" size="small" onClick={clearSecondaryFilters}>
@@ -475,6 +519,13 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
                   </Button>
                 </Tooltip>
               ) : null}
+              <Input
+                allowClear
+                className="story-filter-bar__search"
+                placeholder="编号或标题"
+                value={keyword}
+                onChange={(event) => setKeyword(event.target.value)}
+              />
             </div>
 
             {props.selectable ? (
@@ -517,10 +568,12 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
               loading={storiesQuery.isLoading}
               dataSource={filtered}
               columns={columns}
+              tableLayout="fixed"
               pagination={{
                 current: page,
                 pageSize,
                 showSizeChanger: true,
+                pageSizeOptions: [10, 20, 50, 100],
                 showTotal: (total) => `共 ${total} 条`,
                 onChange: (nextPage, nextSize) => {
                   setPage(nextPage)
@@ -585,7 +638,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
             />
           </Fragment>
         )}
-      </Card>
+      </ListContainer>
 
       <Drawer
         width={720}

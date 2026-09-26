@@ -1,12 +1,11 @@
 import { useMemo } from 'react'
-import { Alert, Card, Empty, Space, Typography } from 'antd'
+import { Alert, Card, Empty, Space } from 'antd'
+import { SidebarPageTitle } from '../components/SidebarPageTitle'
 import { RuleVisualEditor } from '../components/attribution-rules/RuleVisualEditor'
 import {
   useAttributionRules,
   type AttributionRulesApi,
 } from '../hooks/useAttributionRules'
-
-const { Title, Text } = Typography
 
 /**
  * 归属规则：只读展示。
@@ -41,7 +40,7 @@ export function AttributionRuleManagementPage({
   if (!rulesState.apiAvailable) {
     return (
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
-        <Title level={4} style={{ marginBottom: 0 }}>归属规则</Title>
+        <SidebarPageTitle title="归属规则" />
         <Alert
           type="info"
           showIcon
@@ -54,10 +53,7 @@ export function AttributionRuleManagementPage({
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Space direction="vertical" size={4} style={{ width: '100%' }}>
-        <Title level={4} style={{ marginBottom: 0 }}>归属规则</Title>
-        <Text type="secondary">规则由平台预置，决定提交是否进入需求分析上下文，不代表代码所有权或个人绩效。</Text>
-      </Space>
+      <SidebarPageTitle title="归属规则" />
       {rulesState.catalogQuery.isError ? (
         <Alert type="error" showIcon title="读取归属规则失败" description={rulesState.catalogQuery.error instanceof Error ? rulesState.catalogQuery.error.message : '未知错误'} />
       ) : null}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Alert, Button, Card, Form, Input, Modal, Radio, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Form, Input, Modal, Radio, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   adminListDeveloperGitIdentities,
@@ -156,34 +156,45 @@ export function GitIdentityManagementPage({ isAdmin }: { isAdmin: boolean }) {
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       {identities.isError ? <Alert type="error" showIcon title="读取 Git 身份失败" description={identities.error instanceof Error ? identities.error.message : '未知错误'} /> : null}
-      <Card extra={<Button type="primary" onClick={beginCreate}>新增 Git 身份</Button>}>
-        <Table<DeveloperGitIdentityRecord>
-          rowKey="git_identity_id"
-          loading={identities.isLoading}
-          dataSource={identities.data ?? []}
-          pagination={{ pageSize: 20, showSizeChanger: true }}
-          scroll={{ x: 1050 }}
-          columns={[
-            { title: '开发人员', dataIndex: 'display_name', fixed: 'left', width: 150 },
-            { title: '维护方式', dataIndex: 'auth_bound', width: 110, render: (value: boolean | undefined) => <Tag color={value ? 'blue' : undefined}>{value ? '本人维护' : '管理员代录'}</Tag> },
-            { title: '员工号', dataIndex: 'employee_code', width: 110, render: (value) => value ?? '—' },
-            {
-              title: 'Git 邮箱',
-              dataIndex: 'author_email',
-              width: 230,
-              // 明文优先。历史行（改造前建的、且反查候选里也查不到）没有明文，回落到掩码，
-              // 并说明一次重新保存就能补上，而不是让人以为数据坏了。
-              render: (value: string | null | undefined, record) =>
-                value ?? (record.masked_email ? `${record.masked_email}（旧记录，保存一次即补全）` : '未配置'),
-            },
-            { title: '作者别名', dataIndex: 'author_name_aliases', width: 190, render: (values: string[]) => values.length ? values.join('、') : '—' },
-            { title: 'GitLab 用户名', dataIndex: 'gitlab_username', width: 150, render: (value) => value ?? '—' },
-            { title: '身份状态', dataIndex: 'verification_status', width: 110, render: (value: DeveloperIdentityStatus) => <Tag color={value === 'VERIFIED' ? 'green' : value === 'CONFLICT' ? 'red' : value === 'DISABLED' ? 'default' : 'orange'}>{statusOptions.find((item) => item.value === value)?.label ?? value}</Tag> },
-            { title: '更新时间', dataIndex: 'updated_at', width: 180, render: (value: string) => new Date(value).toLocaleString() },
-            { title: '操作', fixed: 'right', width: 150, render: (_value, record) => <Space size={0}><Button type="link" onClick={() => beginAddEmail(record)}>新增邮箱</Button><Button type="link" onClick={() => beginEdit(record)}>编辑</Button></Space> },
-          ]}
-        />
-      </Card>
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <Button type="primary" onClick={beginCreate}>新增 Git 身份</Button>
+      </div>
+      <Table<DeveloperGitIdentityRecord>
+        rowKey="git_identity_id"
+        loading={identities.isLoading}
+        dataSource={identities.data ?? []}
+        pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }}
+        scroll={{ x: 1410 }}
+        columns={[
+          { title: '开发人员', dataIndex: 'display_name', fixed: 'left', width: 150 },
+          { title: '维护方式', dataIndex: 'auth_bound', width: 110, render: (value: boolean | undefined) => <Tag color={value ? 'blue' : undefined}>{value ? '本人维护' : '管理员代录'}</Tag> },
+          { title: '员工号', dataIndex: 'employee_code', width: 110, render: (value) => value ?? '—' },
+          {
+            title: 'Git 邮箱',
+            dataIndex: 'author_email',
+            width: 230,
+            // 明文优先。历史行（改造前建的、且反查候选里也查不到）没有明文，回落到掩码，
+            // 并说明一次重新保存就能补上，而不是让人以为数据坏了。
+            render: (value: string | null | undefined, record) =>
+              value ?? (record.masked_email ? `${record.masked_email}（旧记录，保存一次即补全）` : '未配置'),
+          },
+          { title: '作者别名', dataIndex: 'author_name_aliases', width: 190, render: (values: string[]) => values.length ? values.join('、') : '—' },
+          { title: 'GitLab 用户名', dataIndex: 'gitlab_username', width: 150, render: (value) => value ?? '—' },
+          { title: '身份状态', dataIndex: 'verification_status', width: 110, render: (value: DeveloperIdentityStatus) => <Tag color={value === 'VERIFIED' ? 'green' : value === 'CONFLICT' ? 'red' : value === 'DISABLED' ? 'default' : 'orange'}>{statusOptions.find((item) => item.value === value)?.label ?? value}</Tag> },
+          { title: '更新时间', dataIndex: 'updated_at', width: 180, render: (value: string) => new Date(value).toLocaleString() },
+          {
+            title: '操作',
+            fixed: 'right',
+            width: 180,
+            render: (_value, record) => (
+              <Space size="small" wrap={false}>
+                <Button type="link" onClick={() => beginAddEmail(record)}>新增邮箱</Button>
+                <Button type="link" onClick={() => beginEdit(record)}>编辑</Button>
+              </Space>
+            ),
+          },
+        ]}
+      />
       <Modal
         open={open}
         title={addingEmail ? `为 ${editing?.display_name ?? ''} 新增 Git 邮箱` : editing ? '编辑 Git 身份' : '新增 Git 身份'}

@@ -15,6 +15,7 @@
     "worker:start": "node dist-worker/index.js",
     "worker:check-connectivity": "node dist-worker/connectivity-check.js",
     "harness:manifest:check": "node scripts/v4-harness-manifest.mjs check",
+    "version:check": "node scripts/check-product-version-sync.mjs",
     "harness:manifest:new-migration": "node scripts/v4-harness-manifest.mjs generate-migration",
     "test:worker": "npm run harness:manifest:check && vitest run worker",
     "test:web": "vitest run -c vitest.web.config.ts",

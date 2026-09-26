@@ -23,10 +23,11 @@ import { RuntimeTaskList } from '../components/monitoring/RuntimeTaskList'
 import { RuntimeAgentTree } from '../components/monitoring/RuntimeAgentTree'
 import { RuntimeAnalysisScopeCard } from '../components/monitoring/RuntimeAnalysisScopeCard'
 import { RuntimeFreshnessBadge } from '../components/monitoring/RuntimeFreshnessBadge'
+import { SidebarPageTitle } from '../components/SidebarPageTitle'
 import { formatAge } from '../lib/runtime-format'
 import type { ActiveAnalysisBatch } from '../types'
 
-const { Title, Text } = Typography
+const { Text } = Typography
 
 const MOBILE_BREAKPOINT = 768
 
@@ -193,16 +194,7 @@ export function RuntimeMonitoringPage({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Space direction="vertical" size={4} style={{ width: '100%' }}>
-        <Title level={4} style={{ marginBottom: 0 }}>
-          真实运行监控台
-        </Title>
-        <Text type="secondary">
-          这里的每一条活动都由后端执行边界产生并被数据库接受。不足 800 毫秒就返回的工具
-          不会出现「正在调用」态，只出现在已完成历史里 —— 监控台关心的是卡住的工具，
-          不是闪过的工具。
-        </Text>
-      </Space>
+      <SidebarPageTitle title="真实运行监控台" />
 
       {batchesQuery.isError ? (
         <Alert

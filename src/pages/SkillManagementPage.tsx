@@ -2,15 +2,11 @@ import {
   Alert,
   App as AntApp,
   Button,
-  Card,
-  Col,
   Descriptions,
   Empty,
   Input,
   Modal,
   Progress,
-  Row,
-  Select,
   Space,
   Steps,
   Table,
@@ -36,6 +32,7 @@ import {
   adminUploadSkillBundle,
 } from '../lib/api'
 import { SkillCreateWizard } from './SkillCreateWizard'
+import { SidebarPageTitle } from '../components/SidebarPageTitle'
 import { getSkillBundleDownloadUrl } from '../lib/skill-download-url'
 import { formatSkillVersion } from '../lib/skill-version'
 import {
@@ -155,43 +152,6 @@ export function formatBytes(bytes: number | null | undefined): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
 }
 
-/**
- * 容量水位。
- *
- * 用百分比条而不是只显示数字，是因为 §8.2 的上限是**硬**上限：超了 `enqueue_analysis_job`
- * 直接失败，创建批次的人会看到一个与技能毫无关系的报错。让管理员在这一页就看见"快满了"
- * 比让他在别人建批次失败时才知道要好。
- */
-function CapacityBar({
-  title,
-  used,
-  limit,
-  formatter,
-}: {
-  title: string
-  used: number
-  limit: number
-  formatter?: (value: number) => string
-}) {
-  const format = formatter ?? ((value: number) => String(value))
-  const percent = limit === 0 ? 0 : Math.min(100, Math.round((used / limit) * 100))
-  return (
-    <div>
-      <Text type="secondary">{title}</Text>
-      <div>
-        <Text strong>{format(used)}</Text>
-        <Text type="secondary"> / {format(limit)}</Text>
-      </div>
-      <Progress
-        percent={percent}
-        size="small"
-        status={percent >= 100 ? 'exception' : percent >= 80 ? 'active' : 'normal'}
-        showInfo={false}
-      />
-    </div>
-  )
-}
-
 /** 服务端解析出来的文件树。展示 hash / MIME / 角色 / 大小，不展示任何文件正文。 */
 export function BundleFileTree({ files }: { files: SkillBundleFile[] }) {
   const paginated = files.length > 10
@@ -230,7 +190,7 @@ export function BundleFileTree({ files }: { files: SkillBundleFile[] }) {
                 size: 'small',
                 defaultPageSize: 10,
                 showSizeChanger: true,
-                pageSizeOptions: [10, 20, 50],
+                pageSizeOptions: [10, 20, 50, 100],
                 showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 个文件`,
               }
             : false
@@ -324,7 +284,7 @@ export function SkillReviewEvidenceBlock({
           dataSource={batchGroups}
           rowKey="batch_id"
           size="small"
-          pagination={batchGroups.length > 5 ? { size: 'small', pageSize: 5 } : false}
+          pagination={batchGroups.length > 10 ? { size: 'small', pageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] } : false}
           columns={[
             { title: '批次', dataIndex: 'batch_name', ellipsis: true },
             {
@@ -380,7 +340,7 @@ export function SkillReviewEvidenceBlock({
           }))}
           rowKey="key"
           size="small"
-          pagination={evidence.sample_findings.length > 5 ? { size: 'small', pageSize: 5 } : false}
+          pagination={evidence.sample_findings.length > 10 ? { size: 'small', pageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] } : false}
           columns={[
             { title: '需求', dataIndex: 'story_code', width: 120, ellipsis: true },
             {
@@ -509,7 +469,6 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
   const { message, modal } = AntApp.useApp()
   const queryClient = useQueryClient()
   const [createOpen, setCreateOpen] = useState(false)
-  const [statusFilter, setStatusFilter] = useState<ReviewSkillStatus | 'ALL'>('ALL')
   const [keyword, setKeyword] = useState('')
   const [publishSkill, setPublishSkill] = useState<ReviewSkillListItem | null>(null)
   const [validation, setValidation] = useState<SkillValidationResult | null>(null)
@@ -687,20 +646,16 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
     onError: (error: Error) => message.error(error.message),
   })
 
-  const limits = catalogQuery.data?.limits
-  const capacity = catalogQuery.data?.capacity
   const skills = useMemo(() => catalogQuery.data?.skills ?? [], [catalogQuery.data])
   const filteredSkills = useMemo(() => {
     const kw = keyword.trim().toLowerCase()
-    return skills.filter((skill) => {
-      if (statusFilter !== 'ALL' && skill.status !== statusFilter) return false
-      if (kw.length === 0) return true
-      return (
+    if (kw.length === 0) return skills
+    return skills.filter(
+      (skill) =>
         skill.name.toLowerCase().includes(kw) ||
-        skill.display_name.toLowerCase().includes(kw)
-      )
-    })
-  }, [skills, statusFilter, keyword])
+        skill.display_name.toLowerCase().includes(kw),
+    )
+  }, [skills, keyword])
 
   if (!isAdmin) {
     return <Alert type="warning" showIcon message="仅管理员可以维护技能" />
@@ -763,6 +718,12 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
       title: '状态',
       dataIndex: 'status',
       width: 96,
+      filters: Object.entries(STATUS_LABELS).map(([value, meta]) => ({
+        text: meta.text,
+        value,
+      })),
+      onFilter: (value: string | number | bigint | boolean, row: ReviewSkillListItem) =>
+        row.status === value,
       render: (status: ReviewSkillStatus) => (
         <Tag color={STATUS_LABELS[status].color}>{STATUS_LABELS[status].text}</Tag>
       ),
@@ -928,83 +889,21 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <Space direction="vertical" size="large" className="full-width">
-      {capacity && limits ? (
-        <Card title="全局目录容量">
-          <Row gutter={[16, 16]}>
-            <Col xs={24} sm={12} lg={5}>
-              <CapacityBar
-                title="已启用技能"
-                used={capacity.enabled_bundles}
-                limit={limits.catalogBundles}
-              />
-            </Col>
-            <Col xs={24} sm={12} lg={5}>
-              <CapacityBar
-                title="首轮目录渲染"
-                used={capacity.catalog_render_bytes}
-                limit={limits.catalogRenderBytes}
-                formatter={formatBytes}
-              />
-            </Col>
-            <Col xs={24} sm={12} lg={5}>
-              <CapacityBar
-                title="归档总量"
-                used={capacity.archive_bytes}
-                limit={limits.catalogArchiveBytes}
-                formatter={formatBytes}
-              />
-            </Col>
-            <Col xs={24} sm={12} lg={5}>
-              <CapacityBar
-                title="展开总量"
-                used={capacity.expanded_bytes}
-                limit={limits.catalogExpandedBytes}
-                formatter={formatBytes}
-              />
-            </Col>
-          </Row>
-        </Card>
-      ) : null}
-
-      {/*
-        标题与主按钮交给 Card 的 title / extra，而不是自己在 body 里摆一行 flex：
-        Card 头部有自己的分隔线与内边距，手写的那一行会和下面的筛选栏挤在一起，
-        视觉上分不出「这是卡片标题」还是「这是筛选条件的一部分」。
-      */}
-      <Card
-        title="技能"
-        extra={
-          <Button type="primary" onClick={() => setCreateOpen(true)}>
-            新增技能
-          </Button>
-        }
-      >
+      {/* 无外壳列表布局：标题、工具栏与表格直接落在页面内容区，避免再套一层卡片。 */}
+      <section className="full-width" aria-label="技能列表">
         <Space direction="vertical" size="middle" className="full-width">
+          <SidebarPageTitle title="技能" />
           <div className="skill-filter-bar">
-            <Space size="middle" wrap>
-              <Space size="small">
-                <Text type="secondary">技能状态</Text>
-                <Select
-                  value={statusFilter}
-                  onChange={setStatusFilter}
-                  style={{ width: 140 }}
-                  options={[
-                    { value: 'ALL', label: '全部' },
-                    ...Object.entries(STATUS_LABELS).map(([value, meta]) => ({
-                      value,
-                      label: meta.text,
-                    })),
-                  ]}
-                />
-              </Space>
-              <Input.Search
-                allowClear
-                placeholder="搜索技能名称或显示名称"
-                value={keyword}
-                onChange={(event) => setKeyword(event.target.value)}
-                style={{ width: 260 }}
-              />
-            </Space>
+            <Button type="primary" onClick={() => setCreateOpen(true)}>
+              新增技能
+            </Button>
+            <Input.Search
+              allowClear
+              placeholder="搜索技能名称或显示名称"
+              value={keyword}
+              onChange={(event) => setKeyword(event.target.value)}
+              style={{ width: 260 }}
+            />
             {/* 条数只在分页处显示一次：筛选栏右侧原来还有一个「共 N 条」，同一个数字
                 在同一屏出现两遍，看的人会先怀疑两者是不是不同口径。 */}
           </div>
@@ -1020,12 +919,13 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
             pagination={{
               pageSize: 10,
               showSizeChanger: true,
+              pageSizeOptions: [10, 20, 50, 100],
               showTotal: (total) => `共 ${total} 条`,
             }}
             locale={{ emptyText: <Empty description="还没有技能。新增一个并上传 Bundle ZIP。" /> }}
           />
         </Space>
-      </Card>
+      </section>
 
       <SkillCreateWizard
         open={createOpen}
@@ -1534,7 +1434,7 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
               size: 'small',
               defaultPageSize: 10,
               showSizeChanger: true,
-              pageSizeOptions: [10, 20, 50],
+              pageSizeOptions: [10, 20, 50, 100],
               showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 个版本`,
             }}
             tableLayout="fixed"

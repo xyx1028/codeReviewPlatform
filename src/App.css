@@ -3577,8 +3577,146 @@ a.dashboard-distribution-item:focus-visible {
 }
 
 .story-filter-bar__search {
-  flex: 1.6 1 220px;
-  min-width: 200px;
+  flex: 0 0 260px;
+  width: 260px;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
+}
+
+@media (max-width: 640px) {
+  .story-filter-bar__search {
+    flex: 1 1 100%;
+    width: 100%;
+    margin-left: 0;
+  }
+}
+
+/* 表头漏斗：筛选项直接在对应字段旁，避免重复占用顶部筛选条。 */
+.story-column-filter {
+  padding: 8px;
+}
+
+.story-column-filter__select {
+  min-width: 180px;
+}
+
+.story-column-filter__icon--active {
+  color: #2563eb;
+}
+
+/* 调度中心：单一分段概览替代多张同权重的指标卡，列表才是页面主体。 */
+.worker-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid #e5eaf1;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.025);
+}
+
+.worker-summary__item {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 76px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  padding: 12px 18px 13px;
+  border-inline-end: 1px solid #eef1f5;
+}
+
+.worker-summary__item:last-child {
+  border-inline-end: 0;
+}
+
+.worker-summary__item::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  content: '';
+  background: transparent;
+}
+
+.worker-summary__label {
+  overflow: hidden;
+  color: #7b8798;
+  font-size: 12px;
+  font-weight: 560;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worker-summary__value {
+  color: #1e293b;
+  font-size: 23px;
+  font-weight: 680;
+  letter-spacing: -0.03em;
+  line-height: 28px;
+  font-variant-numeric: tabular-nums;
+}
+
+.worker-summary__item--online::before,
+.worker-summary__item--active::before {
+  background: #3b82f6;
+}
+
+.worker-summary__item--online .worker-summary__value,
+.worker-summary__item--active .worker-summary__value {
+  color: #2563eb;
+}
+
+.worker-summary__item--recovery::before {
+  background: #f59e0b;
+}
+
+.worker-summary__item--recovery .worker-summary__value {
+  color: #b45309;
+}
+
+.worker-summary__item--capacity::before {
+  background: #64748b;
+}
+
+@media (max-width: 960px) {
+  .worker-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .worker-summary__item:nth-child(3) {
+    border-inline-end: 0;
+  }
+
+  .worker-summary__item:nth-child(-n + 3) {
+    border-bottom: 1px solid #eef1f5;
+  }
+}
+
+@media (max-width: 640px) {
+  .worker-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .worker-summary__item {
+    min-height: 70px;
+    padding: 11px 14px;
+  }
+
+  .worker-summary__item:nth-child(n) {
+    border-inline-end: 1px solid #eef1f5;
+    border-bottom: 1px solid #eef1f5;
+  }
+
+  .worker-summary__item:nth-child(2n) {
+    border-inline-end: 0;
+  }
+
+  .worker-summary__item:last-child {
+    border-bottom: 0;
+  }
 }
 
 /* 悬浮里的快照表：给个下限宽度，免得 Subject 被挤成一个省略号。 */
@@ -3766,4 +3904,2035 @@ a.dashboard-distribution-item:focus-visible {
     width: 100%;
     margin-top: 8px;
   }
+}
+
+
+/* ---------------------------------------------------------------------------
+ * 产品问答历史对话：分区工作台导航
+ * 参考产品工作台的侧栏：浅灰底、轻量新建入口、分组标题与灰色选中态。会话的仓库、
+ * 分支和轮次元数据仍完整保留，只收紧层级和间距，不把它做成一组独立的卡片。
+ * ------------------------------------------------------------------------- */
+.app-sider--product,
+.app-sider--product > .ant-layout-sider-children,
+.app-sider--product .app-workspace-menu.ant-menu {
+  background: #f7f7f8;
+}
+
+.app-sider--product {
+  border-right: 1px solid #e7e7e9 !important;
+}
+
+.app-sider--product .app-workspace-tabs {
+  padding: 10px 10px 8px;
+  border-bottom-color: #e7e7e9;
+  background: #f7f7f8;
+}
+
+.app-sider--product .app-workspace-tab.ant-btn {
+  color: #555761;
+  font-weight: 600;
+  border-radius: 10px;
+}
+
+.app-sider--product .app-workspace-tab.ant-btn.app-workspace-tab-active {
+  color: #202128;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.05);
+}
+
+.app-sider--product .app-workspace-menu.ant-menu {
+  padding: 4px 8px;
+}
+
+.app-sider--product .app-workspace-menu .ant-menu-item {
+  width: 100%;
+  height: 36px;
+  margin: 2px 0;
+  padding-inline: 10px !important;
+  color: #464750;
+  font-size: 14px;
+  line-height: 36px;
+  border-radius: 10px;
+}
+
+.app-sider--product .app-workspace-menu .ant-menu-item:hover {
+  color: #202128;
+  background: #ececef;
+}
+
+.app-sider--product .app-workspace-menu .ant-menu-item-selected {
+  color: #202128;
+  font-weight: 650;
+  background: #e4e4e8;
+}
+
+/* 新建对话是第一层导航动作，不使用醒目的主色按钮。 */
+.app-sider--product ~ .app-content .code-qa-new-conversation.ant-btn,
+.app-sider--product ~ .app-content .code-qa-new-conversation.ant-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  height: 36px;
+  padding: 0 10px;
+  color: #33343b;
+  font-weight: 600;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.app-sider--product ~ .app-content .code-qa-new-conversation.ant-btn::before {
+  width: 20px;
+  margin-right: 6px;
+  color: #4d4f59;
+  font-size: 21px;
+  font-weight: 350;
+  line-height: 1;
+  content: '+';
+}
+
+.app-sider--product ~ .app-content .code-qa-new-conversation.ant-btn:hover:not(:disabled),
+.app-sider--product ~ .app-content .code-qa-new-conversation.ant-btn-primary:hover:not(:disabled) {
+  color: #202128;
+  background: #ececef;
+}
+
+.app-sider--product ~ .app-content .code-qa-new-conversation.ant-btn:disabled {
+  color: #a8a8af;
+  background: transparent;
+}
+
+.app-sider--product ~ .app-content .code-qa-sidebar,
+.app-sider--product ~ .app-content .code-qa-layout--welcome .code-qa-sidebar {
+  box-sizing: border-box;
+  padding: 10px 8px 12px;
+  gap: 4px;
+  background: #f7f7f8;
+  border-top: 1px solid #e7e7e9;
+  border-right: 1px solid #e7e7e9;
+}
+
+.app-sider--product ~ .app-content .code-qa-sidebar-heading {
+  min-height: 30px;
+  padding: 3px 10px 5px;
+  border-bottom: 0;
+}
+
+.app-sider--product ~ .app-content .code-qa-sidebar-title.ant-typography {
+  margin: 0;
+  color: #303139;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.app-sider--product ~ .app-content .code-qa-sidebar-history {
+  padding: 0;
+  scrollbar-color: #c9c9cf transparent;
+  scrollbar-width: thin;
+}
+
+.app-sider--product ~ .app-content .code-qa-sidebar-history .ant-list {
+  background: transparent;
+}
+
+.app-sider--product ~ .app-content .code-qa-sidebar-history .ant-list-item.code-qa-conv {
+  min-height: 48px;
+  margin: 2px 0;
+  padding: 7px 10px !important;
+  border-block-end: 0;
+  border-radius: 10px;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.app-sider--product ~ .app-content .code-qa-conv:hover {
+  background: #ececef;
+}
+
+.app-sider--product ~ .app-content .code-qa-conv-active {
+  background: #e1e1e5;
+}
+
+.app-sider--product ~ .app-content .code-qa-conv .ant-typography:not(.ant-typography-secondary) {
+  color: #292a31;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.app-sider--product ~ .app-content .code-qa-conv .ant-typography-secondary {
+  color: #8a8b94;
+  font-size: 11px !important;
+  line-height: 16px;
+}
+
+.app-sider--product ~ .app-content .code-qa-conv:focus-visible {
+  outline-color: #676973;
+  outline-offset: 1px;
+}
+
+.app-sider--product ~ .app-content .code-qa-sidebar-history .ant-empty {
+  margin-top: 20px;
+}
+
+@media (max-width: 900px) {
+  .app-sider--product ~ .app-content .code-qa-sidebar,
+  .app-sider--product ~ .app-content .code-qa-layout--welcome .code-qa-sidebar {
+    background: #f7f7f8;
+    border-color: #e7e7e9;
+    border-radius: 12px;
+  }
+}
+
+
+/* ---------------------------------------------------------------------------
+ * Lingee 工作台视觉语言
+ * 共享壳层而非单页皮肤：品牌进入侧栏，柔和灰色画布托住白色工作面；卡片、表格、
+ * 页签和表单采用一致的圆角、低对比边框与唯一蓝紫强调色。
+ * ------------------------------------------------------------------------- */
+.app-shell,
+.app-shell > .ant-layout,
+.app-shell .ant-layout {
+  background: #f6f6f8;
+}
+
+.app-shell {
+  min-height: 100dvh;
+  color: #24242b;
+}
+
+.app-shell .app-sider {
+  height: 100dvh;
+  background: #f2f2f5 !important;
+  border-right: 1px solid #e4e4e9 !important;
+}
+
+.app-shell .app-sider > .ant-layout-sider-children {
+  background: #f2f2f5;
+}
+
+.app-sider-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 66px;
+  padding: 14px 16px 10px;
+}
+
+.app-sider-brand-mark {
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+  background: linear-gradient(135deg, #6575ff 0%, #5060ea 100%);
+  border-radius: 10px;
+  box-shadow: 0 6px 14px rgba(83, 100, 255, 0.22);
+  place-items: center;
+}
+
+.app-sider-brand-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.app-sider-brand-name.ant-typography {
+  color: #27272e;
+  font-size: 15px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  line-height: 20px;
+}
+
+.app-sider-brand-caption.ant-typography {
+  color: #96969f;
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.app-shell .app-workspace-tabs {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+  margin: 0 10px;
+  padding: 5px;
+  background: #e9e9ed;
+  border: 0;
+  border-radius: 11px;
+}
+
+.app-shell .app-workspace-tab.ant-btn {
+  height: 32px;
+  color: #73737d;
+  font-size: 13px;
+  font-weight: 650;
+  border-radius: 8px;
+}
+
+.app-shell .app-workspace-tab.ant-btn:hover {
+  color: #2a2a32;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.app-shell .app-workspace-tab.ant-btn.app-workspace-tab-active {
+  color: #27272e;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(31, 31, 35, 0.08);
+}
+
+.app-shell .app-workspace-menu.ant-menu,
+.app-shell .app-review-log-menu.ant-menu {
+  padding: 10px 10px 0;
+  background: transparent;
+}
+
+.app-shell .app-workspace-menu .ant-menu-item,
+.app-shell .app-review-log-menu .ant-menu-item,
+.app-shell .app-review-log-menu .ant-menu-submenu-title {
+  width: 100%;
+  height: 38px;
+  margin: 2px 0;
+  padding-inline: 12px !important;
+  color: #55555f;
+  font-size: 14px;
+  font-weight: 560;
+  line-height: 38px;
+  border-radius: 10px;
+}
+
+.app-shell .app-workspace-menu .ant-menu-item:hover,
+.app-shell .app-review-log-menu .ant-menu-item:hover,
+.app-shell .app-review-log-menu .ant-menu-submenu-title:hover {
+  color: #292931;
+  background: #e7e7eb;
+}
+
+.app-shell .app-workspace-menu .ant-menu-item-selected,
+.app-shell .app-review-log-menu .ant-menu-item-selected {
+  color: #292931;
+  font-weight: 700;
+  background: #dedee4;
+}
+
+.app-shell .app-review-log-group {
+  margin: 12px 10px 72px;
+  padding-top: 12px;
+  border-top-color: #dedee5;
+}
+
+.app-shell .app-review-log-title.ant-typography {
+  padding: 0 12px 5px;
+  color: #8d8d96;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.app-account-menu {
+  width: 264px;
+  padding: 8px 10px 10px;
+  background: #f2f2f5;
+  border-top-color: #dedee5;
+}
+
+.app-account-summary.ant-btn {
+  height: 48px;
+  padding: 6px 8px;
+  border-radius: 11px;
+}
+
+.app-account-summary.ant-btn:hover {
+  background: #e4e4e9;
+}
+
+.app-account-avatar {
+  background: linear-gradient(135deg, #6979ff, #5364ff);
+  box-shadow: none;
+}
+
+.app-account-name.ant-typography {
+  color: #383841;
+  font-weight: 650;
+}
+
+.app-account-role.ant-tag {
+  color: #5d69db;
+  background: #e9ebff;
+  border-color: transparent;
+}
+
+.app-shell .app-content {
+  min-width: 0;
+  padding: 20px 24px 28px;
+  background: #f6f6f8;
+}
+
+.app-shell .sidebar-page-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 28px;
+  margin-bottom: 4px;
+}
+
+.app-shell .sidebar-page-title h2,
+.app-shell .sidebar-page-title__heading {
+  margin: 0;
+  color: #24242b;
+  font-size: 20px;
+  font-weight: 720;
+  line-height: 28px;
+  letter-spacing: -0.025em;
+}
+
+.app-shell .sidebar-page-title__extra {
+  margin-left: auto;
+}
+
+/* 统一内容工作面：白色、微圆角、只保留环境光级别阴影。 */
+.app-shell .ant-card {
+  overflow: hidden;
+  background: #ffffff;
+  border-color: #ececf0;
+  border-radius: 16px;
+  box-shadow: 0 2px 8px rgba(31, 31, 36, 0.035);
+}
+
+.app-shell .ant-card .ant-card-head {
+  min-height: 54px;
+  padding: 0 20px;
+  border-bottom-color: #f0f0f3;
+}
+
+.app-shell .ant-card .ant-card-head-title {
+  padding: 16px 0;
+  color: #2b2b33;
+  font-weight: 700;
+}
+
+.app-shell .ant-card .ant-card-body {
+  padding: 20px;
+}
+
+.app-shell .ant-btn:not(.ant-btn-text):not(.ant-btn-link) {
+  border-color: #e4e4ea;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.app-shell .ant-btn-primary {
+  color: #ffffff;
+  background: #5364ff;
+  border-color: #5364ff;
+  box-shadow: 0 5px 13px rgba(83, 100, 255, 0.18);
+}
+
+.app-shell .ant-btn-primary:hover,
+.app-shell .ant-btn-primary:focus-visible {
+  background: #4657ef;
+  border-color: #4657ef;
+}
+
+.app-shell .ant-input,
+.app-shell .ant-input-affix-wrapper,
+.app-shell .ant-select-selector,
+.app-shell .ant-input-number,
+.app-shell .ant-picker {
+  border-color: #e3e3e9 !important;
+  border-radius: 10px !important;
+  box-shadow: none !important;
+}
+
+.app-shell .ant-input:hover,
+.app-shell .ant-input-affix-wrapper:hover,
+.app-shell .ant-select:not(.ant-select-disabled):hover .ant-select-selector,
+.app-shell .ant-input-number:hover,
+.app-shell .ant-picker:hover {
+  border-color: #c7ccff !important;
+}
+
+.app-shell .ant-input:focus,
+.app-shell .ant-input-affix-wrapper-focused,
+.app-shell .ant-select-focused .ant-select-selector,
+.app-shell .ant-input-number-focused,
+.app-shell .ant-picker-focused {
+  border-color: #8390ff !important;
+  box-shadow: 0 0 0 3px rgba(83, 100, 255, 0.11) !important;
+}
+
+.app-shell .ant-tabs .ant-tabs-nav {
+  margin-bottom: 18px;
+}
+
+.app-shell .ant-tabs .ant-tabs-tab {
+  padding: 8px 4px;
+  color: #83838d;
+  font-weight: 600;
+}
+
+.app-shell .ant-tabs .ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: #5364ff;
+}
+
+.app-shell .ant-tabs .ant-tabs-ink-bar {
+  height: 3px;
+  border-radius: 999px;
+  background: #5364ff;
+}
+
+.app-shell .ant-table-wrapper {
+  overflow: hidden;
+  background: #ffffff;
+  border: 1px solid #ececf0;
+  border-radius: 16px;
+  box-shadow: 0 2px 8px rgba(31, 31, 36, 0.03);
+}
+
+.app-shell .ant-table-thead > tr > th {
+  color: #696973;
+  font-size: 12px;
+  font-weight: 700;
+  background: #f7f7f9 !important;
+  border-bottom-color: #e9e9ee;
+}
+
+.app-shell .ant-table-tbody > tr > td {
+  color: #3b3b44;
+  border-bottom-color: #efeff2;
+}
+
+.app-shell .ant-table-tbody > tr:hover > td {
+  background: #fafaff !important;
+}
+
+.app-shell .ant-tag {
+  border-radius: 7px;
+}
+
+/* 无深色 Header 后，问答主区继续恰好占满可视高度；侧栏为账号区留出底部空间。 */
+.app-shell .code-qa-layout {
+  height: calc(100dvh - 48px);
+}
+
+.app-shell .code-qa-welcome {
+  min-height: calc(100dvh - 48px);
+}
+
+.app-shell .app-sider--product ~ .app-content .code-qa-sidebar,
+.app-shell .app-sider--product ~ .app-content .code-qa-layout--welcome .code-qa-sidebar {
+  width: 264px;
+  height: calc(50dvh - 92px);
+  bottom: 60px;
+  background: #f2f2f5;
+  border-color: #e0e0e6;
+}
+
+.app-shell .app-sider--product ~ .app-content .code-qa-new-conversation {
+  left: 12px;
+  width: 240px;
+}
+
+@media (max-width: 900px) {
+  .app-shell .app-sider {
+    height: auto;
+  }
+
+  .app-shell .app-content {
+    padding: 16px;
+  }
+
+  .app-shell .code-qa-layout,
+  .app-shell .code-qa-welcome {
+    height: auto;
+    min-height: calc(100dvh - 32px);
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-sidebar,
+  .app-shell .app-sider--product ~ .app-content .code-qa-layout--welcome .code-qa-sidebar {
+    height: auto;
+    min-height: 0;
+  }
+}
+
+
+/* 代表性工作页面收敛：保留状态色的语义，不再用大面积蓝绿渐变抢占内容层级。 */
+.app-shell .dashboard-page,
+.app-shell .batch-page {
+  gap: 18px;
+}
+
+.app-shell .dashboard-hero {
+  padding: 22px 24px;
+  background: #ffffff;
+  border-color: #e9e9ee;
+  border-radius: 18px;
+  box-shadow: 0 2px 8px rgba(31, 31, 36, 0.03);
+}
+
+.app-shell .dashboard-eyebrow {
+  color: #6572ef;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.app-shell .dashboard-hero h3 {
+  color: #27272e;
+  font-weight: 720;
+}
+
+.app-shell .dashboard-kpi-card {
+  min-height: 118px;
+  border: 1px solid #e9e9ee;
+  border-inline-start-width: 1px;
+  box-shadow: none;
+}
+
+.app-shell .dashboard-kpi-card--neutral,
+.app-shell .dashboard-kpi-card--ai,
+.app-shell .dashboard-kpi-card--review {
+  background: #ffffff;
+  border-inline-start-color: #e9e9ee;
+}
+
+.app-shell .dashboard-kpi-card .ant-statistic-title,
+.app-shell .dashboard-kpi-footer .ant-typography {
+  color: #898993;
+}
+
+.app-shell .dashboard-kpi-card .ant-statistic-content {
+  color: #292932;
+  font-size: 28px;
+}
+
+.app-shell .dashboard-distribution-item {
+  background: #fafafa;
+  border-color: #eeeeF2;
+  border-inline-start-width: 1px;
+  border-radius: 12px;
+}
+
+.app-shell a.dashboard-distribution-item:hover {
+  border-color: #cdd2ff;
+  box-shadow: 0 3px 10px rgba(83, 100, 255, 0.08);
+  transform: none;
+}
+
+.app-shell .dashboard-distribution-value {
+  color: #303039;
+}
+
+.app-shell .review-table-card {
+  border: 1px solid #ececf0;
+  border-radius: 16px;
+  box-shadow: 0 2px 8px rgba(31, 31, 36, 0.03);
+}
+
+.app-shell .review-table-card .ant-table-thead > tr > th {
+  color: #696973;
+  background: #f7f7f9;
+}
+
+.app-shell .code-qa-welcome-composer {
+  border-color: #e6e6eb;
+  border-radius: 18px;
+  box-shadow: 0 8px 24px rgba(31, 31, 36, 0.055);
+}
+
+.app-shell .code-qa-welcome-composer:focus-within {
+  border-color: #a5adff;
+  box-shadow: 0 0 0 4px rgba(83, 100, 255, 0.09), 0 8px 24px rgba(31, 31, 36, 0.045);
+}
+
+.app-shell .code-qa-welcome-title.ant-typography {
+  color: #2b2b33;
+}
+
+.app-shell .code-qa-welcome-description.ant-typography {
+  color: #888892;
+}
+
+.app-shell .code-qa-composer,
+.app-shell .code-qa-topbar {
+  background: #ffffff;
+  border-color: #e9e9ee;
+  box-shadow: 0 2px 8px rgba(31, 31, 36, 0.025);
+}
+
+
+/* 侧栏图标与文字同级：默认克制，选中后随当前工作区的蓝紫强调色收束。 */
+.app-shell .app-workspace-menu .ant-menu-item .ant-menu-item-icon,
+.app-shell .app-review-log-menu .ant-menu-item .ant-menu-item-icon {
+  min-width: 18px;
+  margin-inline-end: 9px;
+  color: #878791;
+  font-size: 16px;
+  line-height: 1;
+  vertical-align: -0.14em;
+}
+
+.app-shell .app-workspace-menu .ant-menu-item:hover .ant-menu-item-icon,
+.app-shell .app-review-log-menu .ant-menu-item:hover .ant-menu-item-icon {
+  color: #5f6fe7;
+}
+
+.app-shell .app-workspace-menu .ant-menu-item-selected .ant-menu-item-icon,
+.app-shell .app-review-log-menu .ant-menu-item-selected .ant-menu-item-icon {
+  color: #5364ff;
+}
+
+
+/* 主内容承载为一张大工作画布：与侧栏保持留白和圆角边界，避免页面直接贴满浏览器。 */
+.app-shell .app-content {
+  min-height: calc(100dvh - 18px);
+  margin: 8px 10px 10px 0;
+  overflow: auto;
+  background: #f9f9fb;
+  border: 1px solid #e5e5eb;
+  border-radius: 20px;
+}
+
+.app-shell .code-qa-layout {
+  height: calc(100dvh - 68px);
+}
+
+.app-shell .code-qa-welcome {
+  min-height: calc(100dvh - 68px);
+}
+
+@media (max-width: 900px) {
+  .app-shell .app-content {
+    min-height: 0;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .app-shell .code-qa-layout,
+  .app-shell .code-qa-welcome {
+    height: auto;
+    min-height: calc(100dvh - 32px);
+  }
+}
+
+
+/* 历史对话只保留一行标题：悬浮与选中态精确贴合文字行，不再形成两行元数据卡片。 */
+.app-shell .app-sider--product ~ .app-content .code-qa-sidebar-history .ant-list-item.code-qa-conv {
+  display: flex;
+  min-height: 34px;
+  height: 34px;
+  align-items: center;
+  margin: 1px 0;
+  padding: 0 10px !important;
+}
+
+.app-shell .app-sider--product ~ .app-content .code-qa-conv-title.ant-typography {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  color: #3b3b44;
+  font-size: 13px;
+  line-height: 34px;
+}
+
+
+/* ---------------------------------------------------------------------------
+ * 已进入会话的对话工作面
+ * 标题与冻结上下文轻量并列，回答落在无卡片的阅读画布；输入区收拢成页面底部居中的
+ * 圆角 Composer，避免旧版“顶部、消息区、输入区都是三张白卡”的割裂感。
+ * ------------------------------------------------------------------------- */
+.app-shell .code-qa-main {
+  position: relative;
+}
+
+.app-shell .code-qa-topbar {
+  align-items: flex-start;
+  min-height: 48px;
+  margin: 0;
+  padding: 4px 8px 12px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid #ececf0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.code-qa-topbar-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  min-width: 0;
+  gap: 10px 14px;
+}
+
+.code-qa-conversation-title.ant-typography {
+  flex: 0 0 auto;
+  margin: 0;
+  color: #28282f;
+  font-size: 16px;
+  font-weight: 720;
+  letter-spacing: -0.02em;
+  line-height: 28px;
+}
+
+.code-qa-context-pills {
+  display: flex;
+  flex: 1 1 360px;
+  flex-wrap: wrap;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+}
+
+.code-qa-context-pill {
+  display: inline-flex;
+  min-width: 0;
+  max-width: min(100%, 300px);
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px;
+  overflow: hidden;
+  color: #555560;
+  font-size: 12px;
+  font-weight: 560;
+  line-height: 26px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: #f1f1f4;
+  border: 1px solid #e7e7ec;
+  border-radius: 8px;
+}
+
+.code-qa-context-key {
+  flex: 0 0 auto;
+  color: #9696a0;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.code-qa-context-repository > span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.code-qa-context-state {
+  flex: 0 0 auto;
+  color: #7a7a85;
+  font-variant-numeric: tabular-nums;
+}
+
+.code-qa-context-branch {
+  color: #4860cc;
+  background: #f1f3ff;
+  border-color: #e0e4ff;
+}
+
+.code-qa-context-model {
+  color: #6b4eb3;
+  background: #f7f2ff;
+  border-color: #eadfff;
+}
+
+.code-qa-delete-button.ant-btn {
+  margin-top: 2px;
+  color: #b05f67;
+  border-radius: 8px;
+}
+
+.code-qa-delete-button.ant-btn:hover:not(:disabled) {
+  color: #a54350;
+  background: #fff1f2;
+}
+
+.app-shell .code-qa-stream {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  padding: 42px clamp(20px, 10vw, 180px);
+  overflow-y: auto;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.app-shell .code-qa-stream > .ant-empty {
+  margin: auto;
+}
+
+.app-shell .code-qa-turn {
+  width: min(100%, 900px);
+  margin: 0 auto 30px;
+  gap: 14px;
+}
+
+.app-shell .code-qa-bubble {
+  border-radius: 18px;
+}
+
+.app-shell .code-qa-bubble-user {
+  max-width: min(520px, 82%);
+  padding: 10px 14px;
+  color: #33333b;
+  background: #eeeeF1;
+  border: 0;
+  border-bottom-right-radius: 6px;
+}
+
+.app-shell .code-qa-bubble-agent {
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.app-shell .code-qa-composer {
+  box-sizing: border-box;
+  width: min(100%, 840px);
+  align-self: center;
+  margin: 12px auto 8px;
+  padding: 9px 12px 8px;
+  background: #ffffff;
+  border: 1px solid #e6e6ec;
+  border-radius: 24px;
+  box-shadow: 0 12px 30px rgba(31, 31, 36, 0.08), 0 2px 7px rgba(31, 31, 36, 0.035);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.app-shell .code-qa-composer:focus-within {
+  border-color: #a5adff;
+  box-shadow: 0 0 0 4px rgba(83, 100, 255, 0.09), 0 12px 30px rgba(31, 31, 36, 0.065);
+}
+
+.code-qa-composer-input.ant-input {
+  min-height: 34px !important;
+  padding: 7px 8px 2px;
+  color: #33333a;
+  font-size: 14px;
+  line-height: 22px;
+  resize: none;
+  background: transparent;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+
+.code-qa-composer-input.ant-input::placeholder {
+  color: #b0b0b8;
+}
+
+.code-qa-composer-actions {
+  min-height: 32px;
+  margin-top: 0;
+  padding: 0 2px 0 5px;
+}
+
+.code-qa-composer-hint.ant-typography {
+  color: #a0a0a9;
+  font-size: 11px;
+}
+
+.code-qa-send-button.ant-btn {
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  padding: 0;
+  color: transparent;
+  border-radius: 50%;
+  box-shadow: none;
+  place-items: center;
+}
+
+.code-qa-send-button.ant-btn::after {
+  color: #ffffff;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1;
+  content: '↑';
+}
+
+.code-qa-send-button.ant-btn:disabled {
+  color: transparent;
+  background: #e8e8ec;
+  border-color: #e8e8ec;
+}
+
+.code-qa-send-button.ant-btn:disabled::after {
+  color: #a9a9b1;
+}
+
+@media (max-width: 900px) {
+  .app-shell .code-qa-topbar {
+    padding-inline: 2px;
+  }
+
+  .code-qa-context-pills {
+    flex-basis: 100%;
+  }
+
+  .app-shell .code-qa-stream {
+    padding: 28px 10px;
+  }
+
+  .app-shell .code-qa-composer {
+    width: 100%;
+    margin-bottom: 0;
+  }
+}
+
+
+/* 左下账号行：贴合侧栏背景的轻量身份入口，不再表现成带边框的独立信息卡。 */
+.app-account-menu {
+  padding: 6px 12px 10px;
+  background: #f2f2f5;
+  border-top: 0;
+}
+
+.app-account-summary.ant-btn {
+  height: 38px;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 9px;
+}
+
+.app-account-summary.ant-btn:hover {
+  background: #e5e5e9;
+}
+
+.app-account-avatar {
+  width: 24px;
+  height: 24px;
+  flex-basis: 24px;
+  color: #61616b;
+  font-size: 11px;
+  font-weight: 700;
+  background: #d9d9df;
+  box-shadow: none;
+}
+
+.app-account-details {
+  gap: 5px;
+}
+
+.app-account-name.ant-typography {
+  color: #3b3b43;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 18px;
+}
+
+.app-account-role.ant-tag {
+  margin-inline-end: 0;
+  padding-inline: 5px;
+  color: #8157d1;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 18px;
+  background: #f0e9ff;
+  border: 0;
+  border-radius: 6px;
+}
+
+
+/* 精致底部账号状态行：与参考图同级的 30px 密度，避免占据历史对话区域。 */
+.app-account-menu {
+  padding: 3px 14px 6px;
+}
+
+.app-account-summary.ant-btn {
+  height: 30px;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 7px;
+}
+
+.app-account-avatar {
+  width: 18px;
+  height: 18px;
+  flex-basis: 18px;
+  color: #777781;
+  font-size: 9px;
+  background: #dedee3;
+}
+
+.app-account-details {
+  gap: 4px;
+}
+
+.app-account-name.ant-typography {
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 16px;
+}
+
+.app-account-role.ant-tag {
+  padding: 0 4px;
+  color: #9565df;
+  font-size: 10px;
+  font-weight: 620;
+  line-height: 15px;
+  background: #f3edff;
+  border-radius: 5px;
+}
+
+
+/* Portal 挂载在 app-shell 外：用账号容器作用域强制盖掉旧版 48px 行高与渐变头像。 */
+.app-account-menu {
+  height: 36px !important;
+  min-height: 36px !important;
+  max-height: 36px !important;
+  box-sizing: border-box !important;
+  padding: 3px 14px !important;
+  overflow: hidden;
+  background: #f2f2f5 !important;
+  border-top: 0 !important;
+}
+
+.app-account-menu .app-account-summary.ant-btn {
+  height: 30px !important;
+  min-height: 30px !important;
+  padding: 2px 4px !important;
+  gap: 6px !important;
+  border-radius: 7px !important;
+}
+
+.app-account-menu .app-account-avatar {
+  width: 18px !important;
+  height: 18px !important;
+  flex: 0 0 18px !important;
+  color: #777781 !important;
+  font-size: 9px !important;
+  line-height: 18px !important;
+  background: #dedee3 !important;
+  box-shadow: none !important;
+}
+
+.app-account-menu .app-account-details {
+  gap: 4px !important;
+}
+
+.app-account-menu .app-account-name.ant-typography {
+  color: #3b3b43 !important;
+  font-size: 12px !important;
+  line-height: 16px !important;
+}
+
+.app-account-menu .app-account-role.ant-tag {
+  padding: 0 4px !important;
+  color: #9565df !important;
+  font-size: 10px !important;
+  line-height: 15px !important;
+  background: #f3edff !important;
+  border: 0 !important;
+  border-radius: 5px !important;
+}
+
+/* 表格末列约定为操作区：将文字型操作统一成紧凑描边按钮。
+ * 仅作用于最后一列，避免影响名称、详情等正文链接；danger 按钮仍由 Ant Design 保持红色。 */
+.app-shell .ant-table-tbody > tr > td:last-child .ant-btn-link {
+  height: 28px;
+  padding-inline: 10px;
+  border: 1px solid #e4e4ea;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #5364ff;
+  line-height: 26px;
+}
+
+.app-shell .ant-table-tbody > tr > td:last-child .ant-btn-link:hover,
+.app-shell .ant-table-tbody > tr > td:last-child .ant-btn-link:focus-visible {
+  border-color: #8390ff;
+  background: #f7f8ff;
+  color: #4657ef;
+}
+
+.app-shell .ant-table-tbody > tr > td:last-child .ant-btn-link.ant-btn-dangerous {
+  border-color: #ffccc7;
+  background: #fffafa;
+  color: #ff4d4f;
+}
+
+/* ---------------------------------------------------------------------------
+ * 默认能力策略工作台 —— 运行参数清单
+ * 资源限额是配置而非仪表盘：整张清单一个平面，左栏放域名与锁定边界，
+ * 右栏行式参数（标签居左、等宽数值居右、点状引导线连接），
+ * 人性化单位优先展示，原始值以小字随附。
+ * ------------------------------------------------------------------------- */
+.harness-policy-page {
+  --hps-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.harness-policy-masthead {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px 2px 0;
+}
+
+.harness-policy-masthead-copy {
+  min-width: 0;
+}
+
+.harness-policy-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.harness-policy-title-row .ant-typography {
+  margin: 0;
+}
+
+.harness-policy-status-tag.ant-tag {
+  margin: 0;
+  padding: 0 9px;
+  color: #4b5ae0;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 22px;
+  background: #eef0fe;
+  border: 0;
+  border-radius: 6px;
+}
+
+.harness-policy-subtitle.ant-typography {
+  display: block;
+  margin-top: 5px;
+  color: #8a8a94;
+  font-size: 12.5px;
+  line-height: 19px;
+}
+
+.harness-policy-controls {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.harness-policy-model-select {
+  min-width: 260px;
+}
+
+.harness-policy-workbench {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* 摘要条：四个关键数字，等宽字体，细分隔线 */
+.harness-policy-snapshot {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  background: #ffffff;
+  border: 1px solid #e9e9ee;
+  border-radius: 14px;
+  box-shadow: 0 2px 8px rgba(31, 31, 36, 0.02);
+}
+
+.harness-policy-snapshot-item {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 14px 18px;
+}
+
+.harness-policy-snapshot-item + .harness-policy-snapshot-item::before {
+  position: absolute;
+  top: 16px;
+  bottom: 16px;
+  left: 0;
+  width: 1px;
+  background: #efeff2;
+  content: '';
+}
+
+.harness-policy-snapshot-item > span,
+.harness-policy-snapshot-item > small {
+  overflow: hidden;
+  color: #9a9aa4;
+  font-size: 10.5px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.harness-policy-snapshot-item > strong {
+  overflow: hidden;
+  color: #26262d;
+  font-family: var(--hps-mono);
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 26px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 能力契约 / 技能目录卡片共享同一平面语言 */
+.harness-policy-card.ant-card {
+  border-color: #e9e9ee;
+  border-radius: 14px;
+  box-shadow: 0 2px 8px rgba(31, 31, 36, 0.02);
+}
+
+.harness-policy-card .ant-card-head {
+  min-height: 48px;
+  padding: 0 20px;
+}
+
+.harness-policy-card .ant-card-head-title {
+  padding: 13px 0;
+  color: #303039;
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.harness-policy-card .ant-card-body {
+  padding: 14px 20px 16px;
+}
+
+.harness-policy-capability-intro {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+
+.harness-policy-capability-intro .ant-typography {
+  max-width: 720px;
+  margin: 0;
+  color: #8a8a94;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.harness-policy-lock-note.ant-typography {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  color: #6574e8;
+  font-family: var(--hps-mono);
+  font-size: 10.5px;
+  background: #f2f4fe;
+  border-radius: 5px;
+}
+
+/* 能力项不再用描边 chips：绿点 + 文字的紧凑网格，减少视觉噪音 */
+.harness-policy-capability-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 2px 18px;
+}
+
+.harness-policy-capability-item {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 2px;
+  color: #57575f;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.harness-policy-capability-item > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.harness-policy-capability-check {
+  display: inline-grid;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  color: #a0a0a8;
+  font-size: 9.5px;
+  font-weight: 800;
+  background: #ececf0;
+  border-radius: 50%;
+  place-items: center;
+}
+
+.harness-policy-capability-check.is-enabled {
+  color: #ffffff;
+  background: #57a83c;
+}
+
+/* 清单平面 */
+.harness-policy-sheet {
+  overflow: hidden;
+  background: #ffffff;
+  border: 1px solid #e9e9ee;
+  border-radius: 14px;
+  box-shadow: 0 2px 8px rgba(31, 31, 36, 0.02);
+}
+
+.hps-sheet-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 22px 13px;
+  border-bottom: 1px solid #efeff2;
+}
+
+.hps-sheet-head h3 {
+  margin: 0;
+  color: #303039;
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.hps-sheet-head span {
+  color: #9a9aa4;
+  font-size: 11.5px;
+  line-height: 16px;
+}
+
+.hps-sheet-head code {
+  padding: 1px 6px;
+  color: #5c5c66;
+  font-family: var(--hps-mono);
+  font-size: 11px;
+  background: #f5f5f8;
+  border-radius: 5px;
+}
+
+.hps-section {
+  display: grid;
+  grid-template-columns: 216px minmax(0, 1fr);
+  gap: 40px;
+  padding: 18px 22px 20px;
+}
+
+.hps-section + .hps-section {
+  border-top: 1px solid #f0f0f3;
+}
+
+.hps-rail h4 {
+  margin: 2px 0 6px;
+  color: #303039;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 19px;
+}
+
+.hps-rail p {
+  margin: 0;
+  color: #8a8a94;
+  font-size: 12px;
+  line-height: 19px;
+}
+
+/* 锁定边界下沉为侧栏脚注，不再占用数值区 */
+.hps-rail-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 13px 0 0;
+  padding: 11px 0 0;
+  border-top: 1px solid #efeff2;
+  list-style: none;
+}
+
+.hps-rail-notes li {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  color: #9a9aa4;
+  font-size: 11px;
+  line-height: 17px;
+}
+
+.hps-rail-notes li::before {
+  width: 4px;
+  height: 4px;
+  flex: 0 0 auto;
+  background: #c9c9d2;
+  border-radius: 1px;
+  content: '';
+  transform: translateY(-1px);
+}
+
+/* 参数行：标签居左、等宽数值居右，行间细分隔线 */
+.hps-rows {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.hps-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 0;
+}
+
+.hps-rows .hps-row + .hps-row {
+  border-top: 1px solid #f4f4f7;
+}
+
+.hps-row-label {
+  flex: 0 0 auto;
+  color: #6b6b76;
+  font-size: 12.5px;
+  line-height: 22px;
+}
+
+.hps-row-value {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: baseline;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.hps-row-value strong {
+  color: #26262d;
+  font-family: var(--hps-mono);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 22px;
+}
+
+.hps-row-value small {
+  color: #a4a4ae;
+  font-family: var(--hps-mono);
+  font-size: 10.5px;
+  line-height: 22px;
+}
+
+.hps-row .ant-form-item {
+  flex: 0 0 auto;
+  margin: 0 0 0 auto;
+}
+
+.hps-row .ant-input-number {
+  width: 200px;
+}
+
+.hps-row .ant-input-number .ant-input-number-input {
+  font-family: var(--hps-mono);
+  font-size: 13px;
+  text-align: right;
+}
+
+.hps-row--domains {
+  flex-wrap: wrap;
+}
+
+.hps-domains-field {
+  flex: 1 1 100%;
+  order: 3;
+}
+
+.hps-domains-field .ant-select {
+  width: 100%;
+}
+
+.hps-domain-tags {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.hps-domain-tags .ant-tag {
+  margin-inline-end: 0;
+  font-family: var(--hps-mono);
+  font-size: 11px;
+}
+
+/* 技能目录卡片内的双列参数网格 */
+.hps-rows--grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 36px;
+}
+
+.hps-rows--grid .hps-row {
+  border-top: 1px solid #f4f4f7;
+}
+
+.hps-rows--grid .hps-row:nth-child(-n + 2) {
+  border-top: 0;
+}
+
+.harness-policy-skill-card .ant-alert {
+  margin-bottom: 12px;
+  padding: 7px 10px;
+  color: #7a7a84;
+  background: #f7f8fc;
+  border: 1px solid #e9ebf6;
+  border-radius: 9px;
+}
+
+.harness-policy-skill-card .ant-alert .ant-alert-icon {
+  color: #6574e8;
+}
+
+@media (max-width: 1200px) {
+  .harness-policy-capability-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .hps-section {
+    grid-template-columns: 190px minmax(0, 1fr);
+    gap: 28px;
+  }
+}
+
+@media (max-width: 900px) {
+  .harness-policy-masthead {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .harness-policy-controls {
+    justify-content: flex-start;
+  }
+
+  .harness-policy-snapshot {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .harness-policy-snapshot-item:nth-child(3)::before {
+    display: none;
+  }
+
+  .harness-policy-capability-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .hps-section {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .hps-rail-notes {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 5px 16px;
+    margin-top: 10px;
+    padding-top: 9px;
+  }
+}
+
+@media (max-width: 640px) {
+  .harness-policy-controls,
+  .harness-policy-model-select {
+    width: 100%;
+  }
+
+  .harness-policy-controls .ant-select {
+    flex: 1 1 100%;
+  }
+
+  .harness-policy-snapshot {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .harness-policy-snapshot-item + .harness-policy-snapshot-item::before {
+    top: 0;
+    right: 18px;
+    bottom: auto;
+    left: 18px;
+    width: auto;
+    height: 1px;
+  }
+
+  .harness-policy-snapshot-item:nth-child(3)::before {
+    display: block;
+  }
+
+  .harness-policy-capability-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .harness-policy-capability-intro {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .hps-sheet-head {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .hps-rows--grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hps-rows--grid .hps-row:nth-child(2) {
+    border-top: 1px solid #f4f4f7;
+  }
+
+  .hps-row .ant-input-number {
+    width: 150px;
+  }
+}
+
+
+
+/* 技能容量概览只承载四项即时指标，采用紧凑信息条而非普通内容卡片的宽松节奏。 */
+.skill-capacity-card .ant-card-head {
+  min-height: 44px;
+  padding-inline: 20px;
+}
+
+.skill-capacity-card .ant-card-head-title {
+  padding-block: 11px;
+}
+
+.skill-capacity-card .ant-card-body {
+  padding: 12px 20px 14px;
+}
+
+.skill-capacity-card .ant-row {
+  row-gap: 10px !important;
+}
+
+.skill-capacity-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  align-items: baseline;
+  column-gap: 6px;
+  row-gap: 2px;
+}
+
+.skill-capacity-bar > :first-child {
+  grid-column: 1;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.skill-capacity-bar > :nth-child(2) {
+  grid-column: 1 / -1;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.skill-capacity-bar .ant-progress {
+  grid-column: 1 / -1;
+  margin: 1px 0 0;
+  line-height: 4px;
+}
+
+.skill-capacity-bar .ant-progress-outer,
+.skill-capacity-bar .ant-progress-inner {
+  vertical-align: top;
+}
+
+/* 全局 Card 规则的选择器更具体，容量概览必须显式覆盖，避免重新被撑高。 */
+.app-shell .skill-capacity-card .ant-card-head {
+  min-height: 44px;
+  padding-inline: 20px;
+}
+
+.app-shell .skill-capacity-card .ant-card-head-title {
+  padding-block: 11px;
+}
+
+.app-shell .skill-capacity-card .ant-card-body {
+  padding: 12px 20px 14px;
+}
+
+
+/* 技能页迁入的目录容量水位：上半显示实时使用量，下半保持平台级上限配置。 */
+.hps-capacity-overview {
+  margin-bottom: 16px;
+  padding: 14px 16px 12px;
+  background: #fafbff;
+  border: 1px solid #e9ebf6;
+  border-radius: 10px;
+}
+
+.hps-capacity-overview-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.hps-capacity-overview-head .ant-typography:first-child {
+  color: #3c3d46;
+  font-size: 13px;
+}
+
+.hps-capacity-overview-head .ant-typography-secondary {
+  margin-left: 8px;
+  color: #9798a2;
+  font-size: 11px;
+}
+
+.hps-capacity-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.hps-capacity-meter {
+  min-width: 0;
+}
+
+.hps-capacity-meter-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin-bottom: 6px;
+}
+
+.hps-capacity-meter-head > .ant-typography {
+  overflow: hidden;
+  color: #8d8e98;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hps-capacity-meter-head > span {
+  overflow: hidden;
+  color: #999aa3;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hps-capacity-meter-head strong {
+  color: #34353d;
+  font-size: 15px;
+  font-weight: 720;
+}
+
+.hps-capacity-meter .ant-progress {
+  line-height: 1;
+}
+
+.hps-capacity-meter .ant-progress-inner {
+  background: #e8e9ef;
+}
+
+.hps-limit-divider {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 2px 0 8px;
+  padding-top: 2px;
+}
+
+.hps-limit-divider .ant-typography:first-child {
+  color: #4a4b54;
+  font-size: 12px;
+}
+
+.hps-limit-divider .ant-typography-secondary {
+  color: #a0a1aa;
+  font-size: 11px;
+}
+
+@media (max-width: 900px) {
+  .hps-capacity-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .hps-capacity-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hps-capacity-overview-head,
+  .hps-limit-divider {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .hps-capacity-overview-head .ant-typography-secondary {
+    margin-left: 0;
+  }
+}
+
+
+/* 技能目录容量：由技能页迁入默认能力策略底部，上方看水位，下方改上限。 */
+.hps-capacity-overview {
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  background: #fafbff;
+  border: 1px solid #e8eaf5;
+  border-radius: 9px;
+}
+
+.hps-capacity-overview-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.hps-capacity-overview-head .ant-typography:first-child {
+  color: #454650;
+  font-size: 12px;
+}
+
+.hps-capacity-overview-head .ant-typography-secondary {
+  margin-left: 8px;
+  color: #9899a3;
+  font-size: 11px;
+}
+
+.hps-capacity-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.hps-capacity-meter {
+  min-width: 0;
+}
+
+.hps-capacity-meter-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 5px;
+}
+
+.hps-capacity-meter-head > .ant-typography {
+  overflow: hidden;
+  color: #8c8d97;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hps-capacity-meter-head > span {
+  overflow: hidden;
+  color: #9697a1;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hps-capacity-meter-head strong {
+  color: #373841;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.hps-capacity-meter .ant-progress {
+  line-height: 1;
+}
+
+.hps-capacity-meter .ant-progress-inner {
+  background: #e7e9ef;
+}
+
+.hps-limit-divider {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 2px 0 8px;
+}
+
+.hps-limit-divider .ant-typography:first-child {
+  color: #555660;
+  font-size: 12px;
+}
+
+.hps-limit-divider .ant-typography-secondary {
+  color: #a0a1aa;
+  font-size: 11px;
+}
+
+@media (max-width: 900px) {
+  .hps-capacity-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .hps-capacity-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hps-capacity-overview-head,
+  .hps-limit-divider {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .hps-capacity-overview-head .ant-typography-secondary {
+    margin-left: 0;
+  }
+}
+
+/*
+ * 主页面列表统一采用 44px 表头行：14px / 20px 字体节奏 + 12px 垂直内边距。
+ * `size="small"` 继续用于弹窗、详情和运行台的紧凑表格；用户故事选择器虽采用
+ * small 表体以提高浏览密度，但它是主页面列表，因此单独恢复到统一表头规格。
+ */
+.app-shell .ant-table-thead > tr > th {
+  height: 44px;
+  padding-block: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.app-shell .ant-table.ant-table-small .ant-table-thead > tr > th {
+  height: 34px;
+  padding-block: 8px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.app-shell .story-board-list .ant-table.ant-table-small .ant-table-thead > tr > th,
+.app-shell .story-board-card .ant-table.ant-table-small .ant-table-thead > tr > th {
+  height: 44px;
+  padding-block: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+/* 用户管理页的页签内容直接承接表格，避免 nav 默认下边距形成无意义空白。 */
+.app-shell .users-management-tabs > .ant-tabs-nav {
+  margin-bottom: 0;
+}
+
+.app-shell .users-management-tabs > .ant-tabs-content-holder {
+  padding-top: 0;
 }

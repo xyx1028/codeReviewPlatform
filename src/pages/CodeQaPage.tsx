@@ -342,7 +342,7 @@ export default function CodeQaPage() {
     <div className="code-qa-layout">
       <aside className="code-qa-sidebar" aria-label="历史会话">
         <div className="code-qa-sidebar-heading">
-          <Text className="code-qa-sidebar-title">历史会话</Text>
+          <Text className="code-qa-sidebar-title">历史对话</Text>
           <Button
             type="primary"
             block
@@ -386,19 +386,13 @@ export default function CodeQaPage() {
                     }
                   }}
                 >
-                  <Space direction="vertical" size={2} style={{ width: '100%' }}>
-                    <Text ellipsis style={{ fontWeight: item.id === activeId ? 600 : 400 }}>
-                      {item.title}
-                    </Text>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      {/* 多仓库时只显示"N 个仓库"，列宽放不下全部名字。悬浮看完整清单。 */}
-                      {item.repositories.length === 1
-                        ? item.repositories[0]
-                        : `${item.repositories.length} 个仓库`}
-                      {' · '}
-                      {item.branch} · {item.turn_count} 问
-                    </Text>
-                  </Space>
+                  <Text
+                    className="code-qa-conv-title"
+                    ellipsis
+                    style={{ fontWeight: item.id === activeId ? 600 : 400 }}
+                  >
+                    {item.title}
+                  </Text>
                 </List.Item>
               )}
             />
@@ -456,10 +450,10 @@ export default function CodeQaPage() {
         ) : (
           <>
             <div className="code-qa-topbar">
-              <Space size={8} wrap>
-                <Text strong>{detail?.title ?? '对话'}</Text>
+              <div className="code-qa-topbar-main">
+                <Text className="code-qa-conversation-title">{detail?.title ?? '对话'}</Text>
                 {detail ? (
-                  <>
+                  <div className="code-qa-context-pills" aria-label="本次对话的代码与模型范围">
                     {detail.repositories.map((repo) => {
                       const sha = detail.commit_shas?.[repo]
                       return (
@@ -471,20 +465,27 @@ export default function CodeQaPage() {
                               : `${repo}：代码还没拉取，第一次提问时拉取并固定`
                           }
                         >
-                          <Tag color={sha ? 'purple' : undefined}>
-                            {repo}
-                            {sha ? ` @ ${sha.slice(0, 8)}` : ' · 待拉取'}
-                          </Tag>
+                          <span className="code-qa-context-pill code-qa-context-repository">
+                            <span className="code-qa-context-key">代码</span>
+                            <span>{repo}</span>
+                            <span className="code-qa-context-state">{sha ? `@ ${sha.slice(0, 8)}` : '待拉取'}</span>
+                          </span>
                         </Tooltip>
                       )
                     })}
-                    <Tag color="geekblue">{detail.branch}</Tag>
+                    <span className="code-qa-context-pill code-qa-context-branch">
+                      <span className="code-qa-context-key">分支</span>
+                      <span>{detail.branch}</span>
+                    </span>
                     {detail.selected_model_display_name ? (
-                      <Tag color="cyan">模型：{detail.selected_model_display_name}</Tag>
+                      <span className="code-qa-context-pill code-qa-context-model">
+                        <span className="code-qa-context-key">模型</span>
+                        <span>{detail.selected_model_display_name}</span>
+                      </span>
                     ) : null}
-                  </>
+                  </div>
                 ) : null}
-              </Space>
+              </div>
               <Popconfirm
                 title="删除这个对话？"
                 description="删除后历史问答不可恢复。"
@@ -493,7 +494,14 @@ export default function CodeQaPage() {
                 okButtonProps={{ danger: true }}
                 onConfirm={() => deleteMutation.mutate(activeId)}
               >
-                <Button size="small" danger disabled={inFlight} loading={deleteMutation.isPending}>
+                <Button
+                  className="code-qa-delete-button"
+                  size="small"
+                  danger
+                  type="text"
+                  disabled={inFlight}
+                  loading={deleteMutation.isPending}
+                >
                   删除
                 </Button>
               </Popconfirm>
@@ -528,12 +536,13 @@ export default function CodeQaPage() {
 
             <div className="code-qa-composer">
               <Input.TextArea
+                className="code-qa-composer-input"
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 placeholder={
                   inFlight ? '上一个问题还在回答中…' : '用自己的话描述你想了解的功能或流程'
                 }
-                autoSize={{ minRows: 2, maxRows: 6 }}
+                autoSize={{ minRows: 1, maxRows: 5 }}
                 maxLength={CODE_QA_QUESTION_MAX_CHARS}
                 disabled={inFlight}
                 aria-label="输入问题"
@@ -546,10 +555,12 @@ export default function CodeQaPage() {
                 }}
               />
               <div className="code-qa-composer-actions">
-                <Text type="secondary" style={{ fontSize: 12 }}>
+                <Text className="code-qa-composer-hint" type="secondary">
                   Enter 发送 · Shift+Enter 换行
                 </Text>
                 <Button
+                  aria-label="发送问题"
+                  className="code-qa-send-button"
                   type="primary"
                   onClick={submitQuestion}
                   loading={askMutation.isPending}
@@ -573,17 +584,6 @@ export default function CodeQaPage() {
         cancelText="取消"
         destroyOnHidden
       >
-        <Alert
-          type={hasNoSelectableModel ? 'error' : 'info'}
-          showIcon
-          style={{ marginBottom: 16 }}
-          message={hasNoSelectableModel ? '没有可用于问答的模型' : '仓库、分支和模型选定后不能再改'}
-          description={
-            hasNoSelectableModel
-              ? '请联系管理员在「模型管理」启用模型并配置有效 API Key。'
-              : '可以一次选多个仓库（比如前端 + 后端），适合问跨端联动的问题。一个对话固定看这些仓库的同一版代码，并固定使用下方选择的一个模型；要换仓库、看最新代码或换模型，请新建一个对话。'
-          }
-        />
         <Form
           form={createForm}
           layout="vertical"
@@ -594,7 +594,6 @@ export default function CodeQaPage() {
             name="modelConfigId"
             label="问答模型（单选）"
             rules={[{ required: true, message: '请选择一个问答模型' }]}
-            extra="本会话后续所有问题都会使用此模型；如需换模型，请新建对话。"
           >
             <Select
               placeholder="选择一个用于本会话的模型"
@@ -610,7 +609,6 @@ export default function CodeQaPage() {
             name="repositories"
             label="仓库（可多选）"
             rules={[{ required: true, message: '请至少选择一个仓库' }]}
-            extra="选多个仓库时，AI 会在每段结论上说清它属于哪个仓库。"
           >
             <Select
               mode="multiple"
@@ -629,7 +627,6 @@ export default function CodeQaPage() {
             name="branch"
             label="分支"
             rules={[{ required: true, message: '请选择分支' }]}
-            extra="所有选中的仓库都看这个分支。"
           >
             <Select
               options={branches.map((branch) => ({

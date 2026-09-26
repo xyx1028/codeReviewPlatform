@@ -385,8 +385,32 @@ a {
   width: 100%;
 }
 
-.users-management-card .ant-tabs-nav {
+.users-management-tabs .ant-tabs-nav {
+  margin-bottom: 0;
+}
+
+/* 页签内容直接承接列表；左右安全内边距只保护表格与分页控件，不制造顶部空白。 */
+.users-management-tabs .ant-tabs-content-holder {
+  padding: 0 16px 24px;
+}
+
+.admin-users-list {
+  width: 100%;
+}
+
+.admin-users-list--with-alert > .ant-alert {
   margin-bottom: 16px;
+}
+
+/* 统一所有表格分页器的横向安全区。表格本体可横向滚动，分页控件不应随之贴边；
+ * 不使用直接子选择器，兼容 Ant Design 在分页器外增加包装节点的布局。 */
+.app-shell .ant-table-wrapper .ant-table-pagination.ant-pagination {
+  margin-inline: 20px;
+}
+
+/* 页码组与页大小选择器是一个操作组，保持紧凑而不黏连。 */
+.app-shell .ant-table-pagination.ant-pagination .ant-pagination-options {
+  margin-inline-start: 8px;
 }
 
 .select-with-margin {
