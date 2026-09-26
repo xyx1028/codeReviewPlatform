@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * Mac 宿主机模型代理（V1.7）。
+ * macOS / Windows 宿主机代理（模型与 Linky 共用）。
  *
- * 只做一件事：把 Docker Worker 的模型请求，转发到 macOS 当前生效的公司网络/VPN。
- * 必须运行在 macOS 宿主机上，不能放进 Docker —— 放进容器就还是拿不到 VPN 路由。
+ * 只做一件事：把 Docker Worker 的模型请求，转发到宿主机当前生效的公司网络/VPN。
+ * 必须运行在 macOS / Windows 宿主机上，不能放进 Docker —— 放进容器就还是拿不到 VPN 路由。
  *
  * 阶段二取消了目标域名白名单。原因不是"放宽"，而是那层判断放错了地方：
  * "这个模型在哪张网上"是模型自己的属性（数据库 `ai_model_config.network_access_mode`），
@@ -22,13 +22,16 @@ import http from 'node:http'
 import https from 'node:https'
 import net from 'node:net'
 import crypto from 'node:crypto'
+import { pathToFileURL } from 'node:url'
+import { realpathSync } from 'node:fs'
+import { DEFAULT_PROXY_PORTS } from './model-vpn-proxy-config.mjs'
 
 const bindHost = process.env.MODEL_VPN_PROXY_BIND ?? '127.0.0.1'
 const port = Number(process.env.MODEL_VPN_PROXY_PORT ?? '17890')
 const username = process.env.MODEL_VPN_PROXY_USERNAME ?? ''
 const password = process.env.MODEL_VPN_PROXY_PASSWORD ?? ''
 const allowedPorts = new Set(
-  (process.env.MODEL_VPN_PROXY_ALLOWED_PORTS ?? '80,443')
+  (process.env.MODEL_VPN_PROXY_ALLOWED_PORTS ?? DEFAULT_PROXY_PORTS)
     .split(',')
     .map((value) => Number(value.trim()))
     .filter((value) => Number.isInteger(value) && value > 0 && value < 65536),
@@ -252,7 +255,7 @@ server.on('clientError', (_error, socket) => {
 })
 
 // 作为模块被单测 import 时不监听端口；只有直接运行才起服务。
-if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+export function startProxy() {
   assertStartupConfig()
   server.listen(port, bindHost, () => {
     logEvent('proxy_started', { bind: bindHost, port, allowed_ports: [...allowedPorts] })
@@ -264,4 +267,8 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
       server.close(() => process.exit(0))
     })
   }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+  startProxy()
 }

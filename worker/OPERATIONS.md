@@ -1909,8 +1909,8 @@ Worker env 见 `.docker/worker.env.example` 的 V1.20 段。`LINKY_API_BASE_URL`
 宿主机代理必须放开 Linky 端口：
 
 ```bash
-# 默认值已改成 80,443,2055,90；改动后需要重装 launchd 服务
-MODEL_VPN_PROXY_ALLOWED_PORTS=80,443,2055,90 ./scripts/install-model-vpn-proxy.sh
+# macOS / Windows 共用；默认端口 80,443,2055,90，复用已有凭据和固定服务名
+npm run proxy:model-vpn:install
 
 # 验证（预期 http=200；返回 000 + CONNECT tunnel failed, 403 就是端口没放开）
 docker run --rm curlimages/curl:latest -sS -m 20 \

@@ -205,8 +205,28 @@ SKILL_CACHE_MAX_BYTES=4294967296
   平台无从判断是否真的来自 Linky。所以前端只提交「组 + 窗口 + 勾选编号」，内容由 Worker 取。
   代价是确认后要等一次 Worker 轮询（默认 5 秒），页面有真实进度条。
 - **容器化 Worker 必须经宿主机代理**（与 V1.7 内网模型同一条链路），且代理要放开 Linky 的
-  2055/90 端口 —— 默认只有 `80,443` 时表现为 `CONNECT tunnel failed, 403`。
+  2055/90 端口 —— 旧启动配置若仍仅允许 `80,443`，会表现为 `CONNECT tunnel failed, 403`。
 - **能力契约没动**：附件走 workspace 文件而不是新工具，manifest revision 仍是 3，新旧 Worker 可混跑。
+
+macOS 与 Windows 使用同一个宿主机代理安装入口（需已安装 Node.js，仓库中已有 `.docker/worker.env`）：
+
+```sh
+npm run proxy:model-vpn:install
+# 停用服务，保留配置与日志以便重新安装
+npm run proxy:model-vpn:uninstall
+```
+
+安装入口是 `scripts/model-vpn-proxy-service.mjs`，自动选择 macOS launchd 或 Windows
+当前用户登录触发的计划任务；两端与代理直接启动的默认端口统一为 `80,443,2055,90`。
+Windows 请使用运行 Worker 的同一用户；若任务注册被系统权限策略拒绝，再使用该用户的管理员终端。
+Windows 服务在用户登录时启动，注销后不保证运行，不是无人登录的系统服务。
+重新安装会更新固定任务 `codereviewplatform-model-vpn-proxy`，并停用已知的另一个旧任务
+`CodeReviewPlatform-ModelVpnProxy`（保留其定义供恢复），避免下次登录同时启动。
+其他名字的手工任务不会被自动处理。已有代理凭据会从 `.docker/worker.env` 复用。
+安装成功只代表服务已注册并请求启动；还需检查日志中的 `proxy_started` 并验证模型/Linky 请求。
+Windows 日志：`%LOCALAPPDATA%\CodeReviewPlatform\model-vpn-proxy\model-vpn-proxy.log`；
+macOS 日志：`~/Library/Logs/codereviewplatform/model-vpn-proxy.log`。
+若更改了 Worker 的代理地址或凭据，需要重建/重启相关 Worker 容器以加载配置。
 
 运维面（env 清单、代理端口、导入队列 SQL、错误码表、孤儿附件回收、回滚、复跑验证命令）见
 `worker/OPERATIONS.md` 第 21 节。
