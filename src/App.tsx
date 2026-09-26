@@ -1534,34 +1534,36 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
     onError: (error) => message.error(error.message),
   })
 
+  // 常用信息在宽屏完整展示；当内容区变窄时表格可横向滚动，固定的操作列仍始终可见。
   const columns: ColumnsType<ReviewBatchListItem> = [
     {
       title: '评审描述',
       dataIndex: 'name',
-      width: 260,
+      width: 220,
       ellipsis: { showTitle: false },
       render: (name: string, record) => (
         <Link to={`/batches/${record.id}/dashboard`} title={name}>{name}</Link>
       ),
     },
-    { title: '发布周期', dataIndex: 'week_code', width: 140 },
-    { title: '状态', dataIndex: 'status', width: 150, render: (status: BatchStatus) => <Tag color={statusColor(status)}>{batchStatusLabels[status]}</Tag> },
-    { title: '代码基线', dataIndex: 'default_branch', width: 140, render: (value) => value || '-' },
+    { title: '发布周期', dataIndex: 'week_code', width: 112 },
+    { title: '状态', dataIndex: 'status', width: 118, render: (status: BatchStatus) => <Tag color={statusColor(status)}>{batchStatusLabels[status]}</Tag> },
+    { title: '代码基线', dataIndex: 'default_branch', width: 112, render: (value) => value || '-' },
     {
       title: '模型',
       dataIndex: 'ai_model_config_id',
-      width: 160,
+      width: 132,
       render: (_value, record) => {
         const name = (record.ai_model_config_id ? modelNameById.get(record.ai_model_config_id) : null)
           ?? record.ai_model_snapshot?.display_name
         return name ? <Tag color="geekblue">{name}</Tag> : <Tag color="orange">未选择</Tag>
       },
     },
-    { title: '创建人', dataIndex: 'creator_name', width: 140, render: (value: string | null) => value || '-' },
-    { title: '创建时间', dataIndex: 'created_at', width: 180, render: (value) => new Date(value).toLocaleString() },
+    { title: '创建人', dataIndex: 'creator_name', width: 120, ellipsis: true, render: (value: string | null) => value || '-' },
+    { title: '创建时间', dataIndex: 'created_at', width: 172, render: (value) => new Date(value).toLocaleString() },
     {
       title: '操作',
-      width: 100,
+      width: 84,
+      fixed: 'right',
       render: (_value, record) => canManageBatch(record) ? (
         <Button
           danger
@@ -1601,12 +1603,13 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
         ) : null}
       />
       <Table
-rowKey="id"
-loading={batchesQuery.isLoading}
-columns={columns}
-dataSource={batchesQuery.data ?? []}
-tableLayout="fixed"
-pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }}
+        rowKey="id"
+        loading={batchesQuery.isLoading}
+        columns={columns}
+        dataSource={batchesQuery.data ?? []}
+        tableLayout="fixed"
+        scroll={{ x: 1070 }}
+        pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: [10, 20, 50, 100] }}
       />
       <Modal title="创建每周评审批次" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={createMutation.isPending}>
         <Form
