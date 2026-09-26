@@ -2360,7 +2360,6 @@ function AutoAnalysisSection({
       <header className="analysis-console__head">
         <div className="analysis-console__heading">
           <h3 className="analysis-console__title">自动 AI 分析</h3>
-          <span className="analysis-console__subtitle">平台冻结代码快照，逐条需求交给 Agent 审核</span>
         </div>
         <div className="analysis-console__state">
           <span className="analysis-pill">
@@ -2763,11 +2762,6 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
         <div className="ai-mode__head">
           <div className="ai-mode__heading">
             <span className="ai-mode__title">{lockedResultMode ? 'AI 结果处理方式' : '选择 AI 结果处理方式'}</span>
-            <span className="ai-mode__hint">
-              {lockedResultMode
-                ? '本批次已产生结果，处理方式已锁定，不能再切换。'
-                : '两种流程相互独立。产生 AI 结果后，处理方式将被锁定且不能再切换。'}
-            </span>
           </div>
           {lockedResultMode ? <Tag color="green">已锁定</Tag> : null}
         </div>
