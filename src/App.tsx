@@ -1989,6 +1989,15 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
            * 这一页只能往批次里加需求，没有移除通道 —— 取消勾选改变不了任何事实，所以不给取消。
            */
           lockedCodes={frozenStoryCodes}
+          actions={
+            <Button
+              type="primary"
+              disabled={selected.length === 0 || scope.workspaceName === null}
+              onClick={() => navigate(`/batches/${batchId}/ai-result`)}
+            >
+              确认，进入下一步
+            </Button>
+          }
         />
       )}
 
