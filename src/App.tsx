@@ -2151,9 +2151,13 @@ function AutoAnalysisSection({
   const importPreparing = Boolean(
     latestImport &&
       latestImport.analysis_context_version !== null &&
-      (latestImport.status === 'QUEUED' || latestImport.status === 'RUNNING' || latestImport.analysis_status === 'PENDING'),
+      (latestImport.status === 'QUEUED' ||
+        latestImport.status === 'RUNNING' ||
+        (latestImport.status === 'SUCCEEDED' && latestImport.analysis_status === 'PENDING')),
   )
-  const importAutoStartFailed = latestImport?.analysis_status === 'FAILED'
+  const importAutoStartFailed = Boolean(
+    latestImport && (latestImport.status === 'FAILED' || latestImport.analysis_status === 'FAILED'),
+  )
 
   const jobQuery = useQuery({
     queryKey: ['analysis-job', batch.id],
@@ -2465,21 +2469,16 @@ function AutoAnalysisSection({
         />
       ) : null}
 
-      {importPreparing ? (
-        <Alert
-          type="info"
-          showIcon
-          title="正在准备需求快照"
-          description={`已请求 ${latestImport?.stories_total ?? 0} 条需求；Worker 正在从 Linky 冻结正文和附件，完成后会自动创建分析任务。`}
-        />
-      ) : null}
-
       {importAutoStartFailed ? (
         <Alert
           type="error"
           showIcon
-          title="需求已冻结，但自动开始分析失败"
-          description={describeLinkyError(`${latestImport?.analysis_error_code ?? ''} ${latestImport?.analysis_error_message ?? ''}`)}
+          title={latestImport?.status === 'FAILED' ? '需求准备失败' : '需求已冻结，但自动开始分析失败'}
+          description={describeLinkyError(
+            latestImport?.status === 'FAILED'
+              ? `${latestImport.error_code ?? ''} ${latestImport.error_message ?? ''}`
+              : `${latestImport?.analysis_error_code ?? ''} ${latestImport?.analysis_error_message ?? ''}`,
+          )}
         />
       ) : null}
 
