@@ -2023,6 +2023,15 @@ export async function requestLinkyBatchImportForAnalysis(input: {
   return unwrap<string>({ data, error })
 }
 
+/** V1.32：复用失败自动导入单的冻结范围，在代理/网络恢复后重新排队。 */
+export async function retryLinkyBatchImportForAnalysis(requestId: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('retry_linky_batch_import_for_analysis', {
+    p_request_id: requestId,
+  })
+  return unwrap<string>({ data, error })
+}
+
 export async function getLinkyBatchImport(requestId: string) {
   const client = requireSupabase()
   const { data, error } = await client.rpc('get_linky_batch_import', { p_request_id: requestId })
@@ -2074,6 +2083,10 @@ export function describeLinkyError(error: unknown): string {
   if (raw.includes('LINKY_IMPORT_STORY_NOT_REQUESTED')) return '导入单与提交的需求不匹配，请重新发起导入。'
   if (raw.includes('LINKY_IMPORT_LEASE_LOST')) return '这张导入单已被另一个 Worker 接管，请刷新查看进度。'
   if (raw.includes('LINKY_IMPORT_NOT_FOUND')) return '找不到这张导入单。'
+  if (raw.includes('LINKY_PROXY_UNREACHABLE')) return '无法连接宿主机代理。请确认代理服务已恢复后，点击“重试准备”。'
+  if (raw.includes('LINKY_IMPORT_RETRY_NOT_FAILED')) return '当前需求准备不是失败状态，请刷新后再操作。'
+  if (raw.includes('LINKY_IMPORT_RETRY_NOT_AUTOMATIC')) return '这不是可重试的自动需求准备单，请重新选择需求后开始分析。'
+  if (raw.includes('LINKY_IMPORT_RETRY_ACTIVE')) return '当前批次已有另一项需求准备正在进行，请等待其完成后再试。'
   if (raw.includes('ACTIVE_JOB_EXISTS')) return '该批次有分析任务在运行，先停止后再导入需求。'
   if (raw.includes('BATCH_READ_ONLY')) return '该批次已完成或已有 AI 结果，不能再导入需求。'
   return raw

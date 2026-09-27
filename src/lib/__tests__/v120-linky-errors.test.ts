@@ -31,6 +31,12 @@ describe('describeLinkyError', () => {
     expect(describeLinkyError(new Error('ACTIVE_JOB_EXISTS'))).toContain('停止')
   })
 
+  it('代理恢复后可按提示重试失败的需求准备', () => {
+    expect(describeLinkyError(new Error('LINKY_PROXY_UNREACHABLE'))).toContain('重试准备')
+    expect(describeLinkyError(new Error('LINKY_IMPORT_RETRY_ACTIVE'))).toContain('正在进行')
+    expect(describeLinkyError(new Error('LINKY_IMPORT_RETRY_NOT_FAILED'))).toContain('刷新')
+  })
+
   it('认不出的错误原样返回，不吞掉信息', () => {
     expect(describeLinkyError(new Error('some unexpected failure'))).toBe('some unexpected failure')
   })

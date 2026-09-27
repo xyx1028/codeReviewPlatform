@@ -80,6 +80,7 @@ import {
   describeLinkyError,
   getLatestLinkyBatchImport,
   requestLinkyBatchImportForAnalysis,
+  retryLinkyBatchImportForAnalysis,
   listReviewStoryAttachments,
   createBatch,
   deleteBatch,
@@ -2241,6 +2242,19 @@ function AutoAnalysisSection({
     onError: (error) => message.error(describeLinkyError(error)),
   })
 
+  const retryRequirementPreparationMutation = useMutation({
+    mutationFn: () => {
+      if (!latestImport) throw new Error('没有可重试的需求准备')
+      return retryLinkyBatchImportForAnalysis(latestImport.id)
+    },
+    onSuccess: () => {
+      message.info('正在重新准备需求快照，完成后将自动开始分析')
+      void latestImportQuery.refetch()
+      invalidateAll()
+    },
+    onError: (error) => message.error(describeLinkyError(error)),
+  })
+
   const retryMutation = useMutation({
     mutationFn: () => {
       if (!job) throw new Error('没有可重试的任务')
@@ -2371,6 +2385,17 @@ function AutoAnalysisSection({
     job?.status === 'FAILED' &&
     job.execution_engine === 'deepseek-harness-acp' &&
     errorMeta.retryable
+  const retryableRequirementPreparation = Boolean(
+    latestImport?.status === 'FAILED' &&
+      latestImport.analysis_context_version !== null &&
+      canManage &&
+      !batchCompleted &&
+      !hasExistingAiResult &&
+      !jobActive,
+  )
+  const requirementPreparationFailed = Boolean(
+    latestImport?.status === 'FAILED' && latestImport.analysis_context_version !== null,
+  )
 
   /*
    * 状态色调只有四档，并且只由 Job 状态决定。
@@ -2483,7 +2508,7 @@ function AutoAnalysisSection({
       ) : null}
 
       <div className="analysis-actions">
-        {canManage && !hasExistingAiResult && !jobActive && !importPreparing ? (
+        {canManage && !hasExistingAiResult && !jobActive && !importPreparing && !requirementPreparationFailed ? (
           <Select<7 | 14 | 21 | 28>
             value={commitWindowDays}
             className="analysis-actions__window"
@@ -2498,18 +2523,24 @@ function AutoAnalysisSection({
         ) : null}
         <Button
           type="primary"
-          disabled={!canStart}
-          loading={enqueueMutation.isPending}
-          onClick={() => enqueueMutation.mutate()}
+          disabled={requirementPreparationFailed ? !retryableRequirementPreparation : !canStart}
+          loading={requirementPreparationFailed ? retryRequirementPreparationMutation.isPending : enqueueMutation.isPending}
+          onClick={() => {
+            if (requirementPreparationFailed) {
+              retryRequirementPreparationMutation.mutate()
+            } else {
+              enqueueMutation.mutate()
+            }
+          }}
         >
-          {importPreparing ? '正在准备需求' : '开始分析'}
+          {importPreparing ? '正在准备需求' : requirementPreparationFailed ? '重试准备' : '开始分析'}
         </Button>
         {canManage && jobActive ? (
           <Button danger loading={cancelJobMutation.isPending} onClick={confirmCancelJob}>
             停止分析
           </Button>
         ) : null}
-        {!hasExistingAiResult && blockedCount > 0 ? (
+        {!hasExistingAiResult && blockedCount > 0 && !requirementPreparationFailed ? (
           /*
            * 前置条件清单整块删掉了（常规路径上它 7 条里有 6 条是绿的，纯占地方），
            * 但"按钮为什么点不动"必须留得住 —— 未满足的那几条挂在这句提示的悬浮里。
