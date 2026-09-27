@@ -235,6 +235,11 @@ export function apply(ctx: Context, config: ReviewControlConfig): void {
               startLine: { type: 'integer', required: true },
               endLine: { type: 'integer', required: true },
               evidenceType: { type: 'string', required: true },
+              evidenceSummary: {
+                type: 'string',
+                required: true,
+                description: 'A single-line 8–80 character statement of what this code evidence proves. Do not repeat the repository, path, symbol, or line numbers.',
+              },
               description: { type: 'string', required: true },
             },
           },

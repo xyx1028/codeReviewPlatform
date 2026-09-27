@@ -204,6 +204,7 @@ describe('Agent result mapping', () => {
       risks: '并发风险',
       testPoints: '并发下单',
       aiRemark: '备注',
+      evidenceSummaries: {},
     })
   })
 

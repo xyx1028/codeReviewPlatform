@@ -42,7 +42,7 @@ export interface ReviewSubmission {
   risks?: string | null
   testPoints?: string | null
   aiRemark?: string | null
-  evidence: Array<EvidenceClaim & { evidenceType: string; description: string }>
+  evidence: Array<EvidenceClaim & { evidenceType: string; evidenceSummary: string; description: string }>
 }
 
 export interface VerifiedEvidence {
@@ -55,6 +55,7 @@ export interface VerifiedEvidence {
   startLine: number
   endLine: number
   evidenceType: string
+  evidenceSummary: string
   description: string
   contentHash: string
 }
@@ -123,6 +124,18 @@ export async function verifyReviewSubmission(
         reason: `evidence[${index}]: evidenceType must be one of ${ALLOWED_EVIDENCE_TYPES.join(' / ')}`,
       }
     }
+    const evidenceSummary = typeof claim.evidenceSummary === 'string' ? claim.evidenceSummary.trim() : ''
+    if (
+      evidenceSummary.length < 8 ||
+      evidenceSummary.length > 80 ||
+      /[\r\n]/.test(evidenceSummary)
+    ) {
+      return {
+        ok: false,
+        code: 'EVIDENCE_SUMMARY_INVALID',
+        reason: `evidence[${index}]: evidenceSummary must be a single-line 8–80 character statement of what this code proves`,
+      }
+    }
     const structural = options.evidenceLedger.check(claim)
     if (!structural.ok) {
       return {
@@ -178,6 +191,7 @@ export async function verifyReviewSubmission(
       startLine: reread.startLine,
       endLine: reread.endLine,
       evidenceType: claim.evidenceType,
+      evidenceSummary,
       description: claim.description,
       contentHash: reread.contentHash,
     })

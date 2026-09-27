@@ -246,6 +246,7 @@ function validSubmission(evidenceId: string): Record<string, unknown> {
         startLine: 1,
         endLine: 10,
         evidenceType: '现有实现',
+        evidenceSummary: '订单服务实现证据概述',
         description: 'the order service implements it',
       },
     ],

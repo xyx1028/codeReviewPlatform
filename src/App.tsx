@@ -5,6 +5,7 @@ import { SidebarPageTitle } from './components/SidebarPageTitle'
 import { PRODUCT_VERSION } from './lib/product-version'
 import {
   ApartmentOutlined,
+  ArrowLeftOutlined,
   BookOutlined,
   CloudServerOutlined,
   ClusterOutlined,
@@ -21,6 +22,7 @@ import {
   App as AntApp,
   Button,
   Card,
+  Collapse,
   Col,
   Descriptions,
   Divider,
@@ -33,6 +35,7 @@ import {
   List,
   Menu,
   Modal,
+  Pagination,
   Popover,
   Popconfirm,
   Progress,
@@ -88,7 +91,6 @@ import {
   getBatch,
   findImportFileByHash,
   getBatchWorkspace,
-  getFileDownloadUrl,
   getLatestAnalysisJob,
   getMyProfile,
   getSession,
@@ -170,10 +172,7 @@ const APP_SIDER_WIDTH = 264
 type AiResultMode = 'auto' | 'manual'
 
 /**
- * 两种 AI 结果来源的文案集中放在这里。
- *
- * 之前 title / description 在「可选择」和「已锁定」两个分支各写一遍，改一句就得改两处，
- * 而锁定态恰好是用户最常截图追问的那一屏。
+ * 两种 AI 结果来源的文案集中放在这里，供尚未锁定结果时的处理方式选择器复用。
  */
 const AI_RESULT_MODES: Record<AiResultMode, { title: string; description: string; steps: string }> = {
   auto: {
@@ -320,11 +319,6 @@ function getUserDisplayName(displayName: string | null | undefined, email: strin
   if (normalizedName) return normalizedName
   if (email?.endsWith('@wechat.invalid')) return '微信用户'
   return email?.split('@')[0] || '用户'
-}
-
-async function downloadStorageFile(storagePath: string) {
-  const url = await getFileDownloadUrl(storagePath)
-  window.open(url, '_blank', 'noopener,noreferrer')
 }
 
 function useBatchWorkspace(batchId: string | undefined) {
@@ -1846,7 +1840,7 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
 
   return (
     <div className="import-page">
-      {readOnlyReason && !analysisRunning ? (
+      {readOnlyReason && !analysisRunning && !hasAiResult ? (
         <Alert
           type={readOnlyReason.type}
           showIcon
@@ -1874,7 +1868,7 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
           <div className="import-snapshot__row">
             <div className="import-snapshot__metric">
               <span className="import-snapshot__value">{importedStories.length}</span>
-              <span className="import-snapshot__unit">条需求已冻结</span>
+              <span className="import-snapshot__unit">条需求</span>
             </div>
             {/*
               * 附件数量不在这里露。
@@ -1951,8 +1945,7 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
          */
         <section className="ai-panel">
           <div className="ai-panel__head">
-            <span className="ai-panel__title">本批次已冻结的需求</span>
-            <span className="ai-panel__meta">只读</span>
+            <span className="ai-panel__title">本批次需求</span>
           </div>
           <FrozenStoryTable
             stories={importedStories}
@@ -2126,17 +2119,20 @@ function AutoAnalysisSection({
   storyCount,
   canManage,
   hasExistingAiResult,
+  analysisCompletedAt,
 }: {
   batch: ReviewBatch
   storyCount: number
   canManage: boolean
   hasExistingAiResult: boolean
+  analysisCompletedAt: string | null
 }) {
   const { message, modal } = AntApp.useApp()
   const queryClient = useQueryClient()
   const [supplementalModelId, setSupplementalModelId] = useState<string>()
   const [commitWindowDays, setCommitWindowDays] = useState<7 | 14 | 21 | 28>(21)
   const [pendingSelection, setPendingSelection] = useState(() => getPendingLinkyAnalysisSelection(batch.id))
+  const [snapshotOpen, setSnapshotOpen] = useState(false)
 
   const latestImportQuery = useQuery({
     queryKey: ['linky-batch-import', batch.id],
@@ -2431,6 +2427,11 @@ function AutoAnalysisSection({
               已运行 <strong>{formatDuration(job.started_at, job.finished_at)}</strong>
             </span>
           ) : null}
+          {analysisCompletedAt ? (
+            <span className="analysis-console__runtime">
+              分析时间 <strong>{new Date(analysisCompletedAt).toLocaleString()}</strong>
+            </span>
+          ) : null}
         </div>
       </header>
 
@@ -2586,41 +2587,48 @@ function AutoAnalysisSection({
                    * 真正要看的「逐需求 Agent 任务」推到屏幕外。上面那句"全部仓库已冻结在精确
                    * Commit"已经把结论说完了，SHA 留给需要它的人点开看。
                    */
-                  <Popover
-                    trigger="click"
-                    placement="bottomLeft"
-                    title="仓库快照"
-                    content={
-                      <Table<AnalysisRepositorySnapshot>
-                        rowKey="id"
-                        size="small"
-                        pagination={false}
-                        className="analysis-snapshot-popover"
-                        dataSource={snapshots}
-                        columns={[
-                          { title: '仓库', dataIndex: 'repository_name', width: 180 },
-                          { title: '分支', dataIndex: 'requested_branch', width: 120 },
-                          {
-                            title: 'Commit',
-                            dataIndex: 'commit_sha',
-                            width: 130,
-                            render: (sha: string) => <Text code>{sha.slice(0, 12)}</Text>,
-                          },
-                          {
-                            title: 'Subject',
-                            dataIndex: 'commit_subject',
-                            width: 280,
-                            ellipsis: true,
-                            render: (value) => value || '-',
-                          },
-                        ]}
-                      />
-                    }
-                  >
-                    <Button type="link" size="small" className="analysis-progress__detail">
+                  <>
+                    <Button type="link" size="small" className="analysis-progress__detail" onClick={() => setSnapshotOpen(true)}>
                       查看 Commit
                     </Button>
-                  </Popover>
+                    <Modal
+                      centered
+                      destroyOnHidden
+                      footer={<Button onClick={() => setSnapshotOpen(false)}>关闭</Button>}
+                      open={snapshotOpen}
+                      title="仓库快照"
+                      width="min(760px, calc(100vw - 48px))"
+                      onCancel={() => setSnapshotOpen(false)}
+                    >
+                      <div className="analysis-snapshot-dialog__table">
+                        <Table<AnalysisRepositorySnapshot>
+                          rowKey="id"
+                          size="small"
+                          pagination={false}
+                          scroll={{ x: 710 }}
+                          tableLayout="fixed"
+                          dataSource={snapshots}
+                          columns={[
+                            { title: '仓库', dataIndex: 'repository_name', width: 180 },
+                            { title: '分支', dataIndex: 'requested_branch', width: 120 },
+                            {
+                              title: 'Commit',
+                              dataIndex: 'commit_sha',
+                              width: 130,
+                              render: (sha: string) => <Text code>{sha.slice(0, 12)}</Text>,
+                            },
+                            {
+                              title: 'Subject',
+                              dataIndex: 'commit_subject',
+                              width: 280,
+                              ellipsis: true,
+                              render: (value) => value || '-',
+                            },
+                          ]}
+                        />
+                      </div>
+                    </Modal>
+                  </>
                 ) : null}
               </span>
             </div>
@@ -2728,9 +2736,6 @@ function AutoAnalysisSection({
             />
           ) : null}
 
-          {job.status === 'SUCCEEDED' ? (
-            <Alert type="success" showIcon title="AI 自动分析已完成" description="结果已写入当前批次，可进入评审列表进行人工确认。" />
-          ) : null}
         </>
       ) : null}
     </section>
@@ -2837,26 +2842,13 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
         </section>
       ) : null}
 
-      <section className="ai-mode">
-        <div className="ai-mode__head">
-          <div className="ai-mode__heading">
-            <span className="ai-mode__title">{lockedResultMode ? 'AI 结果处理方式' : '选择 AI 结果处理方式'}</span>
-          </div>
-          {lockedResultMode ? <Tag color="green">已锁定</Tag> : null}
-        </div>
-        {lockedResultMode ? (
-          <div className="ai-mode__locked">
-            <span className="ai-mode__locked-mark" aria-hidden="true" />
-            <div className="ai-mode__locked-copy">
-              <span className="ai-mode__locked-title">{AI_RESULT_MODES[lockedResultMode].title}</span>
-              <span className="ai-mode__locked-desc">
-                {lockedResultMode === 'auto'
-                  ? '结果来自平台的自动 AI 分析，本页只展示自动分析看板。'
-                  : '结果来自人工上传的 AI Excel，本页只展示人工手动分析看板。'}
-              </span>
+      {!lockedResultMode ? (
+        <section className="ai-mode">
+          <div className="ai-mode__head">
+            <div className="ai-mode__heading">
+              <span className="ai-mode__title">选择 AI 结果处理方式</span>
             </div>
           </div>
-        ) : (
           <Radio.Group
             className="ai-mode__grid"
             value={resultMode}
@@ -2874,8 +2866,8 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
               </Radio>
             ))}
           </Radio.Group>
-        )}
-      </section>
+        </section>
+      ) : null}
 
       {visibleResultMode === 'auto' ? (
         <AutoAnalysisSection
@@ -2883,6 +2875,7 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
           storyCount={workspaceQuery.data.stories.length}
           canManage={canManage}
           hasExistingAiResult={alreadyImportedAi}
+          analysisCompletedAt={lockedResultMode === 'auto' ? activeAiImport?.analyzed_at ?? null : null}
         />
       ) : (
         <>
@@ -3015,48 +3008,6 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
         </>
       )}
 
-      <section className="ai-panel">
-        <div className="ai-panel__head">
-          <span className="ai-panel__title">AI 报告版本</span>
-          <span className="ai-panel__meta">共 {aiImportsQuery.data?.length ?? 0} 个版本</span>
-        </div>
-        <Table
-          rowKey="id"
-          size="small"
-          loading={aiImportsQuery.isLoading}
-          dataSource={aiImportsQuery.data ?? []}
-          pagination={false}
-          locale={{ emptyText: '本批次还没有 AI 报告' }}
-          columns={[
-            { title: '版本', dataIndex: 'version', width: 90, render: (version) => <Text strong>V{version}</Text> },
-            { title: '生效状态', dataIndex: 'is_active', width: 120, render: (active) => active ? <Tag color="green">当前生效</Tag> : <Tag>历史版本</Tag> },
-            {
-              title: '来源',
-              dataIndex: 'import_file_id',
-              width: 110,
-              render: (importFileId: string | null) =>
-                importFileId ? <Tag color="blue">人工导入</Tag> : <Tag color="geekblue">AI 自动分析</Tag>,
-            },
-            { title: '分析基线', render: (_value, record) => <BaselineImportDetails aiImport={record} compact /> },
-            { title: '导入时间', dataIndex: 'created_at', width: 180, render: (value) => new Date(value).toLocaleString() },
-            {
-              title: '操作',
-              width: 120,
-              render: (_value, record) => (
-                <Tooltip title={record.import_file_id ? '' : 'AI 自动分析结果无导出文件，下载不可用'}>
-                  <Button
-                    size="small"
-                    disabled={!record.import_file?.storage_path}
-                    onClick={() => record.import_file && downloadStorageFile(record.import_file.storage_path)}
-                  >
-                    下载文件
-                  </Button>
-                </Tooltip>
-              ),
-            },
-          ]}
-        />
-      </section>
     </div>
   )
 }
@@ -3240,40 +3191,37 @@ function ReviewListPage({ batchId }: { batchId: string }) {
 
   return (
     <Space direction="vertical" size="large" className="page-stack review-list-page">
-      <Card className="review-table-card" bodyStyle={{ padding: 0 }}>
-        <div className="review-table-inset">
-          <Table
-            rowKey={(row) => row.story.id}
-            loading={workspaceQuery.isLoading}
-            columns={columns}
-            dataSource={rows}
-            size="middle"
-            scroll={{ x: 1520 }}
-            pagination={{
-              defaultPageSize: 10,
-              showSizeChanger: true,
-              pageSizeOptions: [10, 20, 50, 100],
-              showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 条`,
-            }}
-            onChange={(_pagination, filters, _sorter, extra) => {
-              if (extra.action !== 'filter') return
-              const normalize = (values: unknown) => Array.isArray(values) ? values.map(String) : null
-              const storyCode = normalize(filters.storyCode)
-              const storyName = normalize(filters.storyName)
-              const evidence = normalize(filters.evidence)
-              const humanStatus = normalize(filters.humanStatus)
-              setLocalColumnFilters({ storyCode, storyName, evidence, humanStatus })
-              updateFilters({
-                owner: normalize(filters.owner)?.[0],
-                requirementHandler: normalize(filters.requirementHandler)?.[0],
-                testHandler: normalize(filters.testHandler)?.[0],
-                status: normalize(filters.status)?.[0],
-                verdict: normalize(filters.verdict)?.[0],
-              })
-            }}
-          />
-        </div>
-      </Card>
+      <Table
+        className="review-list-table"
+        rowKey={(row) => row.story.id}
+        loading={workspaceQuery.isLoading}
+        columns={columns}
+        dataSource={rows}
+        size="middle"
+        scroll={{ x: 1520 }}
+        pagination={{
+          defaultPageSize: 10,
+          showSizeChanger: true,
+          pageSizeOptions: [10, 20, 50, 100],
+          showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 条`,
+        }}
+        onChange={(_pagination, filters, _sorter, extra) => {
+          if (extra.action !== 'filter') return
+          const normalize = (values: unknown) => Array.isArray(values) ? values.map(String) : null
+          const storyCode = normalize(filters.storyCode)
+          const storyName = normalize(filters.storyName)
+          const evidence = normalize(filters.evidence)
+          const humanStatus = normalize(filters.humanStatus)
+          setLocalColumnFilters({ storyCode, storyName, evidence, humanStatus })
+          updateFilters({
+            owner: normalize(filters.owner)?.[0],
+            requirementHandler: normalize(filters.requirementHandler)?.[0],
+            testHandler: normalize(filters.testHandler)?.[0],
+            status: normalize(filters.status)?.[0],
+            verdict: normalize(filters.verdict)?.[0],
+          })
+        }}
+      />
     </Space>
   )
 }
@@ -3283,7 +3231,6 @@ type ReviewDetail = {
   aiResult: AiReviewResult | null
   evidence: BatchWorkspace['evidence']
   humanReview: BatchWorkspace['humanReviews'][number] | null
-  aiImport: BatchWorkspace['activeImport']
   nextStoryId: string | null
   reviewableIndex: number
   reviewableTotal: number
@@ -3327,7 +3274,6 @@ function ReviewDetailPage({ batchId, canManage }: { batchId: string; canManage: 
       aiResult,
       evidence,
       humanReview,
-      aiImport: workspaceQuery.data.activeImport,
       nextStoryId,
       reviewableIndex,
       reviewableTotal: reviewableStories.length,
@@ -3340,26 +3286,19 @@ function ReviewDetailPage({ batchId, canManage }: { batchId: string; canManage: 
 
   return (
     <div className="review-detail-page">
-      <section className="review-detail-context">
-        <div>
-          <Button type="link" className="review-detail-back" onClick={() => navigate(`/batches/${batchId}/reviews`)}>← 返回评审列表</Button>
-          <div className="review-detail-title-row">
-            <Text className="review-detail-code">{detail.story.story_code}</Text>
-            {detail.aiResult?.verdict ? <Tag color={aiVerdictColor(detail.aiResult.verdict)}>{aiVerdictLabels[detail.aiResult.verdict]}</Tag> : <Tag>未分析</Tag>}
-            {detail.humanReview ? <Tag color={humanVerdictColor(detail.humanReview.result)}>{humanReviewLabels[detail.humanReview.result]}</Tag> : <Tag color="gold">待确认</Tag>}
-          </div>
-          <Title level={4}>{detail.story.story_name}</Title>
-        </div>
+      <nav className="review-detail-navigation" aria-label="评审导航">
+        <Button type="text" size="small" icon={<ArrowLeftOutlined />} className="review-detail-back" onClick={() => navigate(`/batches/${batchId}/reviews`)}>返回评审列表</Button>
         <Text type="secondary">第 {detail.reviewableIndex >= 0 ? detail.reviewableIndex + 1 : 0} / {detail.reviewableTotal} 条可评审需求</Text>
-      </section>
+      </nav>
 
       <div className="review-detail-grid">
         <div className="review-detail-story"><StoryCard story={detail.story} /></div>
-        <div className="review-detail-ai"><AiResultCard result={detail.aiResult} evidence={detail.evidence} aiImport={detail.aiImport} /></div>
+        <div className="review-detail-ai"><AiResultCard result={detail.aiResult} /></div>
         <div className="review-detail-decision">
           <HumanReviewPanel key={`${detail.story.id}-${detail.aiResult?.id ?? 'no-ai'}`} batchId={batchId} detail={detail} />
         </div>
       </div>
+      <CodeEvidenceCard evidence={detail.evidence} />
     </div>
   )
 }
@@ -3408,6 +3347,9 @@ function HumanReviewPanel({ batchId, detail }: { batchId: string; detail: Review
               <Text type="secondary">AI 原判断</Text>
               <Tag color={aiVerdictColor(detail.aiResult.verdict)}>{detail.aiResult.verdict ? aiVerdictLabels[detail.aiResult.verdict] : '未分析'}</Tag>
               {detail.humanReview ? <Text type="secondary">上次保存：{new Date(detail.humanReview.reviewed_at).toLocaleString()}</Text> : null}
+              <span className="review-decision-confidence">
+                <BaselineMetaChip label="置信度" value={detail.aiResult.confidence === null ? '未填写' : `${detail.aiResult.confidence}%`} />
+              </span>
             </div>
             <Form form={form} layout="vertical" disabled={detail.readOnly}>
               <Form.Item name="result" label="核验结论" rules={[{ required: true, message: '请选择人工结论' }]}>
@@ -3793,7 +3735,7 @@ function StoryCard({ story }: { story: ReviewStory }) {
   )
 }
 
-function AiResultCard({ result, evidence, aiImport }: { result: AiReviewResult | null; evidence: BatchWorkspace['evidence']; aiImport: BatchWorkspace['activeImport'] }) {
+function AiResultCard({ result }: { result: AiReviewResult | null }) {
   if (!result) return <Card className="review-ai-card" title="AI分析"><Empty description="未分析" /></Card>
 
   const sections = [
@@ -3803,25 +3745,9 @@ function AiResultCard({ result, evidence, aiImport }: { result: AiReviewResult |
     { title: '建议测试点', value: result.test_points, tone: 'info' },
     { title: 'AI 备注', value: result.ai_remark, tone: 'neutral' },
   ].filter((section) => section.value)
-  const evidenceGroups = ['现有实现', '缺失依据', '风险依据'].map((type) => ({
-    type,
-    items: evidence.filter((item) => item.evidence_type === type),
-  })).filter((group) => group.items.length)
 
   return (
     <Card className="review-ai-card" title="AI分析">
-      <div className="review-ai-summary">
-        <div>
-          <Text type="secondary">AI 判断</Text>
-          <div className="review-ai-verdict"><Tag color={aiVerdictColor(result.verdict)}>{result.verdict ? aiVerdictLabels[result.verdict] : '未分析'}</Tag></div>
-        </div>
-        <div className="review-ai-confidence">
-          <Text type="secondary">置信度</Text>
-          {result.confidence === null ? <Text type="secondary">未填写</Text> : <><Progress percent={result.confidence} showInfo={false} size="small" strokeColor="#2563eb" /><Text>{result.confidence}%</Text></>}
-        </div>
-        {aiImport ? <div className="review-ai-baseline"><Text type="secondary">分析基线</Text><BaselineImportDetails aiImport={aiImport} /></div> : null}
-      </div>
-
       <div className="review-ai-highlight">
         <Text strong>分析摘要</Text>
         <Text>{result.summary || '暂无摘要'}</Text>
@@ -3852,24 +3778,72 @@ function AiResultCard({ result, evidence, aiImport }: { result: AiReviewResult |
         />
       </div>
 
-      <Divider />
-      <div className="review-evidence-heading"><Text strong>代码证据</Text><Text type="secondary">{evidence.length} 条</Text></div>
-      {evidenceGroups.length ? evidenceGroups.map((group) => (
-        <section key={group.type} className="review-evidence-group">
-          <Tag color={evidenceTypeColor(group.type)}>{group.type}</Tag>
-          {group.items.map((item) => (
-            <div key={item.id} className="review-evidence-item">
-              <div className="review-evidence-item__title"><Text strong>{item.repository_name}</Text><Text className="evidence-title">{item.file_path}</Text></div>
-              <div className="review-evidence-item__meta">
-                {item.commit_sha ? <Tag>{item.commit_sha.slice(0, 8)}</Tag> : null}
-                {item.symbol_name ? <Tag>{item.symbol_name}</Tag> : null}
-                {item.start_line ? <Text type="secondary">{item.start_line}{item.end_line ? ` - ${item.end_line}` : ''} 行</Text> : null}
-              </div>
-              <Text type="secondary" className="evidence-description">{item.description}</Text>
-            </div>
-          ))}
-        </section>
-      )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无代码证据" />}
+    </Card>
+  )
+}
+
+function CodeEvidenceCard({ evidence }: { evidence: BatchWorkspace['evidence'] }) {
+  const [evidencePages, setEvidencePages] = useState<Record<string, number>>({})
+  const [activeEvidenceType, setActiveEvidenceType] = useState<string>()
+  const evidencePageSize = 10
+  const evidenceGroups = ['现有实现', '缺失依据', '风险依据'].map((type) => ({
+    type,
+    items: evidence.filter((item) => item.evidence_type === type),
+  })).filter((group) => group.items.length)
+  const overview = (item: BatchWorkspace['evidence'][number]) => {
+    const text = (item.evidence_summary || item.description).replace(/\s+/g, ' ').trim()
+    return text.length > 80 ? `${text.slice(0, 80)}…` : text
+  }
+
+  return (
+    <Card className="review-evidence-card" title="代码证据" extra={<Text type="secondary">{evidence.length} 条</Text>}>
+      {evidenceGroups.length ? (
+        <Tabs
+          activeKey={activeEvidenceType ?? evidenceGroups[0].type}
+          className="review-evidence-tabs"
+          size="small"
+          onChange={setActiveEvidenceType}
+          items={evidenceGroups.map((group) => {
+            const pageCount = Math.ceil(group.items.length / evidencePageSize)
+            const currentPage = Math.min(evidencePages[group.type] ?? 1, pageCount)
+            const pageItems = group.items.slice((currentPage - 1) * evidencePageSize, currentPage * evidencePageSize)
+            return {
+              key: group.type,
+              label: `${group.type} (${group.items.length})`,
+              children: <section className="review-evidence-group">
+                <Collapse
+                  className="review-evidence-collapse"
+                  ghost
+                  items={pageItems.map((item) => {
+                    const fileName = item.file_path.split('/').filter(Boolean).at(-1) ?? item.file_path
+                    return {
+                      key: item.id,
+                      label: <div className="review-evidence-overview">
+                        <Text strong className="review-evidence-overview__summary" title={item.evidence_summary || item.description}>{overview(item)}</Text>
+                        <span className="review-evidence-overview__location">
+                          <Text type="secondary">{item.repository_name} · {fileName}</Text>
+                          {item.symbol_name ? <Tag>{item.symbol_name}</Tag> : null}
+                          {item.start_line ? <Text type="secondary">{item.start_line}{item.end_line ? ` - ${item.end_line}` : ''} 行</Text> : null}
+                        </span>
+                      </div>,
+                      children: <div className="review-evidence-detail">
+                        <div className="review-evidence-detail__meta">
+                          <Text code>{item.file_path}</Text>
+                          {item.commit_sha ? <Tag>Commit {item.commit_sha}</Tag> : null}
+                          {item.symbol_name ? <Tag>{item.symbol_name}</Tag> : null}
+                          {item.start_line ? <Text type="secondary">第 {item.start_line}{item.end_line ? ` - ${item.end_line}` : ''} 行</Text> : null}
+                        </div>
+                        <Text type="secondary">{item.description}</Text>
+                      </div>,
+                    }
+                  })}
+                />
+                {group.items.length > evidencePageSize ? <Pagination className="review-evidence-pagination" current={currentPage} pageSize={evidencePageSize} showSizeChanger={false} size="small" total={group.items.length} showTotal={(total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 条`} onChange={(page) => setEvidencePages((pages) => ({ ...pages, [group.type]: page }))} /> : null}
+              </section>,
+            }
+          })}
+        />
+      ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无代码证据" />}
     </Card>
   )
 }
@@ -4037,19 +4011,6 @@ function aiVerdictColor(verdict: AiReviewResult['verdict']) {
   if (verdict === 'PARTIAL') return 'orange'
   if (verdict === 'NOT_IMPLEMENTED') return 'red'
   return 'default'
-}
-
-function humanVerdictColor(verdict: HumanReviewResult) {
-  if (verdict === 'CORRECT') return 'green'
-  if (verdict === 'PARTIALLY_CORRECT') return 'orange'
-  if (verdict === 'INCORRECT') return 'red'
-  return 'purple'
-}
-
-function evidenceTypeColor(type: string) {
-  if (type === '现有实现') return 'green'
-  if (type === '缺失依据') return 'orange'
-  return 'red'
 }
 
 function DistributionCard({ title, items, total }: { title: string; items: DistributionItem[]; total: number }) {

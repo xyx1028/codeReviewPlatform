@@ -547,6 +547,7 @@ describe('V1.11 full local transaction E2E', () => {
               startLine: 1,
               endLine: 1,
               evidenceType: '现有实现',
+              evidenceSummary: '订单服务实现证据概述',
               description: 'Evidence read only after GLOBAL scope expansion.',
             }],
           },

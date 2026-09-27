@@ -425,28 +425,13 @@ a.dashboard-distribution-item:focus-visible {
   margin-bottom: 0;
 }
 
-.review-table-card {
-  overflow: hidden;
-  border-radius: 16px;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
-}
-
-.review-table-card .ant-table-thead > tr > th {
+.review-list-table .ant-table-thead > tr > th {
   background: #f8fafc;
   color: #334155;
   font-weight: 700;
 }
 
-.review-table-inset {
-  padding-inline-start: 24px;
-}
-
-.review-table-card .ant-table-thead > tr > th:last-child,
-.review-table-card .ant-table-tbody > tr > td:last-child {
-  padding-right: 24px;
-}
-
-.review-table-card .ant-table-tbody > tr > td {
+.review-list-table .ant-table-tbody > tr > td {
   vertical-align: top;
 }
 
@@ -467,11 +452,11 @@ a.dashboard-distribution-item:focus-visible {
     transform: translateY(-1px);
   }
 
-  .review-table-card .ant-table-tbody > tr {
+  .review-list-table .ant-table-tbody > tr {
     transition: background-color 160ms ease;
   }
 
-  .review-table-card .ant-table-tbody > tr:hover > td {
+  .review-list-table .ant-table-tbody > tr:hover > td {
     background: #f8fbff !important;
   }
 }
@@ -482,20 +467,31 @@ a.dashboard-distribution-item:focus-visible {
   gap: 16px;
 }
 
-.review-detail-context {
+.review-detail-navigation {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
-  gap: 24px;
-  padding: 18px 22px;
-  border: 1px solid #dbeafe;
-  border-radius: 16px;
-  background: linear-gradient(135deg, #f8fbff, #ffffff);
+  gap: 16px;
+  min-height: 32px;
+  padding: 0 2px;
 }
 
 .review-detail-back {
-  padding: 0;
-  margin-bottom: 6px;
+  color: #64748b;
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+.review-detail-back:hover {
+  color: #2563eb !important;
+  background: #eff6ff !important;
+}
+
+@media (max-width: 640px) {
+  .review-detail-navigation {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 
 .review-detail-title-row {
@@ -556,36 +552,6 @@ a.dashboard-distribution-item:focus-visible {
   padding-top: 16px;
   border-top: 1px solid #eef2f7;
   white-space: pre-wrap;
-}
-
-.review-ai-summary {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-  padding: 14px 16px;
-  border-radius: 12px;
-  background: #f8fafc;
-}
-
-.review-ai-summary > div {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.review-ai-baseline {
-  grid-column: 1 / -1;
-  padding-top: 12px;
-  border-top: 1px solid #e2e8f0;
-}
-
-.review-ai-verdict .ant-tag {
-  margin-inline-end: 0;
-}
-
-.review-ai-confidence .ant-progress {
-  margin: 0;
 }
 
 .review-ai-highlight {
@@ -690,21 +656,75 @@ a.dashboard-distribution-item:focus-visible {
   margin-top: 16px;
 }
 
-.review-evidence-item {
-  padding: 12px 0;
+.review-evidence-card {
+  width: 100%;
+}
+
+.review-evidence-card .ant-card-body {
+  padding-top: 8px;
+}
+
+.review-evidence-collapse {
+  background: transparent;
+}
+
+.review-evidence-collapse > .ant-collapse-item {
   border-bottom: 1px solid #eef2f7;
 }
 
-.review-evidence-item__title,
-.review-evidence-item__meta {
+.review-evidence-collapse .ant-collapse-header {
+  align-items: flex-start;
+  padding: 12px 0 !important;
+}
+
+.review-evidence-collapse .ant-collapse-content-box {
+  padding: 0 0 14px !important;
+}
+
+.review-evidence-overview {
   display: flex;
-  align-items: baseline;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.review-evidence-overview__summary {
+  color: #172554;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.review-evidence-overview__location,
+.review-evidence-detail__meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.review-evidence-item__meta {
-  margin: 6px 0;
+.review-evidence-overview__location .ant-typography {
+  overflow: hidden;
+  max-width: min(520px, 60vw);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-evidence-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-left: 24px;
+  padding: 12px 14px;
+  border-left: 2px solid #dbeafe;
+  background: #f8fbff;
+}
+
+.review-evidence-detail > .ant-typography {
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .review-decision-card {
@@ -720,6 +740,10 @@ a.dashboard-distribution-item:focus-visible {
   padding: 10px 12px;
   border-radius: 10px;
   background: #f8fafc;
+}
+
+.review-decision-confidence {
+  margin-inline-start: auto;
 }
 
 .review-decision-options {
@@ -805,14 +829,6 @@ a.dashboard-distribution-item:focus-visible {
     grid-template-columns: 1fr;
   }
 
-  .review-detail-context {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 12px;
-    padding: 16px;
-  }
-
-  .review-ai-summary,
   .review-ai-sections,
   .review-decision-actions {
     grid-template-columns: 1fr;
@@ -1409,21 +1425,18 @@ a.dashboard-distribution-item:focus-visible {
   font-size: 12px;
 }
 
-/* 控制台内部的表格面板 */
-.analysis-panel {
-  overflow: hidden;
-  border: 1px solid #eef1f6;
-  border-radius: 12px;
-}
-
+/*
+ * 逐需求任务与技能列表同样采用“标题 + 直接表格”的单层布局。
+ *
+ * Ant Table 自身已提供表头、行分隔与圆角，外层再套一圈 border/radius 会形成双层容器；
+ * 因此这里只保留标题/进度行的间距，列表边界完全交给表格本身。
+ */
 .analysis-panel__head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
-  padding: 11px 16px;
-  background: #fafbfd;
-  border-bottom: 1px solid #eef1f6;
+  padding: 0 0 8px;
 }
 
 .analysis-panel__title {
@@ -3719,9 +3732,14 @@ a.dashboard-distribution-item:focus-visible {
   }
 }
 
-/* 悬浮里的快照表：给个下限宽度，免得 Subject 被挤成一个省略号。 */
-.analysis-snapshot-popover {
-  min-width: 680px;
+/* 居中仓库快照弹框：弹框本身由 Modal 限宽，宽表只在内容区内部横向滚动。 */
+.analysis-snapshot-dialog__table {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.analysis-snapshot-dialog__table .ant-table-wrapper {
+  min-width: 710px;
 }
 
 .analysis-progress__detail {
@@ -4531,13 +4549,7 @@ a.dashboard-distribution-item:focus-visible {
   color: #303039;
 }
 
-.app-shell .review-table-card {
-  border: 1px solid #ececf0;
-  border-radius: 16px;
-  box-shadow: 0 2px 8px rgba(31, 31, 36, 0.03);
-}
-
-.app-shell .review-table-card .ant-table-thead > tr > th {
+.app-shell .review-list-table .ant-table-thead > tr > th {
   color: #696973;
   background: #f7f7f9;
 }

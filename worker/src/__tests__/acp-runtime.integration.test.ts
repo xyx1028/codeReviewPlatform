@@ -211,6 +211,7 @@ const VALID_EVIDENCE = [
     startLine: 1,
     endLine: 5,
     evidenceType: '现有实现',
+    evidenceSummary: '订单服务实现证据概述',
     description: 'implements the story',
   },
 ]
@@ -722,6 +723,7 @@ describe.skipIf(!ENABLED)('DeepSeekHarnessAcpEngine (real dsh process, real snap
               startLine: 3,
               endLine: 6,
               evidenceType: '现有实现',
+              evidenceSummary: '订单服务实现证据概述',
               description: 'createOrder',
             },
           ],

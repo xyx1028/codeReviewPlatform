@@ -315,6 +315,7 @@ describe.skipIf(!ENABLED)('V4 governed root-runtime smoke E2E (real dsh process)
                     startLine: 1,
                     endLine: 8,
                     evidenceType: '现有实现',
+                    evidenceSummary: '订单服务实现证据概述',
                     description: 'createOrder is present at the pinned commit',
                   },
                 ],

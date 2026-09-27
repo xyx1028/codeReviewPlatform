@@ -424,6 +424,7 @@ export interface AiCodeEvidence {
   start_line: number | null
   end_line: number | null
   evidence_type: EvidenceType
+  evidence_summary: string | null
   description: string
   created_at: string
   updated_at: string

@@ -318,6 +318,7 @@ describe('verifyReviewSubmission', () => {
             startLine: 3,
             endLine: 6,
             evidenceType: '实现证据',
+            evidenceSummary: '创建订单服务已实现',
             description: 'createOrder',
           },
         ],
@@ -350,6 +351,7 @@ describe('verifyReviewSubmission', () => {
             startLine: 3,
             endLine: 6,
             evidenceType: '现有实现',
+            evidenceSummary: '创建订单服务已实现',
             description: 'createOrder',
           },
         ],
@@ -364,6 +366,19 @@ describe('verifyReviewSubmission', () => {
       expect(result.evidence[0]?.blobSha).toBe(receipt.blobSha)
       expect(result.evidence[0]?.commitSha).toBe(commitSha)
     }
+  })
+
+  it('rejects a missing or too-short evidence summary before persistence', async () => {
+    const evidenceLedger = new EvidenceLedger(TASK_ID, ATTEMPT)
+    const receipt = await showRange(evidenceLedger)
+    const result = await verifyReviewSubmission({
+      submission: {
+        verdict: 'IMPLEMENTED', confidence: 90, summary: 'createOrder implements the story',
+        evidence: [{ evidenceId: receipt.evidenceId, repository: REPO, filePath: 'src/main/OrderService.java', startLine: 3, endLine: 6, evidenceType: '现有实现', evidenceSummary: '太短', description: 'createOrder implementation' }],
+      },
+      evidenceLedger, coverageLedger: new SearchCoverageLedger(), snapshots: store(), coveragePolicy,
+    })
+    expect(result).toMatchObject({ ok: false, code: 'EVIDENCE_SUMMARY_INVALID' })
   })
 
   it('refuses IMPLEMENTED without an existing-implementation evidence item', async () => {
@@ -384,6 +399,7 @@ describe('verifyReviewSubmission', () => {
             // 用一个**数据库合法**但不是"现有实现"的类型：原来写的 '相关代码' 本身就会被
             // CHECK 约束拒绝，这条用例其实从未覆盖到真实的 EVIDENCE_IMPLEMENTATION_REQUIRED 路径。
             evidenceType: '风险依据',
+            evidenceSummary: '仅存在风险关联代码',
             description: 'related only',
           },
         ],
@@ -666,6 +682,7 @@ describe('AttemptControlBroker', () => {
                 startLine: 1,
                 endLine: 5,
                 evidenceType: '现有实现',
+                evidenceSummary: '订单服务实现证据概述',
                 description: 'd',
               },
             ],
@@ -693,7 +710,8 @@ describe('AttemptControlBroker', () => {
                 startLine: 3,
                 endLine: 6,
                 evidenceType: '现有实现',
-                description: 'createOrder',
+                evidenceSummary: '创建订单服务已实现',
+            description: 'createOrder',
               },
             ],
           },
@@ -742,6 +760,7 @@ describe('AttemptControlBroker', () => {
               startLine: 1,
               endLine: 2,
               evidenceType: '现有实现',
+              evidenceSummary: '订单服务实现证据概述',
               description: 'd',
             },
           ],

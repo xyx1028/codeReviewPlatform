@@ -471,6 +471,9 @@ export function toAgentResultRow(input: CommitReviewInput): Record<string, unkno
     risks: submission.risks ?? null,
     testPoints: submission.testPoints ?? null,
     aiRemark: submission.aiRemark ?? null,
+    evidenceSummaries: Object.fromEntries(
+      input.evidence.map((item) => [item.evidenceId, item.evidenceSummary]),
+    ),
   }
 }
 

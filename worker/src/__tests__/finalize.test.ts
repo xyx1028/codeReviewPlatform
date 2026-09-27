@@ -30,6 +30,7 @@ function completedTask(overrides: Partial<CompletedStoryTask> = {}): CompletedSt
       risks: 'low risk',
       testPoints: 'exercise the endpoint',
       aiRemark: 'reviewed',
+      evidenceSummaries: { 'evidence-1': '订单服务创建流程已实现' },
       evidence: [
         {
           repository: 'unverified-repository',
@@ -82,6 +83,7 @@ describe('aggregateCompletedResults', () => {
         start_line: 10,
         end_line: 20,
         evidence_type: 'existing implementation',
+        evidence_summary: '订单服务创建流程已实现',
         description: 'verified by the platform',
       },
     ])
@@ -180,6 +182,7 @@ describe('finalizeJob single Harness workflow', () => {
             start_line: 10,
             end_line: 20,
             evidence_type: 'existing implementation',
+            evidence_summary: '订单服务创建流程已实现',
             description: 'verified by the platform',
           },
         ],

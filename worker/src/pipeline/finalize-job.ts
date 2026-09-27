@@ -57,6 +57,7 @@ interface AgentOutput {
   risks?: string | null
   testPoints?: string | null
   aiRemark?: string | null
+  evidenceSummaries?: Record<string, string>
 }
 
 /**
@@ -96,6 +97,7 @@ export function aggregateCompletedResults(tasks: CompletedStoryTask[]): {
         start_line: item.start_line,
         end_line: item.end_line,
         evidence_type: item.evidence_type,
+        evidence_summary: output.evidenceSummaries?.[item.evidence_id] ?? null,
         description: item.description,
       })
     }
