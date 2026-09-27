@@ -79,7 +79,7 @@ import {
   confirmAiResultImport,
   describeLinkyError,
   getLatestLinkyBatchImport,
-  requestLinkyBatchImport,
+  requestLinkyBatchImportForAnalysis,
   listReviewStoryAttachments,
   createBatch,
   deleteBatch,
@@ -119,6 +119,11 @@ import type { LinkyBatchImportRequest } from './types'
 import { downloadAiTemplate, parseAiWorkbook, templateVersion } from './lib/excel'
 import { parseBaselineCommit } from './lib/baseline'
 import { hashFile } from './lib/hash'
+import {
+  clearPendingLinkyAnalysisSelection,
+  getPendingLinkyAnalysisSelection,
+  setPendingLinkyAnalysisSelection,
+} from './lib/linky-analysis-selection'
 import { aiVerdictLabels, aiVerdictOptions, analysisJobStatusLabels, batchStatusLabels, humanReviewLabels, humanReviewOptions, resolveAnalysisError, storyTaskStatusLabels } from './lib/labels'
 import { buildUserDeletionView, describeUserDeletionError } from './lib/user-deletion'
 import { aiFillPrompt } from './lib/prompt'
@@ -1721,12 +1726,27 @@ function BatchPage({ canManageBatch }: { canManageBatch: (batch: ReviewBatch) =>
  * 看板（/stories）是实时的、只读的；这里是冻结的、一次性的。两者刻意不共用同一个按钮。
  */
 function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batch: ReviewBatch; canManage: boolean }) {
-  const [selected, setSelected] = useState<string[]>([])
-  const [scope, setScope] = useState<{ workspaceName: string | null; releaseWindow: string | null }>({
-    workspaceName: null,
-    releaseWindow: null,
+  const [selected, setSelected] = useState<string[]>(() => getPendingLinkyAnalysisSelection(batchId)?.storyCodes ?? [])
+  const [scope, setScope] = useState<{ workspaceName: string | null; releaseWindow: string | null }>(() => {
+    const pending = getPendingLinkyAnalysisSelection(batchId)
+    return {
+      workspaceName: pending?.workspaceName ?? null,
+      releaseWindow: pending?.releaseWindow ?? null,
+    }
   })
-  const [watchedImportId, setWatchedImportId] = useState<string | null>(null)
+  /**
+   * 选择本身尚未构成冻结事实，只在浏览器当前页签保存，供 AI 结果管理页的
+   * 「开始分析」一次性消费。这样切换页签或刷新不会让人重新勾选，也不会把
+   * 未确认的需求误写进数据库。
+   */
+  useEffect(() => {
+    setPendingLinkyAnalysisSelection(
+      batchId,
+      scope.workspaceName === null
+        ? null
+        : { workspaceName: scope.workspaceName, releaseWindow: scope.releaseWindow, storyCodes: selected },
+    )
+  }, [batchId, scope, selected])
   /**
    * 已冻结清单走抽屉，不占页面高度。
    *
@@ -1734,8 +1754,6 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
    * 操作的列表前面垫一块东西。抽屉里只放已冻结的需求本身。
    */
   const [snapshotOpen, setSnapshotOpen] = useState(false)
-  const { message } = AntApp.useApp()
-  const queryClient = useQueryClient()
   const navigate = useNavigate()
   const storiesQuery = useQuery({ queryKey: ['stories', batchId], queryFn: () => listStories(batchId) })
   const importedStories = storiesQuery.data ?? []
@@ -1810,44 +1828,6 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
   const latestImport = latestImportQuery.data ?? null
   const importing = latestImport?.status === 'QUEUED' || latestImport?.status === 'RUNNING'
 
-  // 单子跑完就刷新批次里的需求与附件。
-  useEffect(() => {
-    if (watchedImportId === null || latestImport === null) return
-    if (latestImport.id !== watchedImportId) return
-    if (latestImport.status !== 'SUCCEEDED' && latestImport.status !== 'FAILED') return
-    setWatchedImportId(null)
-    setSelected([])
-    queryClient.invalidateQueries({ queryKey: ['stories', batchId] })
-    queryClient.invalidateQueries({ queryKey: ['review-story-attachments', batchId] })
-    queryClient.invalidateQueries({ queryKey: ['batch', batchId] })
-    queryClient.invalidateQueries({ queryKey: ['batch-workspace', batchId] })
-    queryClient.invalidateQueries({ queryKey: ['batches'] })
-    if (latestImport.status === 'SUCCEEDED') {
-      message.success(`已冻结 ${latestImport.stories_committed} 条需求`)
-      navigate(`/batches/${batchId}/ai-result`)
-    } else {
-      message.error(`需求导入失败：${latestImport.error_code ?? ''} ${latestImport.error_message ?? ''}`)
-    }
-  }, [watchedImportId, latestImport, batchId, queryClient, message, navigate])
-
-  const importMutation = useMutation({
-    mutationFn: () => {
-      if (scope.workspaceName === null) throw new Error('LINKY_IMPORT_WORKSPACE_REQUIRED')
-      return requestLinkyBatchImport({
-        batchId,
-        workspaceName: scope.workspaceName,
-        releaseWindow: scope.releaseWindow,
-        storyCodes: selected,
-      })
-    },
-    onSuccess: (requestId) => {
-      // 不弹提示：快照条上立刻出现「导入中 + 进度条」，比一条会自己消失的 toast 更可靠。
-      setWatchedImportId(requestId)
-      void latestImportQuery.refetch()
-    },
-    onError: (error) => message.error(describeLinkyError(error)),
-  })
-
   const frozenAttachments = attachmentsQuery.data ?? []
   const attachmentCountByStory = useMemo(() => {
     const counter = new Map<string, number>()
@@ -1865,7 +1845,7 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
 
   return (
     <div className="import-page">
-      {readOnlyReason ? (
+      {readOnlyReason && !analysisRunning ? (
         <Alert
           type={readOnlyReason.type}
           showIcon
@@ -2009,22 +1989,6 @@ function SourceImportPage({ batchId, batch, canManage }: { batchId: string; batc
            * 这一页只能往批次里加需求，没有移除通道 —— 取消勾选改变不了任何事实，所以不给取消。
            */
           lockedCodes={frozenStoryCodes}
-          /*
-           * 只把终点按钮交给选择器。
-           *
-           * 「已选 N 条 / 哪个项目组」由选择器自己渲染在勾选摘要条上 —— 那两个值本来就是它的
-           * 状态，这里再拼一遍只会两处不同步。
-           */
-          actions={
-            <Button
-              type="primary"
-              disabled={selected.length === 0 || scope.workspaceName === null || importing}
-              loading={importMutation.isPending || importing}
-              onClick={() => importMutation.mutate()}
-            >
-              确认导入并冻结
-            </Button>
-          }
         />
       )}
 
@@ -2162,11 +2126,31 @@ function AutoAnalysisSection({
   const queryClient = useQueryClient()
   const [supplementalModelId, setSupplementalModelId] = useState<string>()
   const [commitWindowDays, setCommitWindowDays] = useState<7 | 14 | 21 | 28>(21)
+  const [pendingSelection, setPendingSelection] = useState(() => getPendingLinkyAnalysisSelection(batch.id))
+
+  const latestImportQuery = useQuery({
+    queryKey: ['linky-batch-import', batch.id],
+    queryFn: () => getLatestLinkyBatchImport(batch.id),
+    refetchInterval: (query) => {
+      const request = query.state.data as LinkyBatchImportRequest | null | undefined
+      return request?.status === 'QUEUED' || request?.status === 'RUNNING' || request?.analysis_status === 'PENDING'
+        ? 2000
+        : false
+    },
+  })
+  const latestImport = latestImportQuery.data ?? null
+  const importPreparing = Boolean(
+    latestImport &&
+      latestImport.analysis_context_version !== null &&
+      (latestImport.status === 'QUEUED' || latestImport.status === 'RUNNING' || latestImport.analysis_status === 'PENDING'),
+  )
+  const importAutoStartFailed = latestImport?.analysis_status === 'FAILED'
 
   const jobQuery = useQuery({
     queryKey: ['analysis-job', batch.id],
     queryFn: () => getLatestAnalysisJob(batch.id),
-    refetchInterval: (query) => (isActiveJob(query.state.data as AnalysisJob | null) ? 4000 : false),
+    refetchInterval: (query) =>
+      isActiveJob(query.state.data as AnalysisJob | null) || importPreparing ? 2000 : false,
   })
   const job = jobQuery.data ?? null
   const jobActive = isActiveJob(job)
@@ -2193,6 +2177,7 @@ function AutoAnalysisSection({
 
   const invalidateAll = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['analysis-job', batch.id] })
+    queryClient.invalidateQueries({ queryKey: ['linky-batch-import', batch.id] })
     queryClient.invalidateQueries({ queryKey: ['batch', batch.id] })
     queryClient.invalidateQueries({ queryKey: ['batch-workspace', batch.id] })
     queryClient.invalidateQueries({ queryKey: ['ai-imports', batch.id] })
@@ -2212,16 +2197,35 @@ function AutoAnalysisSection({
   })
 
   const enqueueMutation = useMutation({
-    // 页面只提供最新的精准提交分析；V1 全仓流程不再对用户开放（RPC 仍保留给历史任务）。
-    mutationFn: () => enqueueAnalysisJob(batch.id, {
-      analysisContextVersion: 2,
-      commitWindowDays,
-    }),
-    onSuccess: () => {
-      message.success(`已发起分析（${String(commitWindowDays)} 天分析窗口）`)
+    mutationFn: async () => {
+      if (pendingSelection) {
+        const requestId = await requestLinkyBatchImportForAnalysis({
+          batchId: batch.id,
+          workspaceName: pendingSelection.workspaceName,
+          releaseWindow: pendingSelection.releaseWindow,
+          storyCodes: pendingSelection.storyCodes,
+          commitWindowDays,
+        })
+        return { kind: 'IMPORT' as const, id: requestId }
+      }
+      const jobId = await enqueueAnalysisJob(batch.id, {
+        analysisContextVersion: 2,
+        commitWindowDays,
+      })
+      return { kind: 'JOB' as const, id: jobId }
+    },
+    onSuccess: (result) => {
+      if (result.kind === 'IMPORT') {
+        clearPendingLinkyAnalysisSelection(batch.id)
+        setPendingSelection(null)
+        message.info('正在准备需求快照，完成后将自动开始分析')
+        void latestImportQuery.refetch()
+      } else {
+        message.success(`已发起分析（${String(commitWindowDays)} 天分析窗口）`)
+      }
       invalidateAll()
     },
-    onError: (error) => message.error(error.message),
+    onError: (error) => message.error(describeLinkyError(error)),
   })
 
   const retryMutation = useMutation({
@@ -2290,6 +2294,7 @@ function AutoAnalysisSection({
 
   // 自动分析成功后刷新导入/工作区（活动轮询停止的临界点）。
   const prevStatusRef = useRef<AnalysisJob['status'] | null>(null)
+  const prevImportRef = useRef<{ id: string; status: LinkyBatchImportRequest['status']; analysisStatus: LinkyBatchImportRequest['analysis_status'] } | null>(null)
   useEffect(() => {
     const current = job?.status ?? null
     if (prevStatusRef.current && prevStatusRef.current !== 'SUCCEEDED' && current === 'SUCCEEDED') {
@@ -2297,14 +2302,30 @@ function AutoAnalysisSection({
     }
     prevStatusRef.current = current
   }, [job?.status, invalidateAll])
+  useEffect(() => {
+    if (!latestImport || latestImport.analysis_context_version === null) return
+    const previous = prevImportRef.current
+    const changed =
+      previous?.id === latestImport.id &&
+      (previous.status !== latestImport.status || previous.analysisStatus !== latestImport.analysis_status)
+    if (changed && (latestImport.status === 'SUCCEEDED' || latestImport.status === 'FAILED' || latestImport.analysis_status === 'FAILED')) {
+      invalidateAll()
+    }
+    prevImportRef.current = {
+      id: latestImport.id,
+      status: latestImport.status,
+      analysisStatus: latestImport.analysis_status,
+    }
+  }, [latestImport, invalidateAll])
 
-  // 前置条件（方案 5.2）
+  const hasSelectedRequirements = storyCount > 0 || pendingSelection !== null
   const preconditions = [
     { label: '有管理该批次的权限', ok: canManage },
     { label: '批次未完成', ok: !batchCompleted },
     { label: '已选择受支持分支', ok: branchSupported },
     { label: '已选择可用模型（启用且已配置密钥）', ok: modelReady },
-    { label: '已导入至少一条需求', ok: storyCount > 0 },
+    { label: '请先在“原始需求导入”选择至少一条需求', ok: hasSelectedRequirements },
+    { label: '需求快照正在准备，请勿重复开始', ok: !importPreparing },
     { label: '当前没有运行中的分析任务', ok: !jobActive },
     { label: '当前批次尚未产生 AI 结果', ok: !hasExistingAiResult },
   ]
@@ -2314,7 +2335,8 @@ function AutoAnalysisSection({
   const storyTasks = storyTasksQuery.data ?? []
   const agentDoneCount = storyTasks.filter((task) => task.agent_status === 'SUCCEEDED').length
   const processingStories = storyTasks.filter((task) => task.agent_status === 'RUNNING')
-  const totalStories = job?.total_stories || storyTasks.length || storyCount
+  const selectedStoryCount = storyCount || (importPreparing ? latestImport?.stories_total ?? 0 : pendingSelection?.storyCodes.length ?? 0)
+  const totalStories = job?.total_stories || storyTasks.length || selectedStoryCount
   const modelConfigId = batch.ai_model_config_id ?? job?.model_config_id ?? null
   const modelDisplay =
     (modelConfigId ? modelNameById.get(modelConfigId) : null) ??
@@ -2344,8 +2366,8 @@ function AutoAnalysisSection({
    * 以前是每处各自判断一次 status，改一处就会漏一处，出现"药丸说失败、进度条还是蓝的"。
    */
   const statusTone: 'idle' | 'running' | 'done' | 'failed' =
-    job === null ? 'idle' : job.status === 'SUCCEEDED' ? 'done' : job.status === 'FAILED' ? 'failed' : 'running'
-  const statusLabel = job ? analysisJobStatusLabels[job.status] ?? job.status : '未开始'
+    importPreparing ? 'running' : job === null ? 'idle' : job.status === 'SUCCEEDED' ? 'done' : job.status === 'FAILED' ? 'failed' : 'running'
+  const statusLabel = importPreparing ? '正在准备需求' : job ? analysisJobStatusLabels[job.status] ?? job.status : '未开始'
   const blockedCount = preconditions.filter((item) => !item.ok).length
   // 仓库总数一律读白名单长度。原来这里写死 4，而白名单有 5 个仓：结果是"全部就绪"永远
   // 不变绿，而少一个仓时"待准备"提示又已经消失。
@@ -2382,7 +2404,7 @@ function AutoAnalysisSection({
         <div className="analysis-facts__item">
           <dt>本批次需求</dt>
           <dd>
-            {storyCount}
+            {selectedStoryCount}
             <span className="analysis-facts__unit"> 条</span>
           </dd>
         </div>
@@ -2434,8 +2456,26 @@ function AutoAnalysisSection({
         />
       ) : null}
 
+      {importPreparing ? (
+        <Alert
+          type="info"
+          showIcon
+          title="正在准备需求快照"
+          description={`已请求 ${latestImport?.stories_total ?? 0} 条需求；Worker 正在从 Linky 冻结正文和附件，完成后会自动创建分析任务。`}
+        />
+      ) : null}
+
+      {importAutoStartFailed ? (
+        <Alert
+          type="error"
+          showIcon
+          title="需求已冻结，但自动开始分析失败"
+          description={describeLinkyError(`${latestImport?.analysis_error_code ?? ''} ${latestImport?.analysis_error_message ?? ''}`)}
+        />
+      ) : null}
+
       <div className="analysis-actions">
-        {canManage && !hasExistingAiResult && !jobActive ? (
+        {canManage && !hasExistingAiResult && !jobActive && !importPreparing ? (
           <Select<7 | 14 | 21 | 28>
             value={commitWindowDays}
             className="analysis-actions__window"
@@ -2454,7 +2494,7 @@ function AutoAnalysisSection({
           loading={enqueueMutation.isPending}
           onClick={() => enqueueMutation.mutate()}
         >
-          开始分析
+          {importPreparing ? '正在准备需求' : '开始分析'}
         </Button>
         {canManage && jobActive ? (
           <Button danger loading={cancelJobMutation.isPending} onClick={confirmCancelJob}>

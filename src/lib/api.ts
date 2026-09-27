@@ -1999,6 +1999,30 @@ export async function requestLinkyBatchImport(input: {
   return unwrap<string>({ data, error })
 }
 
+/**
+ * V1.31：开始分析的第一道工序。此 RPC 只创建并冻结「导入后自动分析」意图；
+ * 需求正文/附件仍由 Worker 取，完成 RPC 才会创建实际 Job。
+ */
+export async function requestLinkyBatchImportForAnalysis(input: {
+  batchId: string
+  workspaceName: string
+  storyCodes: string[]
+  workspaceId?: string | null
+  releaseWindow?: string | null
+  commitWindowDays: CommitWindowDays
+}) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('request_linky_batch_import_for_analysis', {
+    p_batch_id: input.batchId,
+    p_workspace_name: input.workspaceName,
+    p_story_codes: input.storyCodes,
+    p_workspace_id: input.workspaceId ?? null,
+    p_release_window: input.releaseWindow ?? null,
+    p_commit_window_days: input.commitWindowDays,
+  })
+  return unwrap<string>({ data, error })
+}
+
 export async function getLinkyBatchImport(requestId: string) {
   const client = requireSupabase()
   const { data, error } = await client.rpc('get_linky_batch_import', { p_request_id: requestId })

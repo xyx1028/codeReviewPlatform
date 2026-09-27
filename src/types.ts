@@ -330,6 +330,7 @@ export interface ReviewStoryAttachment {
 }
 
 export type LinkyBatchImportStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
+export type LinkyBatchImportAnalysisStatus = 'NOT_REQUESTED' | 'PENDING' | 'QUEUED' | 'FAILED'
 
 /**
  * V1.20：按批次的需求导入单。
@@ -355,6 +356,13 @@ export interface LinkyBatchImportRequest {
   stories_failed: Array<{ story_code: string; code: string; message: string }>
   error_code: string | null
   error_message: string | null
+  /** V1.31：需求冻结完成后自动创建分析 Job 的服务端编排状态。 */
+  analysis_context_version: 1 | 2 | null
+  commit_window_days: 7 | 14 | 21 | 28 | null
+  analysis_status: LinkyBatchImportAnalysisStatus
+  analysis_job_id: string | null
+  analysis_error_code: string | null
+  analysis_error_message: string | null
   created_at: string
   started_at: string | null
   finished_at: string | null
