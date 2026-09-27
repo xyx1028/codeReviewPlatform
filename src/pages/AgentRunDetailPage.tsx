@@ -1,4 +1,4 @@
-import { App as AntApp, Alert, Button, Card, Col, Divider, Empty, Row, Space, Statistic, Table, Tag, Tooltip, Typography } from 'antd'
+import { App as AntApp, Alert, Button, Card, Col, Empty, Row, Space, Statistic, Table, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -252,32 +252,61 @@ export function AgentRunDetailPage({ canManage }: { canManage: boolean }) {
   const generatedCount = detail.evidence.length - pinnedCount
 
   return (
-    <Space direction="vertical" size="large" className="page-stack">
-      <div className="page-title">
-        <div>
-          <Button type="link" style={{ paddingInlineStart: 0 }} onClick={() => navigate(-1)}>← 返回</Button>
-          <Title level={2}>Agent 运行详情</Title>
+    <main className="agent-run-detail">
+      <section className="agent-run-hero" aria-labelledby="agent-run-detail-title">
+        <div className="agent-run-hero__topline">
+          <Button className="agent-run-back" type="link" onClick={() => navigate(-1)}>← 返回运行列表</Button>
+          <Space wrap className="agent-run-hero__actions">
+            <Tag color={statusMeta.color}>{statusMeta.label}</Tag>
+            <Tag>第 {detail.agent_attempt} 次尝试</Tag>
+            {runActive ? <Tag color="processing">实时更新中</Tag> : null}
+            {/* 取消按钮只对有批次管理权限的用户展示：VIEWER 看得到详情但没有取消入口。 */}
+            {canManage ? (
+              <Button
+                danger
+                ghost
+                disabled={!runActive || Boolean(detail.cancel_requested_at)}
+                loading={cancelMutation.isPending}
+                onClick={confirmCancel}
+              >
+                {detail.cancel_requested_at ? '已请求取消' : '取消本次尝试'}
+              </Button>
+            ) : null}
+          </Space>
         </div>
-        <Space wrap>
-          <Tag color={statusMeta.color}>{statusMeta.label}</Tag>
-          <Tag>第 {detail.agent_attempt} 次尝试</Tag>
-          {runActive ? <Tag color="processing">运行中，每 4 秒自动刷新</Tag> : null}
-          {/* 取消按钮只对有批次管理权限的用户展示：VIEWER 看得到详情但没有取消入口。 */}
-          {canManage ? (
-            <Button
-              danger
-              disabled={!runActive || Boolean(detail.cancel_requested_at)}
-              loading={cancelMutation.isPending}
-              onClick={confirmCancel}
-            >
-              {detail.cancel_requested_at ? '已请求取消' : '取消本次尝试'}
-            </Button>
-          ) : null}
-        </Space>
-      </div>
+        <div className="agent-run-hero__body">
+          <div className="agent-run-hero__summary">
+            <Text className="agent-run-hero__kicker">代码评审 · 执行指挥台</Text>
+            <Title id="agent-run-detail-title" level={1}>Agent 运行详情</Title>
+            <div className="agent-run-phase">
+              <span className={runActive ? 'agent-run-phase__beacon agent-run-phase__beacon--active' : 'agent-run-phase__beacon'} aria-hidden="true" />
+              <div>
+                <Text className="agent-run-phase__label">{runActive ? '当前真实阶段' : '最后记录阶段'}</Text>
+                <Text className="agent-run-phase__value">
+                  {detail.attempt_phase_code ? runtimeActivityLabel(detail.attempt_phase_code) : '暂无阶段投影'}
+                </Text>
+                {detail.attempt_phase_started_at ? (
+                  <Text className="agent-run-phase__time">自 {new Date(detail.attempt_phase_started_at).toLocaleString()}</Text>
+                ) : null}
+              </div>
+            </div>
+          </div>
+          <div className="agent-run-hero__timing" aria-label="本次尝试时间">
+            <div>
+              <Text>开始运行</Text>
+              <strong>{detail.started_at ? new Date(detail.started_at).toLocaleString() : '尚未开始'}</strong>
+            </div>
+            <div>
+              <Text>{runActive ? '刷新节奏' : '结束时间'}</Text>
+              <strong>{runActive ? '每 4 秒同步' : detail.finished_at ? new Date(detail.finished_at).toLocaleString() : '等待提交'}</strong>
+            </div>
+          </div>
+        </div>
+      </section>
 
       {detail.cancel_requested_at ? (
         <Alert
+          className="agent-run-alert"
           type="warning"
           showIcon
           title="已请求取消"
@@ -285,54 +314,78 @@ export function AgentRunDetailPage({ canManage }: { canManage: boolean }) {
         />
       ) : null}
       {detail.error_code ? (
-        <Alert type="error" showIcon title={`运行错误：${detail.error_code}`} />
+        <Alert className="agent-run-alert" type="error" showIcon title={`运行错误：${detail.error_code}`} />
       ) : null}
 
-      <Card title="运行概览">
-        <Row gutter={[16, 16]}>
-          <Col xs={12} md={6}><Statistic title="Agent 数量" value={usage.agent_count} /></Col>
-          <Col xs={12} md={6}><Statistic title="最大委派深度" value={usage.max_depth_reached} /></Col>
-          <Col xs={12} md={6}><Statistic title="Session 版本" value={detail.session_revision ?? 0} /></Col>
-          <Col xs={12} md={6}><Statistic title="恢复次数" value={detail.resume_count ?? 0} /></Col>
+      <section className="agent-run-section agent-run-pulse" aria-labelledby="agent-run-pulse-title">
+        <div className="agent-run-section__heading">
+          <div>
+            <Text className="agent-run-section__eyebrow">本次尝试</Text>
+            <Title id="agent-run-pulse-title" level={3}>运行脉冲</Title>
+          </div>
+          <Text type="secondary">结构规模与续跑状态</Text>
+        </div>
+        <Row gutter={[0, 0]} className="agent-run-pulse__grid">
+          <Col xs={12} lg={6}><Statistic title="Agent 节点" value={usage.agent_count} /></Col>
+          <Col xs={12} lg={6}><Statistic title="最大委派深度" value={usage.max_depth_reached} /></Col>
+          <Col xs={12} lg={6}><Statistic title="Session 版本" value={detail.session_revision ?? 0} /></Col>
+          <Col xs={12} lg={6}><Statistic title="恢复次数" value={detail.resume_count ?? 0} /></Col>
         </Row>
-        <Divider />
-        <Space direction="vertical" size={4}>
-          {detail.policy_hash ? <Text type="secondary">Policy Hash：<Text code>{detail.policy_hash}</Text></Text> : null}
-          {detail.tree_digest ? <Text type="secondary">Tree Digest：<Text code>{detail.tree_digest}</Text></Text> : null}
-          {detail.started_at ? <Text type="secondary">开始时间：{new Date(detail.started_at).toLocaleString()}</Text> : null}
-          {detail.committed_at ? <Text type="secondary">提交时间：{new Date(detail.committed_at).toLocaleString()}</Text> : null}
-          {detail.finished_at ? <Text type="secondary">结束时间：{new Date(detail.finished_at).toLocaleString()}</Text> : null}
-          {detail.sealed_at ? <Text type="secondary">封存时间：{new Date(detail.sealed_at).toLocaleString()}</Text> : null}
-          {/* V1.5 ATTEMPT 阶段投影：它是快照的一部分，不需要游标。 */}
-          {detail.attempt_phase_code ? (
-            <Text type="secondary">
-              当前阶段：{runtimeActivityLabel(detail.attempt_phase_code)}
-              {detail.attempt_phase_started_at
-                ? ` · 自 ${new Date(detail.attempt_phase_started_at).toLocaleString()}`
-                : ''}
-            </Text>
-          ) : null}
-        </Space>
-      </Card>
+      </section>
 
-      <Card title="真实用量（本次尝试累计）">
-        <Row gutter={[16, 16]}>
-          <Col xs={12} md={6}><Statistic title="模型请求（总）" value={usage.model_requests} /></Col>
-          <Col xs={12} md={6}><Statistic title="根 Agent 请求" value={usage.root_model_requests} /></Col>
-          <Col xs={12} md={6}><Statistic title="子 Agent 请求" value={usage.child_model_requests} /></Col>
-          <Col xs={12} md={6}><Statistic title="Ralph 轮次" value={usage.ralph_rounds} /></Col>
-          <Col xs={12} md={6}><Statistic title="重试请求" value={usage.retry_requests} /></Col>
-          <Col xs={12} md={6}><Statistic title="压缩请求" value={usage.compaction_requests} /></Col>
-          <Col xs={12} md={6}><Statistic title="工具调用" value={usage.tool_calls} /></Col>
-          <Col xs={12} md={6}><Statistic title="检索次数" value={usage.searches_run} /></Col>
-          <Col xs={12} md={6}><Statistic title="输入 Token" value={formatTokens(usage.input_tokens)} /></Col>
-          <Col xs={12} md={6}><Statistic title="输出 Token" value={formatTokens(usage.output_tokens)} /></Col>
-          <Col xs={12} md={6}><Statistic title="Web 请求" value={usage.web_requests} /></Col>
-          <Col xs={12} md={6}><Statistic title="Web 字节" value={formatBytes(usage.web_bytes)} /></Col>
-        </Row>
-      </Card>
+      <div className="agent-run-detail-grid">
+        <section className="agent-run-section agent-run-section--usage" aria-labelledby="agent-run-usage-title">
+          <div className="agent-run-section__heading">
+            <div>
+              <Text className="agent-run-section__eyebrow">计量快照</Text>
+              <Title id="agent-run-usage-title" level={3}>真实用量</Title>
+            </div>
+            <Text type="secondary">本次尝试累计</Text>
+          </div>
+          <Row gutter={[0, 0]} className="agent-run-usage__grid">
+            <Col xs={12} sm={8}><Statistic title="模型请求" value={usage.model_requests} /></Col>
+            <Col xs={12} sm={8}><Statistic title="根 Agent 请求" value={usage.root_model_requests} /></Col>
+            <Col xs={12} sm={8}><Statistic title="子 Agent 请求" value={usage.child_model_requests} /></Col>
+            <Col xs={12} sm={8}><Statistic title="工具调用" value={usage.tool_calls} /></Col>
+            <Col xs={12} sm={8}><Statistic title="检索次数" value={usage.searches_run} /></Col>
+            <Col xs={12} sm={8}><Statistic title="Ralph 轮次" value={usage.ralph_rounds} /></Col>
+            <Col xs={12} sm={8}><Statistic title="重试请求" value={usage.retry_requests} /></Col>
+            <Col xs={12} sm={8}><Statistic title="压缩请求" value={usage.compaction_requests} /></Col>
+            <Col xs={12} sm={8}><Statistic title="Web 请求" value={usage.web_requests} /></Col>
+            <Col xs={12} sm={8}><Statistic title="输入 Token" value={formatTokens(usage.input_tokens)} /></Col>
+            <Col xs={12} sm={8}><Statistic title="输出 Token" value={formatTokens(usage.output_tokens)} /></Col>
+            <Col xs={12} sm={8}><Statistic title="Web 字节" value={formatBytes(usage.web_bytes)} /></Col>
+          </Row>
+        </section>
 
-      <Card title="Agent Tree（按委派深度缩进）">
+        <section className="agent-run-section agent-run-section--ledger" aria-labelledby="agent-run-ledger-title">
+          <div className="agent-run-section__heading">
+            <div>
+              <Text className="agent-run-section__eyebrow">可追溯性</Text>
+              <Title id="agent-run-ledger-title" level={3}>运行账本</Title>
+            </div>
+          </div>
+          <dl className="agent-run-ledger">
+            {detail.committed_at ? <div><dt>提交时间</dt><dd>{new Date(detail.committed_at).toLocaleString()}</dd></div> : null}
+            {detail.finished_at ? <div><dt>结束时间</dt><dd>{new Date(detail.finished_at).toLocaleString()}</dd></div> : null}
+            {detail.sealed_at ? <div><dt>封存时间</dt><dd>{new Date(detail.sealed_at).toLocaleString()}</dd></div> : null}
+            {detail.policy_hash ? <div className="agent-run-ledger__hash"><dt>Policy Hash</dt><dd><Text code>{detail.policy_hash}</Text></dd></div> : null}
+            {detail.tree_digest ? <div className="agent-run-ledger__hash"><dt>Tree Digest</dt><dd><Text code>{detail.tree_digest}</Text></dd></div> : null}
+            {!detail.committed_at && !detail.finished_at && !detail.sealed_at && !detail.policy_hash && !detail.tree_digest ? (
+              <div><dt>记录状态</dt><dd>等待运行元数据</dd></div>
+            ) : null}
+          </dl>
+        </section>
+      </div>
+
+      <section className="agent-run-section agent-run-section--table" aria-labelledby="agent-run-tree-title">
+        <div className="agent-run-section__heading">
+          <div>
+            <Text className="agent-run-section__eyebrow">执行拓扑</Text>
+            <Title id="agent-run-tree-title" level={3}>Agent Tree</Title>
+          </div>
+          <Text type="secondary">按委派深度展开</Text>
+        </div>
         <Table<AgentTreeNode>
           rowKey="node_id"
           size="small"
@@ -341,9 +394,15 @@ export function AgentRunDetailPage({ canManage }: { canManage: boolean }) {
           columns={agentColumns}
           locale={{ emptyText: '暂无 Agent 节点' }}
         />
-      </Card>
+      </section>
 
-      <Card title="工具调用与权限判定">
+      <section className="agent-run-section agent-run-section--table" aria-labelledby="agent-run-tool-title">
+        <div className="agent-run-section__heading">
+          <div>
+            <Text className="agent-run-section__eyebrow">执行审计</Text>
+            <Title id="agent-run-tool-title" level={3}>工具调用与权限判定</Title>
+          </div>
+        </div>
         <Table<ToolSummaryRow>
           rowKey={(row) => `${row.tool_name}-${row.permission_verdict}`}
           size="small"
@@ -352,17 +411,19 @@ export function AgentRunDetailPage({ canManage }: { canManage: boolean }) {
           columns={toolColumns}
           locale={{ emptyText: '暂无工具调用' }}
         />
-      </Card>
+      </section>
 
-      <Card
-        title="Evidence 摘要"
-        extra={
-          <Space size={8}>
+      <section className="agent-run-section agent-run-section--table" aria-labelledby="agent-run-evidence-title">
+        <div className="agent-run-section__heading">
+          <div>
+            <Text className="agent-run-section__eyebrow">评审依据</Text>
+            <Title id="agent-run-evidence-title" level={3}>Evidence 摘要</Title>
+          </div>
+          <Space size={8} wrap>
             <Tag color={evidenceOriginMeta.PINNED_SNAPSHOT.color}>冻结快照 {pinnedCount}</Tag>
             <Tag color={evidenceOriginMeta.GENERATED_ARTIFACT.color}>生成产物 {generatedCount}</Tag>
           </Space>
-        }
-      >
+        </div>
         <Table<EvidenceSummary>
           rowKey="evidence_id"
           size="small"
@@ -371,9 +432,15 @@ export function AgentRunDetailPage({ canManage }: { canManage: boolean }) {
           columns={evidenceColumns}
           locale={{ emptyText: '暂无 Evidence' }}
         />
-      </Card>
+      </section>
 
-      <Card title="Artifact 摘要">
+      <section className="agent-run-section agent-run-section--table" aria-labelledby="agent-run-artifact-title">
+        <div className="agent-run-section__heading">
+          <div>
+            <Text className="agent-run-section__eyebrow">留存产物</Text>
+            <Title id="agent-run-artifact-title" level={3}>Artifact 摘要</Title>
+          </div>
+        </div>
         <Table<ArtifactSummary>
           rowKey="artifact_id"
           size="small"
@@ -382,7 +449,7 @@ export function AgentRunDetailPage({ canManage }: { canManage: boolean }) {
           columns={artifactColumns}
           locale={{ emptyText: '暂无 Artifact' }}
         />
-      </Card>
-    </Space>
+      </section>
+    </main>
   )
 }

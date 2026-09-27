@@ -1306,11 +1306,6 @@ a.dashboard-distribution-item:focus-visible {
   width: 156px;
 }
 
-.analysis-actions__hint {
-  color: #94a3b8;
-  font-size: 12px;
-}
-
 /* 进度面板 */
 .analysis-progress {
   display: grid;
@@ -5987,4 +5982,505 @@ a.dashboard-distribution-item:focus-visible {
 
 .app-shell .users-management-tabs > .ant-tabs-content-holder {
   padding-top: 0;
+}
+
+/* 证据 Tab 与技能列表一样始终提供完整分页信息；每个类型各自维护页码和页大小。 */
+.review-evidence-pagination.ant-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin: 14px 0 0;
+}
+
+
+/* V1.35 Agent 运行详情：以运行状态为主、审计明细为辅的指挥台布局。 */
+.agent-run-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 1500px;
+  padding: 4px 0 30px;
+  color: #1d2b41;
+}
+
+.agent-run-hero {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid #173d70;
+  border-radius: 18px;
+  background: #12233f;
+  box-shadow: 0 16px 36px rgba(18, 35, 63, 0.18);
+  color: #f7fbff;
+}
+
+.agent-run-hero::after {
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle at 85% 20%, rgba(100, 164, 255, 0.2) 0 1px, transparent 1.5px);
+  background-size: 15px 15px;
+  content: '';
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.agent-run-hero__topline,
+.agent-run-hero__body {
+  position: relative;
+  z-index: 1;
+}
+
+.agent-run-hero__topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 54px;
+  padding: 10px 22px;
+  border-bottom: 1px solid rgba(180, 208, 248, 0.22);
+  background: rgba(9, 22, 44, 0.26);
+}
+
+.agent-run-back.ant-btn-link {
+  padding: 0;
+  color: #c7ddff;
+  font-weight: 600;
+}
+
+.agent-run-back.ant-btn-link:hover {
+  color: #fff;
+}
+
+.agent-run-hero__actions {
+  justify-content: flex-end;
+}
+
+.agent-run-hero__actions .ant-tag {
+  margin-inline-end: 0;
+  border: 0;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.agent-run-hero__actions .ant-btn-dangerous.ant-btn-background-ghost {
+  border-color: rgba(255, 179, 179, 0.82);
+  color: #ffd4d4;
+}
+
+.agent-run-hero__actions .ant-btn-dangerous.ant-btn-background-ghost:hover:not(:disabled) {
+  border-color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.agent-run-hero__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.72fr);
+  gap: 36px;
+  align-items: end;
+  padding: 30px 30px 32px;
+}
+
+.agent-run-hero__kicker,
+.agent-run-section__eyebrow {
+  display: block;
+  color: #7698ca;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.agent-run-hero h1.ant-typography {
+  margin: 5px 0 21px;
+  color: #fff;
+  font-size: clamp(28px, 3vw, 38px);
+  font-weight: 720;
+  letter-spacing: -0.035em;
+  line-height: 1.18;
+}
+
+.agent-run-phase {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  max-width: 650px;
+}
+
+.agent-run-phase__beacon {
+  display: block;
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  margin-top: 7px;
+  border-radius: 50%;
+  background: #aab9d0;
+}
+
+.agent-run-phase__beacon--active {
+  background: #71d3b1;
+  box-shadow: 0 0 0 5px rgba(113, 211, 177, 0.12);
+  animation: agent-run-beacon 2.4s ease-in-out infinite;
+}
+
+@keyframes agent-run-beacon {
+  50% { box-shadow: 0 0 0 9px rgba(113, 211, 177, 0.02); }
+}
+
+.agent-run-phase__label,
+.agent-run-phase__time {
+  display: block;
+  color: #9db4d4;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.agent-run-phase__value {
+  display: block;
+  margin: 1px 0;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 640;
+  line-height: 1.45;
+}
+
+.agent-run-hero__timing {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  padding: 16px 0 16px 24px;
+  border-left: 1px solid rgba(180, 208, 248, 0.3);
+}
+
+.agent-run-hero__timing > div {
+  display: grid;
+  gap: 3px;
+}
+
+.agent-run-hero__timing .ant-typography {
+  color: #9db4d4;
+  font-size: 12px;
+}
+
+.agent-run-hero__timing strong {
+  color: #f5f8ff;
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.agent-run-alert {
+  border-radius: 12px;
+}
+
+.agent-run-section {
+  border: 1px solid #dfe6f0;
+  border-radius: 15px;
+  background: #fff;
+  box-shadow: 0 7px 20px rgba(27, 48, 80, 0.045);
+}
+
+.agent-run-section__heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 66px;
+  padding: 15px 20px 13px;
+  border-bottom: 1px solid #e8edf4;
+}
+
+.agent-run-section__heading > .ant-typography-secondary {
+  padding-bottom: 3px;
+  color: #6d7d96;
+  font-size: 13px;
+}
+
+.agent-run-section__eyebrow {
+  color: #5774a4;
+  font-size: 11px;
+}
+
+.agent-run-section h3.ant-typography {
+  margin: 2px 0 0;
+  color: #1a2b45;
+  font-size: 17px;
+  font-weight: 680;
+  letter-spacing: -0.012em;
+  line-height: 1.35;
+}
+
+.agent-run-pulse {
+  overflow: hidden;
+}
+
+.agent-run-pulse__grid > .ant-col {
+  min-height: 114px;
+  padding: 20px 20px 18px;
+  border-right: 1px solid #e8edf4;
+  background: linear-gradient(180deg, #fff 0%, #f9fbfe 100%);
+}
+
+.agent-run-pulse__grid > .ant-col:last-child {
+  border-right: 0;
+}
+
+.agent-run-detail .ant-statistic-title {
+  margin-bottom: 7px;
+  color: #6d7d96;
+  font-size: 13px;
+}
+
+.agent-run-detail .ant-statistic-content {
+  color: #172b4d;
+  font-size: 29px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 680;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+}
+
+.agent-run-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(310px, 0.85fr);
+  gap: 18px;
+}
+
+.agent-run-section--usage,
+.agent-run-section--ledger {
+  overflow: hidden;
+}
+
+.agent-run-usage__grid > .ant-col {
+  min-height: 94px;
+  padding: 16px 18px;
+  border-right: 1px solid #e8edf4;
+  border-bottom: 1px solid #e8edf4;
+}
+
+.agent-run-usage__grid > .ant-col:nth-child(3n) {
+  border-right: 0;
+}
+
+.agent-run-usage__grid > .ant-col:nth-last-child(-n + 3) {
+  border-bottom: 0;
+}
+
+.agent-run-usage__grid .ant-statistic-title {
+  margin-bottom: 5px;
+  font-size: 12px;
+}
+
+.agent-run-usage__grid .ant-statistic-content {
+  font-size: 22px;
+}
+
+.agent-run-ledger {
+  margin: 0;
+  padding: 4px 20px 12px;
+}
+
+.agent-run-ledger > div {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 14px;
+  padding: 11px 0;
+  border-bottom: 1px solid #edf1f6;
+}
+
+.agent-run-ledger > div:last-child {
+  border-bottom: 0;
+}
+
+.agent-run-ledger dt {
+  color: #6d7d96;
+  font-size: 12px;
+}
+
+.agent-run-ledger dd {
+  min-width: 0;
+  margin: 0;
+  color: #263a58;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.agent-run-ledger__hash code {
+  display: inline;
+  padding: 2px 5px;
+  border: 0;
+  border-radius: 4px;
+  background: #f0f4fa;
+  color: #40577b;
+  font-size: 11px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.agent-run-section--table {
+  overflow: hidden;
+}
+
+.agent-run-section--table .ant-table-wrapper {
+  overflow-x: auto;
+}
+
+.agent-run-section--table .ant-table {
+  min-width: 680px;
+}
+
+.agent-run-section--table .ant-table-thead > tr > th {
+  padding: 11px 14px;
+  border-bottom: 1px solid #dfe7f1;
+  background: #f4f7fb;
+  color: #526783;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.agent-run-section--table .ant-table-tbody > tr > td {
+  padding: 13px 14px;
+  border-bottom-color: #edf1f6;
+  color: #263a58;
+  vertical-align: top;
+}
+
+.agent-run-section--table .ant-table-tbody > tr:last-child > td {
+  border-bottom: 0;
+}
+
+.agent-run-section--table .ant-table-tbody > tr:hover > td {
+  background: #f7faff !important;
+}
+
+.agent-run-section--table .ant-tag {
+  border-radius: 6px;
+  font-weight: 600;
+}
+
+.agent-run-detail :is(button, a, [tabindex]):focus-visible {
+  outline: 3px solid #5c91ed;
+  outline-offset: 2px;
+}
+
+@media (max-width: 960px) {
+  .agent-run-hero__body,
+  .agent-run-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-run-hero__body {
+    gap: 22px;
+  }
+
+  .agent-run-hero__timing {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 15px 0 0;
+    border-top: 1px solid rgba(180, 208, 248, 0.3);
+    border-left: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .agent-run-detail {
+    gap: 14px;
+    padding-top: 0;
+  }
+
+  .agent-run-hero {
+    border-radius: 14px;
+  }
+
+  .agent-run-hero__topline,
+  .agent-run-section__heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .agent-run-hero__topline {
+    padding: 13px 16px;
+  }
+
+  .agent-run-hero__actions {
+    justify-content: flex-start;
+  }
+
+  .agent-run-hero__body {
+    padding: 24px 18px;
+  }
+
+  .agent-run-hero h1.ant-typography {
+    font-size: 29px;
+  }
+
+  .agent-run-hero__timing {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-run-section {
+    border-radius: 12px;
+  }
+
+  .agent-run-section__heading {
+    min-height: auto;
+    padding: 14px 16px 12px;
+  }
+
+  .agent-run-pulse__grid > .ant-col:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .agent-run-pulse__grid > .ant-col:nth-child(-n + 2) {
+    border-bottom: 1px solid #e8edf4;
+  }
+
+  .agent-run-pulse__grid > .ant-col {
+    min-height: 98px;
+    padding: 16px;
+  }
+
+  .agent-run-usage__grid > .ant-col {
+    min-height: 84px;
+    padding: 14px 16px;
+    border-right: 1px solid #e8edf4;
+    border-bottom: 1px solid #e8edf4;
+  }
+
+  .agent-run-usage__grid > .ant-col:nth-child(3n) {
+    border-right: 1px solid #e8edf4;
+  }
+
+  .agent-run-usage__grid > .ant-col:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .agent-run-usage__grid > .ant-col:nth-last-child(-n + 3) {
+    border-bottom: 1px solid #e8edf4;
+  }
+
+  .agent-run-usage__grid > .ant-col:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+
+  .agent-run-detail .ant-statistic-content {
+    font-size: 25px;
+  }
+
+  .agent-run-usage__grid .ant-statistic-content {
+    font-size: 20px;
+  }
+
+  .agent-run-ledger {
+    padding-inline: 16px;
+  }
+
+  .agent-run-ledger > div {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-run-phase__beacon--active {
+    animation: none;
+  }
 }

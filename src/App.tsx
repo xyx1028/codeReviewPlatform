@@ -2228,7 +2228,7 @@ function AutoAnalysisSection({
       if (result.kind === 'IMPORT') {
         clearPendingLinkyAnalysisSelection(batch.id)
         setPendingSelection(null)
-        message.info('正在准备需求快照，完成后将自动开始分析')
+        message.info('开始分析')
         void latestImportQuery.refetch()
       } else {
         message.success(`已发起分析（${String(commitWindowDays)} 天分析窗口）`)
@@ -2244,7 +2244,7 @@ function AutoAnalysisSection({
       return retryLinkyBatchImportForAnalysis(latestImport.id)
     },
     onSuccess: () => {
-      message.info('正在重新准备需求快照，完成后将自动开始分析')
+      message.info('开始分析')
       void latestImportQuery.refetch()
       invalidateAll()
     },
@@ -2402,7 +2402,6 @@ function AutoAnalysisSection({
   const statusTone: 'idle' | 'running' | 'done' | 'failed' =
     importPreparing ? 'running' : job === null ? 'idle' : job.status === 'SUCCEEDED' ? 'done' : job.status === 'FAILED' ? 'failed' : 'running'
   const statusLabel = importPreparing ? '正在准备需求' : job ? analysisJobStatusLabels[job.status] ?? job.status : '未开始'
-  const blockedCount = preconditions.filter((item) => !item.ok).length
   // 仓库总数一律读白名单长度。原来这里写死 4，而白名单有 5 个仓：结果是"全部就绪"永远
   // 不变绿，而少一个仓时"待准备"提示又已经消失。
   const snapshotTotal = REQUIRED_REPOSITORIES.length
@@ -2540,20 +2539,6 @@ function AutoAnalysisSection({
           <Button danger loading={cancelJobMutation.isPending} onClick={confirmCancelJob}>
             停止分析
           </Button>
-        ) : null}
-        {!hasExistingAiResult && blockedCount > 0 && !requirementPreparationFailed ? (
-          /*
-           * 前置条件清单整块删掉了（常规路径上它 7 条里有 6 条是绿的，纯占地方），
-           * 但"按钮为什么点不动"必须留得住 —— 未满足的那几条挂在这句提示的悬浮里。
-           */
-          <Tooltip
-            title={preconditions
-              .filter((item) => !item.ok)
-              .map((item) => item.label)
-              .join('；')}
-          >
-            <span className="analysis-actions__hint">还有 {blockedCount} 项前置条件未满足</span>
-          </Tooltip>
         ) : null}
       </div>
 
@@ -3784,6 +3769,7 @@ function AiResultCard({ result }: { result: AiReviewResult | null }) {
 
 function CodeEvidenceCard({ evidence }: { evidence: BatchWorkspace['evidence'] }) {
   const [evidencePages, setEvidencePages] = useState<Record<string, number>>({})
+  const [evidencePageSizes, setEvidencePageSizes] = useState<Record<string, number>>({})
   const [activeEvidenceType, setActiveEvidenceType] = useState<string>()
   const evidencePageSize = 10
   const evidenceGroups = ['现有实现', '缺失依据', '风险依据'].map((type) => ({
@@ -3804,9 +3790,10 @@ function CodeEvidenceCard({ evidence }: { evidence: BatchWorkspace['evidence'] }
           size="small"
           onChange={setActiveEvidenceType}
           items={evidenceGroups.map((group) => {
-            const pageCount = Math.ceil(group.items.length / evidencePageSize)
+            const pageSize = evidencePageSizes[group.type] ?? evidencePageSize
+            const pageCount = Math.ceil(group.items.length / pageSize)
             const currentPage = Math.min(evidencePages[group.type] ?? 1, pageCount)
-            const pageItems = group.items.slice((currentPage - 1) * evidencePageSize, currentPage * evidencePageSize)
+            const pageItems = group.items.slice((currentPage - 1) * pageSize, currentPage * pageSize)
             return {
               key: group.type,
               label: `${group.type} (${group.items.length})`,
@@ -3838,7 +3825,22 @@ function CodeEvidenceCard({ evidence }: { evidence: BatchWorkspace['evidence'] }
                     }
                   })}
                 />
-                {group.items.length > evidencePageSize ? <Pagination className="review-evidence-pagination" current={currentPage} pageSize={evidencePageSize} showSizeChanger={false} size="small" total={group.items.length} showTotal={(total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 条`} onChange={(page) => setEvidencePages((pages) => ({ ...pages, [group.type]: page }))} /> : null}
+                <Pagination
+                  className="review-evidence-pagination"
+                  current={currentPage}
+                  pageSize={pageSize}
+                  pageSizeOptions={[10, 20, 50, 100]}
+                  showSizeChanger
+                  size="small"
+                  total={group.items.length}
+                  showTotal={(total) => `共 ${total} 条`}
+                  onChange={(page, nextPageSize) => {
+                    setEvidencePages((pages) => ({ ...pages, [group.type]: page }))
+                    if (nextPageSize !== pageSize) {
+                      setEvidencePageSizes((sizes) => ({ ...sizes, [group.type]: nextPageSize }))
+                    }
+                  }}
+                />
               </section>,
             }
           })}
