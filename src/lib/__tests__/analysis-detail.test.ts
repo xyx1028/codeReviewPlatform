@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { parseAnalysisDetail } from '../analysis-detail'
+import { displayStructuredAnalysisDetailItem, parseAnalysisDetail } from '../analysis-detail'
 
 describe('parseAnalysisDetail', () => {
   it('按项目符号和编号形成可扫描要点，并保留标签正文', () => {
@@ -50,5 +50,21 @@ describe('parseAnalysisDetail', () => {
 
   it('空白输入返回空结构', () => {
     expect(parseAnalysisDetail(' \r\n\t ')).toEqual([])
+  })
+
+  it('removes screenshot-style parenthesized numbering and ideographic indentation', () => {
+    expect(parseAnalysisDetail('1) 鉴权方式下拉不出现 AK/SK；\n　　鉴权方式保持原值可保存；')).toEqual([
+      {
+        kind: 'list',
+        items: [
+          { label: null, content: '鉴权方式下拉不出现 AK/SK；' },
+          { label: null, content: '鉴权方式保持原值可保存；' },
+        ],
+      },
+    ])
+  })
+
+  it('keeps structured items as a single item while defensively stripping list decoration', () => {
+    expect(displayStructuredAnalysisDetailItem('1) 订单创建已实现；退款仍缺失。')).toBe('订单创建已实现；退款仍缺失。')
   })
 })

@@ -398,6 +398,14 @@ export interface AiImportRecord {
   updated_at: string
 }
 
+export interface AnalysisDetailItems {
+  implemented_content: string[]
+  missing_content: string[]
+  risks: string[]
+  test_points: string[]
+  ai_remark: string[]
+}
+
 export interface AiReviewResult {
   id: string
   story_id: string
@@ -410,6 +418,7 @@ export interface AiReviewResult {
   risks: string | null
   test_points: string | null
   ai_remark: string | null
+  analysis_detail_items: AnalysisDetailItems | null
   created_at: string
   updated_at: string
 }

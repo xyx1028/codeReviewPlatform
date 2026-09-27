@@ -238,6 +238,11 @@ function validSubmission(evidenceId: string): Record<string, unknown> {
     verdict: 'IMPLEMENTED',
     confidence: 90,
     summary: 'the requirement is implemented',
+    implementedItems: ['订单创建接口已实现'],
+    missingItems: [],
+    riskItems: [],
+    testPointItems: [],
+    remarkItems: [],
     evidence: [
       {
         evidenceId,

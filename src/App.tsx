@@ -130,7 +130,7 @@ import {
 import { aiVerdictLabels, aiVerdictOptions, analysisJobStatusLabels, batchStatusLabels, humanReviewLabels, humanReviewOptions, resolveAnalysisError, storyTaskStatusLabels } from './lib/labels'
 import { buildUserDeletionView, describeUserDeletionError } from './lib/user-deletion'
 import { aiFillPrompt } from './lib/prompt'
-import { parseAnalysisDetail } from './lib/analysis-detail'
+import { displayStructuredAnalysisDetailItem, parseAnalysisDetail } from './lib/analysis-detail'
 import { WorkerManagementPage } from './pages/WorkerManagementPage'
 import { RuntimeMonitoringPage } from './pages/RuntimeMonitoringPage'
 import { AgentRunDetailPage } from './pages/AgentRunDetailPage'
@@ -3721,27 +3721,45 @@ function StoryCard({ story }: { story: ReviewStory }) {
   )
 }
 
-function AnalysisDetailContent({ value }: { value: string | null | undefined }) {
-  const blocks = parseAnalysisDetail(value)
+function AnalysisDetailContent({
+  items,
+  value,
+}: {
+  items: readonly string[] | null | undefined
+  value: string | null | undefined
+}) {
+  if (items) {
+    return (
+      <ol className="review-ai-detail-content review-ai-detail-content__list review-ai-detail-content__list--structured">
+        {items.map((item, itemIndex) => (
+          <li key={`structured-item-${itemIndex}`} className="review-ai-detail-content__item">
+            <span className="review-ai-detail-content__item-body">{displayStructuredAnalysisDetailItem(item)}</span>
+          </li>
+        ))}
+      </ol>
+    )
+  }
 
+  const blocks = parseAnalysisDetail(value)
   return (
-    <div className="review-ai-detail-content">
+    <div className="review-ai-detail-content review-ai-detail-content--legacy">
       {blocks.map((block, blockIndex) => {
         if (block.kind === 'paragraph') {
           return <p key={`paragraph-${blockIndex}`} className="review-ai-detail-content__paragraph">{block.content}</p>
         }
 
         return (
-          <ul key={`list-${blockIndex}`} className="review-ai-detail-content__list">
+          <ol key={`list-${blockIndex}`} className="review-ai-detail-content__list review-ai-detail-content__list--legacy">
             {block.items.map((item, itemIndex) => (
               <li key={`${item.label ?? 'item'}-${itemIndex}`} className="review-ai-detail-content__item">
+                <span className="review-ai-detail-content__ordinal">{itemIndex + 1}</span>
                 <span className="review-ai-detail-content__item-body">
                   {item.label ? <span className="review-ai-detail-content__label">{item.label}</span> : null}
                   {item.content}
                 </span>
               </li>
             ))}
-          </ul>
+          </ol>
         )
       })}
     </div>
@@ -3751,13 +3769,14 @@ function AnalysisDetailContent({ value }: { value: string | null | undefined }) 
 function AiResultCard({ result }: { result: AiReviewResult | null }) {
   if (!result) return <Card className="review-ai-card" title="AI分析"><Empty description="未分析" /></Card>
 
+  const structuredDetails = result.analysis_detail_items
   const sections = [
-    { title: '已实现内容', value: result.implemented_content, tone: 'success' },
-    { title: '缺失内容', value: result.missing_content, tone: 'warning' },
-    { title: '风险', value: result.risks, tone: 'danger' },
-    { title: '建议测试点', value: result.test_points, tone: 'info' },
-    { title: 'AI 备注', value: result.ai_remark, tone: 'neutral' },
-  ].filter((section) => section.value)
+    { title: '已实现内容', value: result.implemented_content, items: structuredDetails?.implemented_content, tone: 'success' },
+    { title: '缺失内容', value: result.missing_content, items: structuredDetails?.missing_content, tone: 'warning' },
+    { title: '风险', value: result.risks, items: structuredDetails?.risks, tone: 'danger' },
+    { title: '建议测试点', value: result.test_points, items: structuredDetails?.test_points, tone: 'info' },
+    { title: 'AI 备注', value: result.ai_remark, items: structuredDetails?.ai_remark, tone: 'neutral' },
+  ].filter((section) => structuredDetails ? section.items?.length : section.value)
 
   return (
     <Card className="review-ai-card" title="AI分析">
@@ -3784,7 +3803,7 @@ function AiResultCard({ result }: { result: AiReviewResult | null }) {
             ),
             children: (
               <section className={`review-ai-tab-panel review-ai-tab-panel--${section.tone}`}>
-                <AnalysisDetailContent value={section.value} />
+                <AnalysisDetailContent items={section.items} value={section.value} />
               </section>
             ),
           }))}

@@ -85,6 +85,17 @@ function store(): SnapshotStore {
   return new SnapshotStore([{ name: REPO, commitSha, gitDir }])
 }
 
+function detailItems(overrides: Record<string, unknown> = {}) {
+  return {
+    implementedItems: ['订单创建接口已实现'],
+    missingItems: [],
+    riskItems: [],
+    testPointItems: [],
+    remarkItems: [],
+    ...overrides,
+  }
+}
+
 describe('SnapshotStore reads commit objects, not the working tree', () => {
   it('returns committed content even though the working file was replaced', async () => {
     const read = await store().readRange({
@@ -310,6 +321,7 @@ describe('verifyReviewSubmission', () => {
         verdict: 'IMPLEMENTED',
         confidence: 90,
         summary: 'createOrder implements the story',
+        ...detailItems(),
         evidence: [
           {
             evidenceId: receipt.evidenceId,
@@ -343,6 +355,7 @@ describe('verifyReviewSubmission', () => {
         verdict: 'IMPLEMENTED',
         confidence: 90,
         summary: 'createOrder implements the story',
+        ...detailItems(),
         evidence: [
           {
             evidenceId: receipt.evidenceId,
@@ -374,6 +387,7 @@ describe('verifyReviewSubmission', () => {
     const result = await verifyReviewSubmission({
       submission: {
         verdict: 'IMPLEMENTED', confidence: 90, summary: 'createOrder implements the story',
+        ...detailItems(),
         evidence: [{ evidenceId: receipt.evidenceId, repository: REPO, filePath: 'src/main/OrderService.java', startLine: 3, endLine: 6, evidenceType: '现有实现', evidenceSummary: '太短', description: 'createOrder implementation' }],
       },
       evidenceLedger, coverageLedger: new SearchCoverageLedger(), snapshots: store(), coveragePolicy,
@@ -389,6 +403,7 @@ describe('verifyReviewSubmission', () => {
         verdict: 'IMPLEMENTED',
         confidence: 90,
         summary: 's',
+        ...detailItems(),
         evidence: [
           {
             evidenceId: receipt.evidenceId,
@@ -419,6 +434,7 @@ describe('verifyReviewSubmission', () => {
         verdict: 'NOT_IMPLEMENTED',
         confidence: 80,
         summary: 'nothing found',
+        ...detailItems(),
         evidence: [],
       },
       evidenceLedger: new EvidenceLedger(TASK_ID, ATTEMPT),
@@ -436,6 +452,7 @@ describe('verifyReviewSubmission', () => {
         verdict: 'UNCERTAIN',
         confidence: 40,
         summary: 'could not cover the repositories',
+        ...detailItems(),
         evidence: [],
       },
       evidenceLedger: new EvidenceLedger(TASK_ID, ATTEMPT),
@@ -444,6 +461,24 @@ describe('verifyReviewSubmission', () => {
       coveragePolicy,
     })
     expect(result.ok).toBe(true)
+  })
+
+  it('rejects untrimmed, multi-line, duplicate and over-limit structured points', async () => {
+    for (const details of [
+      detailItems({ implementedItems: [' 前后空白'] }),
+      detailItems({ riskItems: ['第一行\n第二行'] }),
+      detailItems({ testPointItems: ['重复', '重复'] }),
+      detailItems({ remarkItems: Array.from({ length: 13 }, (_, index) => `备注${index}`) }),
+    ]) {
+      const result = await verifyReviewSubmission({
+        submission: { verdict: 'UNCERTAIN', confidence: 40, summary: 'invalid detail point', ...details, evidence: [] },
+        evidenceLedger: new EvidenceLedger(TASK_ID, ATTEMPT),
+        coverageLedger: new SearchCoverageLedger(),
+        snapshots: store(),
+        coveragePolicy,
+      })
+      expect(result).toMatchObject({ ok: false, code: 'ANALYSIS_DETAIL_ITEMS_INVALID' })
+    }
   })
 
   it('rejects an out-of-range confidence and an invalid verdict', async () => {
@@ -465,6 +500,7 @@ describe('verifyReviewSubmission', () => {
         verdict: 'MAYBE' as never,
         confidence: 50,
         summary: 's',
+        ...detailItems(),
         evidence: [],
       },
     })
@@ -674,7 +710,8 @@ describe('AttemptControlBroker', () => {
             verdict: 'IMPLEMENTED',
             confidence: 90,
             summary: 's',
-            evidence: [
+            ...detailItems(),
+        evidence: [
               {
                 evidenceId: 'ev_fabricated',
                 repository: REPO,
@@ -702,7 +739,8 @@ describe('AttemptControlBroker', () => {
             verdict: 'IMPLEMENTED',
             confidence: 90,
             summary: 's',
-            evidence: [
+            ...detailItems(),
+        evidence: [
               {
                 evidenceId: read.body.evidenceId,
                 repository: REPO,
@@ -752,7 +790,8 @@ describe('AttemptControlBroker', () => {
           verdict: 'IMPLEMENTED',
           confidence: 90,
           summary: 'x',
-          evidence: [
+          ...detailItems(),
+        evidence: [
             {
               evidenceId: 'ev-does-not-exist',
               repository: REPO,
@@ -804,7 +843,8 @@ describe('AttemptControlBroker', () => {
             verdict: 'NOT_IMPLEMENTED',
             confidence: 85,
             summary: 'no implementation found',
-            evidence: [],
+            ...detailItems(),
+        evidence: [],
           },
         },
       )

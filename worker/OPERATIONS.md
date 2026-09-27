@@ -1588,7 +1588,7 @@ psql -v ON_ERROR_STOP=1 -f supabase/tests/20260917130000_model_network_access_mo
 ```
 
 端到端（本地库 + 本地 Worker 容器 + 真实 launchd 代理）三个场景的实测结果见
-`../代码评审平台需求文档/V1.7-内网模型连接/…-最终执行方案.md` 第 10 节。
+`../需求开发评审一致性平台/V1.7-内网模型连接/…-最终执行方案.md` 第 10 节。
 
 ## 18.7 `502 model endpoint unreachable from this Mac`
 
@@ -2231,7 +2231,7 @@ RUN_V119_LOCAL_INTEGRATION=1 npx vitest run \
 侧的 DeepSeek Harness 会话产生：Agent 在**钉死 commit 的只读快照**上自己 grep / 读文件 /
 按需调平台技能。链路与评审完全并行，互不影响。
 
-执行方案：`代码评审平台需求文档/V1.23-产品代码问答/需求开发评审一致性平台-V1.23产品代码问答-最终执行方案.md`
+执行方案：`需求开发评审一致性平台/V1.23-产品代码问答/需求开发评审一致性平台-V1.23产品代码问答-最终执行方案.md`
 
 ## 24.1 环境变量
 

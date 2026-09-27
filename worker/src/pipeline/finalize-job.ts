@@ -57,6 +57,13 @@ interface AgentOutput {
   risks?: string | null
   testPoints?: string | null
   aiRemark?: string | null
+  analysisDetailItems?: {
+    implemented_content: string[]
+    missing_content: string[]
+    risks: string[]
+    test_points: string[]
+    ai_remark: string[]
+  }
   evidenceSummaries?: Record<string, string>
 }
 
@@ -85,6 +92,7 @@ export function aggregateCompletedResults(tasks: CompletedStoryTask[]): {
       risks: output.risks ?? null,
       test_points: output.testPoints ?? null,
       ai_remark: output.aiRemark ?? null,
+      analysis_detail_items: output.analysisDetailItems ?? null,
     })
 
     for (const item of task.verified_evidence ?? []) {

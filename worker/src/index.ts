@@ -462,15 +462,27 @@ export async function runStoryTask(
 /** Map a verified broker submission onto the Agent output stored by the DB. */
 export function toAgentResultRow(input: CommitReviewInput): Record<string, unknown> {
   const submission = input.submission
+  const implementedItems = Array.isArray(submission.implementedItems) ? submission.implementedItems as string[] : []
+  const missingItems = Array.isArray(submission.missingItems) ? submission.missingItems as string[] : []
+  const riskItems = Array.isArray(submission.riskItems) ? submission.riskItems as string[] : []
+  const testPointItems = Array.isArray(submission.testPointItems) ? submission.testPointItems as string[] : []
+  const remarkItems = Array.isArray(submission.remarkItems) ? submission.remarkItems as string[] : []
   return {
     verdict: submission.verdict,
     confidence: submission.confidence,
     summary: submission.summary,
-    implementedContent: submission.implementedContent ?? null,
-    missingContent: submission.missingContent ?? null,
-    risks: submission.risks ?? null,
-    testPoints: submission.testPoints ?? null,
-    aiRemark: submission.aiRemark ?? null,
+    implementedContent: implementedItems.join('\n') || null,
+    missingContent: missingItems.join('\n') || null,
+    risks: riskItems.join('\n') || null,
+    testPoints: testPointItems.join('\n') || null,
+    aiRemark: remarkItems.join('\n') || null,
+    analysisDetailItems: {
+      implemented_content: implementedItems,
+      missing_content: missingItems,
+      risks: riskItems,
+      test_points: testPointItems,
+      ai_remark: remarkItems,
+    },
     evidenceSummaries: Object.fromEntries(
       input.evidence.map((item) => [item.evidenceId, item.evidenceSummary]),
     ),

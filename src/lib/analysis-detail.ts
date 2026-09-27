@@ -14,17 +14,26 @@ export type AnalysisDetailBlock =
   | { kind: 'paragraph'; content: string }
   | { kind: 'list'; items: AnalysisDetailItem[] }
 
-const listMarker = /^\s*(?:[-*+•●▪◦]|(?:\d+|[一二三四五六七八九十]+)[.、])\s+(.+?)\s*$/u
+const listMarker = /^\s*(?:[-*+•●▪◦]|[（(]?\d+[）).、]|[一二三四五六七八九十]+[、.)）])\s+(.+?)\s*$/u
+const displayMarker = /^\s*(?:[-*+•●▪◦]|[（(]?\d+[）).、]|[一二三四五六七八九十]+[、.)）])\s*/u
 const labelPrefix = /^\s*([^：:\n]{1,20})[：:]\s*(.+?)\s*$/u
 
 function normalize(text: string): string {
-  return text.replace(/\r\n?/g, '\n').replace(/[\t ]+/g, ' ').trim()
+  return text.replace(/[\u200b-\u200d\ufeff]/gu, '').replace(/\r\n?/g, '\n').replace(/[^\S\r\n]+/gu, ' ').trim()
+}
+
+/**
+ * 结构化数组不做文本断句或层级猜测；仅防御性去除不应由 Agent 提供的列表装饰。
+ */
+export function displayStructuredAnalysisDetailItem(value: string): string {
+  return value.replace(/[\u200b-\u200d\ufeff]/gu, '').replace(displayMarker, '').trim()
 }
 
 function itemFromText(text: string): AnalysisDetailItem {
   const normalized = normalize(text)
-  const labelMatch = normalized.match(labelPrefix)
-  if (!labelMatch) return { label: null, content: normalized }
+  const contentWithoutMarker = normalized.replace(listMarker, '$1').trim()
+  const labelMatch = contentWithoutMarker.match(labelPrefix)
+  if (!labelMatch) return { label: null, content: contentWithoutMarker }
 
   const [, candidate, content] = labelMatch
   // URL、路径及类似 `http://` 的技术文本不是自然语言标签，保留完整原文。

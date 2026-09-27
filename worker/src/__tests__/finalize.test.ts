@@ -30,6 +30,13 @@ function completedTask(overrides: Partial<CompletedStoryTask> = {}): CompletedSt
       risks: 'low risk',
       testPoints: 'exercise the endpoint',
       aiRemark: 'reviewed',
+      analysisDetailItems: {
+        implemented_content: ['implementation details'],
+        missing_content: [],
+        risks: ['low risk'],
+        test_points: ['exercise the endpoint'],
+        ai_remark: ['reviewed'],
+      },
       evidenceSummaries: { 'evidence-1': '订单服务创建流程已实现' },
       evidence: [
         {
@@ -71,6 +78,13 @@ describe('aggregateCompletedResults', () => {
         risks: 'low risk',
         test_points: 'exercise the endpoint',
         ai_remark: 'reviewed',
+        analysis_detail_items: {
+          implemented_content: ['implementation details'],
+          missing_content: [],
+          risks: ['low risk'],
+          test_points: ['exercise the endpoint'],
+          ai_remark: ['reviewed'],
+        },
       },
     ])
     expect(evidence).toEqual([
@@ -170,6 +184,13 @@ describe('finalizeJob single Harness workflow', () => {
             risks: 'low risk',
             test_points: 'exercise the endpoint',
             ai_remark: 'reviewed',
+        analysis_detail_items: {
+          implemented_content: ['implementation details'],
+          missing_content: [],
+          risks: ['low risk'],
+          test_points: ['exercise the endpoint'],
+          ai_remark: ['reviewed'],
+        },
           },
         ],
         p_evidence: [

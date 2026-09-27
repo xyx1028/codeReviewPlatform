@@ -123,11 +123,11 @@ function submission(): CommitReviewInput {
       verdict: 'PARTIAL',
       confidence: 61,
       summary: '部分实现',
-      implementedContent: '已实现下单',
-      missingContent: '缺少退款',
-      risks: '并发风险',
-      testPoints: '并发下单',
-      aiRemark: '备注',
+      implementedItems: ['已实现下单'],
+      missingItems: ['缺少退款'],
+      riskItems: ['并发风险'],
+      testPointItems: ['并发下单'],
+      remarkItems: ['备注'],
       evidence: [],
     },
     evidence: [],
@@ -204,6 +204,13 @@ describe('Agent result mapping', () => {
       risks: '并发风险',
       testPoints: '并发下单',
       aiRemark: '备注',
+      analysisDetailItems: {
+        implemented_content: ['已实现下单'],
+        missing_content: ['缺少退款'],
+        risks: ['并发风险'],
+        test_points: ['并发下单'],
+        ai_remark: ['备注'],
+      },
       evidenceSummaries: {},
     })
   })
@@ -230,6 +237,13 @@ describe('Agent result mapping', () => {
         risks: '并发风险',
         test_points: '并发下单',
         ai_remark: '备注',
+        analysis_detail_items: {
+          implemented_content: ['已实现下单'],
+          missing_content: ['缺少退款'],
+          risks: ['并发风险'],
+          test_points: ['并发下单'],
+          ai_remark: ['备注'],
+        },
       },
     ])
   })

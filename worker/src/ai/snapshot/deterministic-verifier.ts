@@ -33,6 +33,14 @@ export const EXISTING_IMPLEMENTATION_EVIDENCE = '现有实现'
  */
 export const ALLOWED_EVIDENCE_TYPES = ['现有实现', '缺失依据', '风险依据'] as const
 
+export interface StructuredAnalysisDetailItems {
+  implemented_content: string[]
+  missing_content: string[]
+  risks: string[]
+  test_points: string[]
+  ai_remark: string[]
+}
+
 export interface ReviewSubmission {
   verdict: ReviewVerdict
   confidence: number
@@ -42,7 +50,71 @@ export interface ReviewSubmission {
   risks?: string | null
   testPoints?: string | null
   aiRemark?: string | null
+  implementedItems?: unknown
+  missingItems?: unknown
+  riskItems?: unknown
+  testPointItems?: unknown
+  remarkItems?: unknown
   evidence: Array<EvidenceClaim & { evidenceType: string; evidenceSummary: string; description: string }>
+}
+
+const DETAIL_ITEM_LIMIT = 12
+const DETAIL_ITEM_MAX_LENGTH = 500
+const detailItemFields = [
+  ['implementedItems', 'implemented_content'],
+  ['missingItems', 'missing_content'],
+  ['riskItems', 'risks'],
+  ['testPointItems', 'test_points'],
+  ['remarkItems', 'ai_remark'],
+] as const
+
+function validateStructuredDetailItems(submission: ReviewSubmission):
+  | { ok: true; details: StructuredAnalysisDetailItems }
+  | { ok: false; reason: string } {
+  const details: StructuredAnalysisDetailItems = {
+    implemented_content: [],
+    missing_content: [],
+    risks: [],
+    test_points: [],
+    ai_remark: [],
+  }
+
+  for (const [inputKey, storageKey] of detailItemFields) {
+    const value = submission[inputKey]
+    if (!Array.isArray(value) || value.length > DETAIL_ITEM_LIMIT) {
+      return {
+        ok: false,
+        reason: `${inputKey} must be an array with at most ${DETAIL_ITEM_LIMIT} items`,
+      }
+    }
+
+    const normalized: string[] = []
+    for (const [index, raw] of value.entries()) {
+      if (typeof raw !== 'string') {
+        return { ok: false, reason: `${inputKey}[${index}] must be a string` }
+      }
+      const item = raw.trim()
+      if (
+        item.length === 0 ||
+        item.length > DETAIL_ITEM_MAX_LENGTH ||
+        item !== raw ||
+        /[\r\n]/.test(item) ||
+        /^\s*(?:[-*+•●▪◦]|[（(]?\d+[）).、]|[一二三四五六七八九十]+[、.)）])\s*/u.test(item)
+      ) {
+        return {
+          ok: false,
+          reason: `${inputKey}[${index}] must be a trimmed, single-line 1–${DETAIL_ITEM_MAX_LENGTH} character point without a list marker or number prefix`,
+        }
+      }
+      if (normalized.includes(item)) {
+        return { ok: false, reason: `${inputKey} must not contain duplicate items` }
+      }
+      normalized.push(item)
+    }
+    details[storageKey] = normalized
+  }
+
+  return { ok: true, details }
 }
 
 export interface VerifiedEvidence {
@@ -61,7 +133,7 @@ export interface VerifiedEvidence {
 }
 
 export type VerificationResult =
-  | { ok: true; evidence: VerifiedEvidence[] }
+  | { ok: true; evidence: VerifiedEvidence[]; details: StructuredAnalysisDetailItems }
   | { ok: false; code: string; reason: string }
 
 export interface VerifyOptions {
@@ -108,6 +180,14 @@ export async function verifyReviewSubmission(
   }
   if (typeof submission.summary !== 'string' || submission.summary.trim().length === 0) {
     return { ok: false, code: 'SUMMARY_MISSING', reason: 'summary must be a non-empty string' }
+  }
+  const detailValidation = validateStructuredDetailItems(submission)
+  if (!detailValidation.ok) {
+    return {
+      ok: false,
+      code: 'ANALYSIS_DETAIL_ITEMS_INVALID',
+      reason: detailValidation.reason,
+    }
   }
   if (!Array.isArray(submission.evidence)) {
     return { ok: false, code: 'EVIDENCE_MISSING', reason: 'evidence must be an array' }
@@ -221,5 +301,5 @@ export async function verifyReviewSubmission(
     }
   }
 
-  return { ok: true, evidence: verified }
+  return { ok: true, evidence: verified, details: detailValidation.details }
 }
