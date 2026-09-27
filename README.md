@@ -221,7 +221,9 @@ npm run proxy:model-vpn:uninstall
 launchd `KeepAlive`；Windows 同时注册主代理任务和 `codereviewplatform-model-vpn-proxy-watchdog`
 守护任务。守护任务每分钟探测 `127.0.0.1:17890`：端口健康时不操作，端口不可达时启动主任务；
 如果主任务仍显示运行则先停止再启动。因此外部终止或僵死后，恢复窗口最长一分钟，且不会重复启动
-健康代理。Windows 请使用运行 Worker 的同一用户；若任务注册被系统权限策略拒绝，再使用该用户的
+健康代理。守护任务固定使用当前系统的 `WindowsPowerShell` 绝对路径，并以 `0` 表示检查完成、
+`1` 表示可诊断的检查失败；因手工停止、重装替换而出现的 `0xFFFFFFFF` 不是健康检查的正常结果。
+Windows 请使用运行 Worker 的同一用户；若任务注册被系统权限策略拒绝，再使用该用户的
 管理员终端。Windows 服务在用户登录时启动，注销后不保证运行，不是无人登录的系统服务。
 重新安装会更新固定主任务 `codereviewplatform-model-vpn-proxy`、守护任务
 `codereviewplatform-model-vpn-proxy-watchdog`，并停用已知的另一个旧任务

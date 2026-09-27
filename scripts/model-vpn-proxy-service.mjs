@@ -104,14 +104,27 @@ function powershellEncodedArguments(source) {
  */
 export function windowsWatchdogScript(port) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Invalid MODEL_VPN_PROXY_PORT')
-  return `$port = ${port}
-if (-not (Test-NetConnection -ComputerName '127.0.0.1' -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue)) {
-  $proxyTask = Get-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(taskName)} -ErrorAction Stop
-  if ($proxyTask.State -eq 'Running') {
-    Stop-ScheduledTask -InputObject $proxyTask -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
+  return `$ErrorActionPreference = 'Stop'
+try {
+  $port = ${port}
+  $isHealthy = Test-NetConnection -ComputerName '127.0.0.1' -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue
+  if (-not $isHealthy) {
+    $proxyTask = Get-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(taskName)} -ErrorAction Stop
+    if ($proxyTask.State -eq 'Running') {
+      Stop-ScheduledTask -InputObject $proxyTask -ErrorAction Stop
+      $deadline = (Get-Date).AddSeconds(10)
+      do {
+        Start-Sleep -Milliseconds 500
+        $proxyTask = Get-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(taskName)} -ErrorAction Stop
+      } while ($proxyTask.State -eq 'Running' -and (Get-Date) -lt $deadline)
+      if ($proxyTask.State -eq 'Running') { throw 'Proxy task did not stop within 10 seconds' }
+    }
+    Start-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(taskName)} -ErrorAction Stop
   }
-  Start-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(taskName)}
+  exit 0
+} catch {
+  [Console]::Error.WriteLine("model-vpn-proxy-watchdog failed: $($_.Exception.Message)")
+  exit 1
 }`
 }
 
@@ -126,7 +139,9 @@ $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -Execution
 $old = Get-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(taskName)} -ErrorAction SilentlyContinue
 if ($old) { Stop-ScheduledTask -InputObject $old }
 Register-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(taskName)} -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-$watchdogAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ${psQuote(watchdogArgs)} -WorkingDirectory ${psQuote(root)}
+$windowsPowerShell = Join-Path $PSHOME 'powershell.exe'
+if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) { throw "Windows PowerShell executable not found: $windowsPowerShell" }
+$watchdogAction = New-ScheduledTaskAction -Execute $windowsPowerShell -Argument ${psQuote(watchdogArgs)} -WorkingDirectory ${psQuote(root)}
 $watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
 $watchdogSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 $oldWatchdog = Get-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(watchdogTaskName)} -ErrorAction SilentlyContinue
