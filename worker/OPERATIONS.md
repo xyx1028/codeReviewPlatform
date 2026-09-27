@@ -1909,7 +1909,8 @@ Worker env 见 `.docker/worker.env.example` 的 V1.20 段。`LINKY_API_BASE_URL`
 宿主机代理必须放开 Linky 端口：
 
 ```bash
-# macOS / Windows 共用；默认端口 80,443,2055,90，复用已有凭据和固定服务名
+# macOS / Windows 共用；默认端口 80,443,2055,90，复用已有凭据和固定服务名。
+# macOS 由 launchd KeepAlive 守护；Windows 重装后会额外注册每分钟检查 17890 的守护任务。
 npm run proxy:model-vpn:install
 
 # 验证（预期 http=200；返回 000 + CONNECT tunnel failed, 403 就是端口没放开）

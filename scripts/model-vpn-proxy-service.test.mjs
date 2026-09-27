@@ -5,7 +5,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import net from 'node:net'
 import { once } from 'node:events'
-import { buildConfig, parseEnv, updateWorkerEnv, launchdPlist, windowsInstallScript } from './model-vpn-proxy-service.mjs'
+import { buildConfig, parseEnv, updateWorkerEnv, launchdPlist, windowsInstallScript, windowsWatchdogScript } from './model-vpn-proxy-service.mjs'
 
 describe('shared proxy installer', () => {
   it('preserves Worker credentials and unrelated configuration across reinstalls', () => {
@@ -31,14 +31,25 @@ describe('shared proxy installer', () => {
     expect(result).toContain('<string>run</string>')
     expect(result).not.toContain('PASSWORD')
   })
-  it('updates one Windows task, disables the known duplicate and quotes paths', () => {
-    const result = windowsInstallScript('C:\\Program Files\\node.exe', "C:\\O'Brien\\proxy.mjs", 'C:\\用户\\config.json', "C:\\O'Brien")
+  it('installs a single-instance primary task plus a minute watchdog task', () => {
+    const result = windowsInstallScript('C:\\Program Files\\node.exe', "C:\\O'Brien\\proxy.mjs", 'C:\\用户\\config.json', "C:\\O'Brien", 18990)
     expect(result).toContain("O''Brien")
     expect(result).toContain('-MultipleInstances IgnoreNew')
     expect(result).toContain('-ExecutionTimeLimit ([TimeSpan]::Zero)')
+    expect(result).toContain('New-ScheduledTaskTrigger -Once')
+    expect(result).toContain('-RepetitionInterval (New-TimeSpan -Minutes 1)')
+    expect(result).toContain("'codereviewplatform-model-vpn-proxy-watchdog'")
     expect(result).toContain('Disable-ScheduledTask -InputObject $legacy')
     expect(result).toContain('-Force')
     expect(result).not.toContain('Unregister-ScheduledTask')
+  })
+  it('only restarts the primary task when the local proxy port is unhealthy', () => {
+    const result = windowsWatchdogScript(18990)
+    expect(result).toContain("Test-NetConnection -ComputerName '127.0.0.1' -Port $port")
+    expect(result).toContain("'codereviewplatform-model-vpn-proxy'")
+    expect(result).toContain('Stop-ScheduledTask -InputObject $proxyTask')
+    expect(result).toContain("Start-ScheduledTask -TaskPath '\\' -TaskName")
+    expect(() => windowsWatchdogScript(0)).toThrow('Invalid MODEL_VPN_PROXY_PORT')
   })
   it('starts the actual proxy from paths containing spaces, Unicode and #', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'proxy 测试 # '))

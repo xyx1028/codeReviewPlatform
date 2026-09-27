@@ -217,12 +217,16 @@ npm run proxy:model-vpn:uninstall
 ```
 
 安装入口是 `scripts/model-vpn-proxy-service.mjs`，自动选择 macOS launchd 或 Windows
-当前用户登录触发的计划任务；两端与代理直接启动的默认端口统一为 `80,443,2055,90`。
-Windows 请使用运行 Worker 的同一用户；若任务注册被系统权限策略拒绝，再使用该用户的管理员终端。
-Windows 服务在用户登录时启动，注销后不保证运行，不是无人登录的系统服务。
-重新安装会更新固定任务 `codereviewplatform-model-vpn-proxy`，并停用已知的另一个旧任务
-`CodeReviewPlatform-ModelVpnProxy`（保留其定义供恢复），避免下次登录同时启动。
-其他名字的手工任务不会被自动处理。已有代理凭据会从 `.docker/worker.env` 复用。
+当前用户的计划任务；两端与代理直接启动的默认端口统一为 `80,443,2055,90`。macOS 使用
+launchd `KeepAlive`；Windows 同时注册主代理任务和 `codereviewplatform-model-vpn-proxy-watchdog`
+守护任务。守护任务每分钟探测 `127.0.0.1:17890`：端口健康时不操作，端口不可达时启动主任务；
+如果主任务仍显示运行则先停止再启动。因此外部终止或僵死后，恢复窗口最长一分钟，且不会重复启动
+健康代理。Windows 请使用运行 Worker 的同一用户；若任务注册被系统权限策略拒绝，再使用该用户的
+管理员终端。Windows 服务在用户登录时启动，注销后不保证运行，不是无人登录的系统服务。
+重新安装会更新固定主任务 `codereviewplatform-model-vpn-proxy`、守护任务
+`codereviewplatform-model-vpn-proxy-watchdog`，并停用已知的另一个旧任务
+`CodeReviewPlatform-ModelVpnProxy`（保留其定义供恢复），避免下次登录同时启动。其他名字的手工
+任务不会被自动处理。已有代理凭据会从 `.docker/worker.env` 复用。
 安装成功只代表服务已注册并请求启动；还需检查日志中的 `proxy_started` 并验证模型/Linky 请求。
 Windows 日志：`%LOCALAPPDATA%\CodeReviewPlatform\model-vpn-proxy\model-vpn-proxy.log`；
 macOS 日志：`~/Library/Logs/codereviewplatform/model-vpn-proxy.log`。

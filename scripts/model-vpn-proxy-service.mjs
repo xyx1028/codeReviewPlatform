@@ -12,6 +12,7 @@ const scriptPath = fileURLToPath(import.meta.url)
 const repoRoot = path.dirname(path.dirname(scriptPath))
 const label = 'com.codereviewplatform.model-vpn-proxy'
 const taskName = 'codereviewplatform-model-vpn-proxy'
+const watchdogTaskName = 'codereviewplatform-model-vpn-proxy-watchdog'
 const legacyTaskName = 'CodeReviewPlatform-ModelVpnProxy'
 const psQuote = (value) => `'${String(value).replaceAll("'", "''")}'`
 export const xmlEscape = (value) => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[c])
@@ -92,8 +93,31 @@ export function launchdPlist(node, installer, configPath, logDir) {
 </dict></plist>\n`
 }
 
-export function windowsInstallScript(node, installer, configPath, root) {
+function powershellEncodedArguments(source) {
+  return `-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${Buffer.from(source, 'utf16le').toString('base64')}`
+}
+
+/**
+ * Windows watchdog: only restarts the primary task when the loopback proxy port
+ * cannot accept a TCP connection. This makes a graceful/external process exit
+ * recoverable even when Task Scheduler does not classify it as a failure.
+ */
+export function windowsWatchdogScript(port) {
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Invalid MODEL_VPN_PROXY_PORT')
+  return `$port = ${port}
+if (-not (Test-NetConnection -ComputerName '127.0.0.1' -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue)) {
+  $proxyTask = Get-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(taskName)} -ErrorAction Stop
+  if ($proxyTask.State -eq 'Running') {
+    Stop-ScheduledTask -InputObject $proxyTask -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+  }
+  Start-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(taskName)}
+}`
+}
+
+export function windowsInstallScript(node, installer, configPath, root, port = 17890) {
   const args = [installer, 'run', configPath].map(v => `"${v}"`).join(' ')
+  const watchdogArgs = powershellEncodedArguments(windowsWatchdogScript(port))
   return `$user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action = New-ScheduledTaskAction -Execute ${psQuote(node)} -Argument ${psQuote(args)} -WorkingDirectory ${psQuote(root)}
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
@@ -102,6 +126,12 @@ $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -Execution
 $old = Get-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(taskName)} -ErrorAction SilentlyContinue
 if ($old) { Stop-ScheduledTask -InputObject $old }
 Register-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(taskName)} -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+$watchdogAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ${psQuote(watchdogArgs)} -WorkingDirectory ${psQuote(root)}
+$watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
+$watchdogSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+$oldWatchdog = Get-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(watchdogTaskName)} -ErrorAction SilentlyContinue
+if ($oldWatchdog) { Stop-ScheduledTask -InputObject $oldWatchdog }
+Register-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(watchdogTaskName)} -Action $watchdogAction -Trigger $watchdogTrigger -Principal $principal -Settings $watchdogSettings -Force | Out-Null
 # Keep the alternate task for recovery, but remove its login trigger from service.
 $legacy = Get-ScheduledTask -TaskPath '\\' -TaskName ${psQuote(legacyTaskName)} -ErrorAction SilentlyContinue
 if ($legacy) {
@@ -143,7 +173,7 @@ async function main(action, suppliedConfig) {
   }
   if (action === 'uninstall') {
     if (windows) {
-      powershell(`foreach ($name in @(${psQuote(taskName)}, ${psQuote(legacyTaskName)})) {
+      powershell(`foreach ($name in @(${psQuote(taskName)}, ${psQuote(watchdogTaskName)}, ${psQuote(legacyTaskName)})) {
   $task = Get-ScheduledTask -TaskPath '\\' -TaskName $name -ErrorAction SilentlyContinue
   if ($task) { Stop-ScheduledTask -InputObject $task; Disable-ScheduledTask -InputObject $task | Out-Null }
 }`)
@@ -167,7 +197,7 @@ async function main(action, suppliedConfig) {
   fs.writeFileSync(workerFile, updateWorkerEnv(text, config), { mode: 0o600 })
   if (!windows) { fs.chmodSync(configPath, 0o600); fs.chmodSync(workerFile, 0o600) }
   if (windows) {
-    powershell(windowsInstallScript(process.execPath, scriptPath, configPath, repoRoot))
+    powershell(windowsInstallScript(process.execPath, scriptPath, configPath, repoRoot, Number(config.MODEL_VPN_PROXY_PORT)))
   } else {
     fs.mkdirSync(path.dirname(plist), { recursive: true })
     fs.writeFileSync(plist, launchdPlist(process.execPath, scriptPath, configPath, logDir), { mode: 0o600 })
