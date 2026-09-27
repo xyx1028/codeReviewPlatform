@@ -130,6 +130,7 @@ import {
 import { aiVerdictLabels, aiVerdictOptions, analysisJobStatusLabels, batchStatusLabels, humanReviewLabels, humanReviewOptions, resolveAnalysisError, storyTaskStatusLabels } from './lib/labels'
 import { buildUserDeletionView, describeUserDeletionError } from './lib/user-deletion'
 import { aiFillPrompt } from './lib/prompt'
+import { parseAnalysisDetail } from './lib/analysis-detail'
 import { WorkerManagementPage } from './pages/WorkerManagementPage'
 import { RuntimeMonitoringPage } from './pages/RuntimeMonitoringPage'
 import { AgentRunDetailPage } from './pages/AgentRunDetailPage'
@@ -3720,6 +3721,33 @@ function StoryCard({ story }: { story: ReviewStory }) {
   )
 }
 
+function AnalysisDetailContent({ value }: { value: string | null | undefined }) {
+  const blocks = parseAnalysisDetail(value)
+
+  return (
+    <div className="review-ai-detail-content">
+      {blocks.map((block, blockIndex) => {
+        if (block.kind === 'paragraph') {
+          return <p key={`paragraph-${blockIndex}`} className="review-ai-detail-content__paragraph">{block.content}</p>
+        }
+
+        return (
+          <ul key={`list-${blockIndex}`} className="review-ai-detail-content__list">
+            {block.items.map((item, itemIndex) => (
+              <li key={`${item.label ?? 'item'}-${itemIndex}`} className="review-ai-detail-content__item">
+                <span className="review-ai-detail-content__item-body">
+                  {item.label ? <span className="review-ai-detail-content__label">{item.label}</span> : null}
+                  {item.content}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )
+      })}
+    </div>
+  )
+}
+
 function AiResultCard({ result }: { result: AiReviewResult | null }) {
   if (!result) return <Card className="review-ai-card" title="AI分析"><Empty description="未分析" /></Card>
 
@@ -3756,7 +3784,7 @@ function AiResultCard({ result }: { result: AiReviewResult | null }) {
             ),
             children: (
               <section className={`review-ai-tab-panel review-ai-tab-panel--${section.tone}`}>
-                <Text>{section.value}</Text>
+                <AnalysisDetailContent value={section.value} />
               </section>
             ),
           }))}
