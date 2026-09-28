@@ -110,6 +110,7 @@ import {
   setBatchDefaultBranch,
   setBatchModel,
   resendSignUpEmail,
+  clearLocalAuthSession,
   signIn,
   signOut,
   signUp,
@@ -503,10 +504,11 @@ function RegisterPage() {
   const [result, setResult] = useState<{ email: string; alreadyRegistered: boolean } | null>(null)
   const mutation = useMutation({
     mutationFn: (values: { email: string; password: string; confirmPassword: string }) => signUp(values.email, values.password),
-    onSuccess: (data, values) => {
-      // 关掉邮箱验证时 signUp 直接返回 session，这时没有邮件要等，按老路径跳走。
+    onSuccess: async (data, values) => {
+      // 关闭邮箱确认时 GoTrue 会自动创建 session；清掉本浏览器会话后，仍按原流程回到登录页。
       if (!data.needsEmailConfirmation) {
-        message.success('注册成功')
+        await clearLocalAuthSession()
+        message.success('注册成功，请使用新账号登录')
         navigate('/login', { replace: true })
         return
       }

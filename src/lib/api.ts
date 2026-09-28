@@ -281,6 +281,18 @@ export async function signOut() {
 }
 
 /**
+ * 关闭当前浏览器的会话，不影响服务器侧账号或其他设备会话。
+ *
+ * 邮箱确认关闭时 GoTrue 会在注册响应里直接创建 session；注册页需要先清掉它，
+ * 才能按产品流程回到登录页让用户手动登录，而不是被 App 的认证状态直接带进工作台。
+ */
+export async function clearLocalAuthSession() {
+  const client = requireSupabase()
+  const { error } = await client.auth.signOut({ scope: 'local' })
+  if (error) throw error
+}
+
+/**
  * 修改当前登录账号的密码。
  *
  * GoTrue 的 updateUser 只看会话有效性、不校验原密码，所以这里先用原密码重新登录做一次二次验证，

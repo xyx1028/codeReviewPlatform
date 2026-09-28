@@ -10,9 +10,10 @@ enable_signup = true
 [auth.email]
 enable_signup = true
 double_confirm_changes = true
-# Match the cloud flow: newly registered users must confirm their email before
-# they can sign in. Local confirmation messages are captured by Mailpit.
-enable_confirmations = true
+# 体验期关闭邮箱归属确认：GoTrue 仍校验邮箱地址格式，但新注册用户会直接取得会话。
+# 云端发布请在 Dashboard 的 Authentication → Providers → Email 单独关闭 Confirm email。
+# 此文件带有本地 site_url，不要用整份 `supabase config push` 覆盖云端设置。
+enable_confirmations = false
 
 [functions.wechat-auth]
 verify_jwt = false
