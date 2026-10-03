@@ -173,6 +173,10 @@ function startPermissiveBroker(socketPath: string, token: string): Promise<{
         res.end(JSON.stringify({ allowed: true, reserved: 1 }))
         return
       }
+      if (req.url === '/attempt/tool-audit') {
+        res.end(JSON.stringify({ accepted: true, allowed: true }))
+        return
+      }
       res.end(JSON.stringify({ accepted: true }))
     })
   })

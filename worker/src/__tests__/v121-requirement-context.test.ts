@@ -241,6 +241,28 @@ describe('agent-review-v2 prompt', () => {
     expect(prompt).not.toContain('可直接用 read / grep 阅读')
   })
 
+  it('二进制附件只要求读取文本视图，并提示不可读与截断风险', () => {
+    const result = buildAgentReviewV2Prompt({
+      story: {
+        code: 'US-1', name: 'Demo', description: '正文',
+        attachments: [
+          { relativePath: 'requirements/US-1/prd.docx', filename: 'prd.docx', sizeBytes: 1024,
+            readablePath: 'requirements/US-1/prd.docx.extracted.txt', textTruncated: true },
+          { relativePath: 'requirements/US-1/scan.pdf', filename: 'scan.pdf', sizeBytes: 2048,
+            extractionStatus: 'no_text' },
+        ],
+      },
+      branch: 'feature_dev',
+      pins: [{ repository: 'kdmanage-backend', commitSha: 'a'.repeat(40) }],
+      maxModelRequests: 20,
+      scope: scopeWith(undefined),
+    })
+    expect(result).toContain('prd.docx.extracted.txt（文本已截断）')
+    expect(result).toContain('scan.pdf（2048 字节）；文本不可读：no_text')
+    expect(result).toContain('若结论依赖这些内容，提交 UNCERTAIN')
+    expect(result).not.toContain('这些附件必须在下结论之前全部读过')
+  })
+
   it('没有登记标签的冻结键不会泄漏进提示词', () => {
     const leaky = buildAgentReviewV2Prompt({
       story: {

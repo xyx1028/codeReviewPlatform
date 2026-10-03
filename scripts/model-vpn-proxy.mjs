@@ -22,6 +22,7 @@ import http from 'node:http'
 import https from 'node:https'
 import net from 'node:net'
 import crypto from 'node:crypto'
+import { lookup as dnsLookup } from 'node:dns/promises'
 import { pathToFileURL } from 'node:url'
 import { realpathSync } from 'node:fs'
 import { DEFAULT_PROXY_PORTS } from './model-vpn-proxy-config.mjs'
@@ -144,11 +145,53 @@ export function isDeniedTarget(hostname) {
   return false
 }
 
+/** DNS 名称先解析全部候选，再固定到其中一个已校验的地址，避免检查后重解析。 */
+export async function resolveAllowedTarget(hostname, lookup = dnsLookup) {
+  if (isDeniedTarget(hostname)) return null
+  const host = hostname.replace(/^\[|\]$/g, '')
+  const literalFamily = net.isIP(host)
+  const addresses = literalFamily
+    ? [{ address: host, family: literalFamily }]
+    : await lookup(host, { all: true, verbatim: true })
+  if (addresses.length === 0 || addresses.some(({ address }) => isDeniedAddress(address))) return null
+  return addresses[0]
+}
+
+/** 内网 10.x/172.16.x/192.168.x 是公司模型的合法目标，不能一概禁止。 */
+export function isDeniedAddress(address) {
+  const normalized = String(address).toLowerCase().split('%')[0]
+  // IPv4-mapped、IPv4-translated 与 well-known NAT64 前缀都可能把受禁 IPv4
+  // 包在 IPv6 里；正常转换地址仍需允许（MacPacket 会返回 ::ffff:0:a.b.c.d）。
+  if (normalized.startsWith('::ffff:') && net.isIP(normalized.slice(7)) === 4) {
+    return isDeniedAddress(normalized.slice(7))
+  }
+  const embedded = normalized.match(/^(?:::ffff:(?:0:)?|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
+  if (embedded) {
+    const high = Number.parseInt(embedded[1], 16)
+    const low = Number.parseInt(embedded[2], 16)
+    return isDeniedAddress(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`)
+  }
+  if (net.isIP(normalized) === 4) {
+    const octets = normalized.split('.').map(Number)
+    return octets[0] === 0 || octets[0] === 127
+      || (octets[0] === 169 && octets[1] === 254)
+      || (octets[0] === 172 && octets[1] === 17)
+      || (octets[0] === 192 && octets[1] === 168 && octets[2] === 65)
+      || (octets[0] === 100 && octets[1] === 100 && octets[2] === 100 && octets[3] === 200)
+      || octets[0] >= 224
+  }
+  if (net.isIP(normalized) === 6) {
+    return normalized === '::' || normalized === '::1' || normalized === 'fd00:ec2::254'
+      || /^fe[89ab]/.test(normalized) || /^ff/.test(normalized)
+  }
+  return true
+}
+
 function isAllowedPort(value) {
   return Number.isInteger(value) && allowedPorts.has(value)
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   if (!isAuthorized(req.headers)) {
     logEvent('proxy_auth_rejected')
     res.writeHead(407, { 'Proxy-Authenticate': 'Basic realm="model-vpn-proxy"' })
@@ -179,6 +222,21 @@ const server = http.createServer((req, res) => {
     return
   }
 
+  let resolved
+  try { resolved = await resolveAllowedTarget(target.hostname) }
+  catch (error) {
+    logEvent('proxy_upstream_error', { host: target.hostname, ...upstreamErrorMeta(error) })
+    res.writeHead(502)
+    res.end('model endpoint unreachable from this Mac')
+    return
+  }
+  if (!resolved) {
+    logEvent('proxy_target_denied', { host: target.hostname, port: targetPort, reason: 'dns_address' })
+    res.writeHead(403)
+    res.end('proxy target denied')
+    return
+  }
+
   const headers = { ...req.headers, host: target.host }
   // 代理自身的凭据不转发给上游模型端点。
   delete headers['proxy-authorization']
@@ -188,6 +246,7 @@ const server = http.createServer((req, res) => {
   const upstream = transport.request(
     {
       hostname: target.hostname,
+      lookup: (_host, _options, callback) => callback(null, resolved.address, resolved.family),
       port: targetPort,
       method: req.method,
       path: `${target.pathname}${target.search}`,
@@ -213,7 +272,7 @@ const server = http.createServer((req, res) => {
 })
 
 // HTTPS 模型端点走 CONNECT 隧道：代理不解密，只转发字节。
-server.on('connect', (req, clientSocket, head) => {
+server.on('connect', async (req, clientSocket, head) => {
   if (!isAuthorized(req.headers)) {
     logEvent('proxy_auth_rejected')
     clientSocket.end(
@@ -233,7 +292,20 @@ server.on('connect', (req, clientSocket, head) => {
     return
   }
 
-  const upstream = net.connect(targetPort, targetHost.replace(/^\[|\]$/g, ''), () => {
+  let resolved
+  try { resolved = await resolveAllowedTarget(targetHost) }
+  catch (error) {
+    logEvent('proxy_upstream_error', { host: targetHost, ...upstreamErrorMeta(error) })
+    clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n')
+    return
+  }
+  if (!resolved) {
+    logEvent('proxy_target_denied', { host: targetHost, port: targetPort, reason: 'dns_address' })
+    clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n')
+    return
+  }
+
+  const upstream = net.connect({ port: targetPort, host: resolved.address }, () => {
     logEvent('proxy_tunnel_established', { host: targetHost, port: targetPort })
     clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
     if (head.length > 0) upstream.write(head)

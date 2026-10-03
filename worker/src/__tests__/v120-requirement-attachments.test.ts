@@ -8,6 +8,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
+import { zipSync } from 'fflate'
 import {
   materializeRequirementAttachments,
   parseFrozenRequirementAttachments,
@@ -31,6 +32,14 @@ function storageWith(map: Record<string, string>): StoryAttachmentStorage {
       if (value === undefined) throw new Error('not found')
       return Buffer.from(value)
     },
+  }
+}
+
+function binaryStorage(bytes: Buffer): StoryAttachmentStorage {
+  return {
+    upload: async () => undefined,
+    remove: async () => undefined,
+    download: async () => bytes,
   }
 }
 
@@ -66,6 +75,28 @@ describe('parseFrozenRequirementAttachments', () => {
 })
 
 describe('materializeRequirementAttachments', () => {
+  it('为二进制附件保存原件与可读视图，原件 SHA 先通过校验', async () => {
+    const bytes = Buffer.from(zipSync({
+      'ppt/slides/slide1.xml': Buffer.from('<p:sld xmlns:p="x" xmlns:a="y"><a:t>上线验收</a:t></p:sld>'),
+    }))
+    const workspace = collectingWorkspace()
+    const result = await materializeRequirementAttachments({
+      workspace,
+      storyCode: 'US-1',
+      attachments: [{ filename: 'prd.pptx', contentType: null, sizeBytes: bytes.length,
+        sha256: createHash('sha256').update(bytes).digest('hex'), storagePath: KEY }],
+      storage: binaryStorage(bytes),
+      logger: silentLogger,
+    })
+    expect(result.failures).toEqual([])
+    expect(result.materialized[0]).toMatchObject({
+      relativePath: 'requirements/US-1/prd.pptx',
+      readablePath: 'requirements/US-1/prd.pptx.extracted.txt',
+      extractionStatus: 'readable',
+    })
+    expect(workspace.written.map((item) => item.name)).toEqual(['prd.pptx', 'prd.pptx.extracted.txt'])
+  })
+
   it('校验通过就落盘，返回 workspace 相对路径', async () => {
     const workspace = collectingWorkspace()
     const result = await materializeRequirementAttachments({

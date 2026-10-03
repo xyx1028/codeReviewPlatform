@@ -166,6 +166,36 @@ describe('host proxy SSRF guard', () => {
     // CONNECT 的 authority 形如 `[::1]:443`，去掉方括号后仍必须被识别。
     expect(isDenied('[::1]')).toBe(true)
   })
+
+  it('checks every DNS answer and pins an allowed address', async () => {
+    const specifier = '../../../scripts/model-vpn-proxy.mjs'
+    const module = (await import(/* @vite-ignore */ specifier)) as unknown as {
+      resolveAllowedTarget: (host: string, lookup: (...args: unknown[]) => Promise<Array<{ address: string; family: number }>>) => Promise<{ address: string; family: number } | null>
+    }
+    const answer = async () => [
+      { address: '10.20.30.40', family: 4 },
+      { address: '127.0.0.1', family: 4 },
+    ]
+    expect(await module.resolveAllowedTarget('model.example.com', answer)).toBeNull()
+    expect(await module.resolveAllowedTarget('model.example.com', async () => [
+      { address: '10.20.30.40', family: 4 },
+    ])).toEqual({ address: '10.20.30.40', family: 4 })
+    expect(await module.resolveAllowedTarget('model.example.com', async () => [
+      { address: '169.254.169.254', family: 4 },
+    ])).toBeNull()
+    expect(await module.resolveAllowedTarget('model.example.com', async () => [
+      { address: '192.168.65.1', family: 4 },
+    ])).toBeNull()
+    expect(await module.resolveAllowedTarget('model.example.com', async () => [
+      { address: '::ffff:0:c612:33', family: 6 },
+    ])).toEqual({ address: '::ffff:0:c612:33', family: 6 })
+    expect(await module.resolveAllowedTarget('model.example.com', async () => [
+      { address: '::ffff:0:7f00:1', family: 6 },
+    ])).toBeNull()
+    expect(await module.resolveAllowedTarget('model.example.com', async () => [
+      { address: '64:ff9b::a9fe:a9fe', family: 6 },
+    ])).toBeNull()
+  })
 })
 
 describe('host proxy upstream failure reason', () => {

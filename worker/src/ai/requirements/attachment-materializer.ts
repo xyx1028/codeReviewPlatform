@@ -13,6 +13,7 @@ import type { Logger } from '../../logger.js'
 import type { StoryAttachmentStorage } from '../../linky/attachment-storage.js'
 import { sanitizeAttachmentFileName } from '../../linky/mapping.js'
 import type { AttemptWorkspace } from '../workspace/attempt-workspace.js'
+import { extractAttachmentText, type AttachmentTextResult } from './attachment-text.js'
 
 export interface FrozenRequirementAttachment {
   filename: string
@@ -26,6 +27,9 @@ export interface MaterializedRequirementAttachment {
   relativePath: string
   filename: string
   sizeBytes: number
+  readablePath?: string
+  extractionStatus?: AttachmentTextResult['status'] | 'original_text'
+  textTruncated?: boolean
 }
 
 export interface RequirementAttachmentFailure {
@@ -116,7 +120,32 @@ export async function materializeRequirementAttachments(input: {
         name,
         bytes,
       )
-      materialized.push({ relativePath, filename: name, sizeBytes: bytes.length })
+      const entry: MaterializedRequirementAttachment = { relativePath, filename: name, sizeBytes: bytes.length }
+      if (/\.(?:txt|md|markdown|csv|json|xml|html?|ya?ml)$/i.test(name)) {
+        entry.readablePath = relativePath
+        entry.extractionStatus = 'original_text'
+      } else {
+        const extracted = await extractAttachmentText(name, bytes)
+        entry.extractionStatus = extracted.status
+        if (extracted.status === 'readable') {
+          const viewName = `${name}.extracted.txt`
+          try {
+            entry.readablePath = input.workspace.materializeRequirementAttachment(
+              input.storyCode,
+              viewName,
+              Buffer.from(
+                `来源：${relativePath}\n文本提取视图；原始附件仍以 SHA256 校验。图片、图形、批注及其他非文本内容不在此视图中。${extracted.truncated ? '\n注意：文本已截断，不能视为全文。' : ''}\n\n${extracted.text}`,
+                'utf8',
+              ),
+            )
+            entry.textTruncated = extracted.truncated
+            usedNames.add(viewName)
+          } catch {
+            entry.extractionStatus = 'parse_failed'
+          }
+        }
+      }
+      materialized.push(entry)
     } catch (error) {
       const code =
         error instanceof RequirementAttachmentDigestMismatch

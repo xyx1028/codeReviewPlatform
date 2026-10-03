@@ -11,6 +11,8 @@ import {
   ClusterOutlined,
   FileSearchOutlined,
   HistoryOutlined,
+  MenuOutlined,
+  CloseOutlined,
   RadarChartOutlined,
   SlidersOutlined,
   TeamOutlined,
@@ -602,6 +604,27 @@ function Shell({ session }: { session: Session }) {
   const queryClient = useQueryClient()
   const [openMenuKeys, setOpenMenuKeys] = useState<string[]>([])
   const [versionModalOpen, setVersionModalOpen] = useState(false)
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia('(max-width: 900px)').matches)
+  const [mobileNavState, setMobileNavState] = useState(() => ({ open: false, path: location.pathname }))
+  const mobileNavOpen = mobileNavState.open && mobileNavState.path === location.pathname
+  const setMobileNavOpen = (open: boolean) => setMobileNavState({ open, path: location.pathname })
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 900px)')
+    const update = () => {
+      setIsMobile(media.matches)
+      if (!media.matches) setMobileNavState((current) => ({ ...current, open: false }))
+    }
+    media.addEventListener('change', update)
+    return () => media.removeEventListener('change', update)
+  }, [])
+  useEffect(() => {
+    if (!mobileNavOpen) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileNavState((current) => ({ ...current, open: false }))
+    }
+    document.addEventListener('keydown', closeOnEscape)
+    return () => document.removeEventListener('keydown', closeOnEscape)
+  }, [mobileNavOpen])
   const profileQuery = useQuery({ queryKey: ['my-profile'], queryFn: getMyProfile })
   const claimAdminMutation = useMutation({
     mutationFn: claimInitialAdmin,
@@ -669,12 +692,38 @@ function Shell({ session }: { session: Session }) {
     ...(isAdmin ? [{ key: '/users', icon: <TeamOutlined />, label: <Link to="/users">用户管理</Link> }] : []),
   ]
   const activeMenuItems = reviewMenuItems
+  const renderAccountMenu = (node: ReactNode) => isMobile ? node : createPortal(node, document.body)
 
   return (
-    <Layout className="app-shell">
+    <Layout className={mobileNavOpen ? 'app-shell app-shell--mobile-nav-open' : 'app-shell'}>
+      <header className="app-mobile-header">
+        <Button
+          type="text"
+          className="app-mobile-menu-button"
+          icon={<MenuOutlined />}
+          aria-label="打开导航菜单"
+          aria-expanded={mobileNavOpen}
+          aria-controls="app-navigation"
+          onClick={() => setMobileNavOpen(true)}
+        />
+        <span className="app-sider-brand-mark" aria-hidden="true">审</span>
+        <span className="app-mobile-header-title">代码评审平台</span>
+      </header>
+      {mobileNavOpen ? (
+        <button
+          type="button"
+          className="app-mobile-nav-backdrop"
+          aria-label="关闭导航菜单"
+          onClick={() => setMobileNavOpen(false)}
+        />
+      ) : null}
       <Layout>
         <Sider
+          id="app-navigation"
           width={APP_SIDER_WIDTH}
+          aria-label="平台导航"
+          aria-hidden={isMobile && !mobileNavOpen}
+          inert={isMobile && !mobileNavOpen}
           className={isCodeQaRoute ? 'app-sider app-sider--code-qa app-sider--product' : 'app-sider app-sider--review'}
         >
           <div className="app-sider-brand" aria-label="代码评审平台">
@@ -683,6 +732,13 @@ function Shell({ session }: { session: Session }) {
               <Text className="app-sider-brand-name">代码评审平台</Text>
               <Text className="app-sider-brand-caption">需求与代码一致性</Text>
             </div>
+            <Button
+              type="text"
+              className="app-mobile-close-button"
+              icon={<CloseOutlined />}
+              aria-label="关闭导航菜单"
+              onClick={() => setMobileNavOpen(false)}
+            />
           </div>
           <div className="app-workspace-tabs" role="tablist" aria-label="平台模块">
             <Button
@@ -731,11 +787,11 @@ function Shell({ session }: { session: Session }) {
               </section>
             </>
           ) : null}
-          {createPortal(
+          {renderAccountMenu(
             <div
               className="app-account-menu"
               style={{
-                position: 'fixed',
+                position: isMobile ? 'absolute' : 'fixed',
                 zIndex: 10,
                 bottom: 0,
                 left: 0,
@@ -821,7 +877,6 @@ function Shell({ session }: { session: Session }) {
               </Button>
             </Popover>
             </div>,
-            document.body,
           )}
         </Sider>
         <Content className="app-content">

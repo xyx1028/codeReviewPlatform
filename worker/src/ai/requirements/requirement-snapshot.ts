@@ -54,6 +54,9 @@ export interface RequirementSnapshotAttachment {
   relativePath: string
   filename: string
   sizeBytes: number
+  readablePath?: string
+  extractionStatus?: string
+  textTruncated?: boolean
 }
 
 function scalarText(value: unknown): string | null {
@@ -190,6 +193,11 @@ export function renderRequirementSnapshotMarkdown(input: {
   } else {
     for (const attachment of input.attachments) {
       lines.push(`- \`${attachment.relativePath}\`（${attachment.sizeBytes} 字节）`)
+      const readablePath = attachment.readablePath
+        ?? (/\.(?:txt|md|markdown|csv|json|xml|html?|ya?ml)$/i.test(attachment.filename) ? attachment.relativePath : undefined)
+      lines.push(readablePath
+        ? `  - 可读内容：\`${readablePath}\`${attachment.textTruncated ? '（文本已截断）' : ''}`
+        : `  - 文本不可读：${attachment.extractionStatus ?? 'unknown'}；不能假设附件内容`)
     }
   }
   if (input.missingAttachmentCount > 0) {

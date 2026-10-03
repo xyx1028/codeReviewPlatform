@@ -48,6 +48,8 @@
     "dayjs": "^1.11.23",
     "diff": "9.0.0",
     "fflate": "0.8.3",
+    "mammoth": "1.13.0",
+    "pdfjs-dist": "6.3.289",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router-dom": "^7.18.3",

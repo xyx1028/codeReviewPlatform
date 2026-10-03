@@ -407,6 +407,18 @@ a.dashboard-distribution-item:focus-visible {
   font-weight: 600;
 }
 
+@media (max-width: 520px) {
+  .group-list__head,
+  .group-row {
+    grid-template-columns: minmax(0, 1fr) 48px 48px 30px;
+    gap: 4px;
+  }
+
+  .group-row__name {
+    gap: 3px;
+  }
+}
+
 .dashboard-log-card {
   opacity: 0.9;
 }
@@ -6592,4 +6604,329 @@ a.dashboard-distribution-item:focus-visible {
   line-height: 1.7;
   opacity: 0.72;
   text-align: right;
+}
+
+/* V1.41：窄屏将共享导航移入浮层，主工作区使用完整视口宽度。 */
+.app-mobile-header,
+.app-mobile-close-button,
+.app-mobile-nav-backdrop,
+.code-qa-history-toggle {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .app-shell > .ant-layout {
+    min-width: 0;
+  }
+
+  .app-mobile-header {
+    position: sticky;
+    z-index: 20;
+    top: 0;
+    display: flex;
+    height: 56px;
+    flex: 0 0 56px;
+    align-items: center;
+    gap: 10px;
+    box-sizing: border-box;
+    padding: 0 14px;
+    background: #f9f9fb;
+    border-bottom: 1px solid #e5e5eb;
+  }
+
+  .app-mobile-menu-button.ant-btn {
+    width: 36px;
+    height: 36px;
+    flex: 0 0 36px;
+    color: #383841;
+    font-size: 18px;
+  }
+
+  .app-mobile-header-title {
+    min-width: 0;
+    overflow: hidden;
+    color: #27272e;
+    font-size: 15px;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .app-mobile-nav-backdrop {
+    position: fixed;
+    z-index: 90;
+    inset: 0;
+    display: block;
+    width: 100%;
+    padding: 0;
+    background: rgba(25, 28, 42, 0.42);
+    border: 0;
+  }
+
+  .app-shell .app-sider.ant-layout-sider {
+    position: fixed;
+    z-index: 91;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(264px, calc(100vw - 48px)) !important;
+    min-width: min(264px, calc(100vw - 48px)) !important;
+    max-width: min(264px, calc(100vw - 48px)) !important;
+    height: 100dvh;
+    transform: translateX(-100%);
+    transition: transform 180ms ease;
+    box-shadow: 8px 0 28px rgba(25, 28, 42, 0.12);
+  }
+
+  .app-shell--mobile-nav-open .app-sider.ant-layout-sider {
+    transform: translateX(0);
+  }
+
+  .app-shell .app-sider > .ant-layout-sider-children {
+    position: relative;
+    height: 100%;
+    padding-bottom: 44px;
+    overflow-y: auto;
+  }
+
+  .app-mobile-close-button.ant-btn {
+    display: inline-flex;
+    width: 32px;
+    height: 32px;
+    margin-left: auto;
+    color: #55555f;
+  }
+
+  .app-shell .app-sider .app-account-menu {
+    position: absolute !important;
+    width: 100% !important;
+    z-index: 2;
+  }
+
+  .app-shell .app-content {
+    width: 100%;
+    min-width: 0;
+    max-width: 100vw;
+    box-sizing: border-box;
+    padding: 16px;
+    overflow-x: hidden;
+  }
+
+  .app-shell .app-content :is(.page-stack, .ant-card, .ant-card-body) {
+    min-width: 0;
+  }
+
+  .app-shell .sidebar-page-title,
+  .app-shell .page-title {
+    flex-wrap: wrap;
+  }
+
+  .app-shell .sidebar-page-title__extra {
+    max-width: 100%;
+    margin-left: 0;
+  }
+
+  .app-shell .ant-table-wrapper {
+    max-width: 100%;
+  }
+
+  .app-shell .ant-table-wrapper .ant-table-content {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .app-shell .ant-table-wrapper .ant-table-content > table {
+    min-width: 640px;
+  }
+
+  /* 桌面固定操作列可能比手机屏幕还宽（技能页约 365px），会盖住全部正文列。 */
+  .app-shell .app-content .ant-table-cell-fix,
+  .app-shell .app-content .ant-table-cell-fix-left,
+  .app-shell .app-content .ant-table-cell-fix-right {
+    position: static !important;
+    left: auto !important;
+    right: auto !important;
+    inset-inline-start: auto !important;
+    inset-inline-end: auto !important;
+  }
+
+  .app-shell .app-content .ant-table-cell-fix::after,
+  .app-shell .app-content .ant-table-cell-fix-left::after,
+  .app-shell .app-content .ant-table-cell-fix-right::after {
+    display: none;
+  }
+
+  .app-shell .ant-table-pagination.ant-pagination {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    padding-inline: 12px;
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-sidebar,
+  .app-shell .app-sider--product ~ .app-content .code-qa-layout--welcome .code-qa-sidebar {
+    position: static;
+    width: 100%;
+    height: 52px;
+    min-height: 52px;
+    max-height: 52px;
+    box-sizing: border-box;
+    padding: 5px 8px;
+    gap: 0;
+    overflow: hidden;
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-sidebar--mobile-expanded {
+    height: min(220px, 35dvh);
+    max-height: min(220px, 35dvh);
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-sidebar-heading {
+    display: flex;
+    min-height: 40px;
+    align-items: center;
+    gap: 8px;
+    padding: 0;
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-sidebar-title {
+    display: none;
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-history-toggle.ant-btn {
+    display: inline-flex;
+    min-width: 0;
+    height: 38px;
+    flex: 1 1 auto;
+    justify-content: flex-start;
+    gap: 8px;
+    padding: 0 8px;
+    color: #303139;
+    font-size: 13px;
+    font-weight: 650;
+    text-align: left;
+  }
+
+  .code-qa-history-count {
+    color: #92939b;
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .code-qa-history-chevron {
+    margin-left: auto;
+    color: #888993;
+    font-size: 10px;
+    transition: transform 180ms ease;
+  }
+
+  .code-qa-sidebar--mobile-expanded .code-qa-history-chevron {
+    transform: rotate(180deg);
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-sidebar-history {
+    display: none;
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-sidebar--mobile-expanded .code-qa-sidebar-history {
+    display: block;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-new-conversation.ant-btn,
+  .app-shell .app-sider--product ~ .app-content .code-qa-new-conversation.ant-btn-primary {
+    position: static;
+    width: auto;
+    flex: 0 0 auto;
+    margin: 0;
+  }
+
+  .app-shell .code-qa-layout:not(.code-qa-layout--active) .code-qa-new-conversation.ant-btn {
+    display: none;
+  }
+
+  .app-shell .code-qa-layout {
+    min-width: 0;
+    min-height: 0;
+    gap: 12px;
+  }
+
+  .app-shell .code-qa-layout--active {
+    height: calc(100dvh - 56px - 32px);
+    grid-template-rows: 52px minmax(0, 1fr);
+  }
+
+  .app-shell .code-qa-layout--active.code-qa-layout--history-open {
+    grid-template-rows: min(220px, 35dvh) minmax(0, 1fr);
+  }
+
+  .app-shell .code-qa-layout--active .code-qa-sidebar {
+    height: 52px;
+  }
+
+  .app-shell .code-qa-layout--active .code-qa-sidebar--mobile-expanded {
+    height: min(220px, 35dvh);
+  }
+
+  .app-shell .code-qa-layout--active .code-qa-main {
+    min-height: 0;
+  }
+
+  .app-shell .code-qa-welcome {
+    min-height: calc(100dvh - 56px - 32px - 52px - 12px);
+    padding: 24px 0 36px;
+  }
+}
+
+@media (max-width: 520px) {
+  .app-shell .app-content {
+    padding: 12px;
+  }
+
+  .app-shell .code-qa-welcome {
+    min-height: calc(100dvh - 56px - 24px - 52px - 12px);
+  }
+
+  .app-shell .code-qa-layout--active {
+    height: calc(100dvh - 56px - 24px);
+  }
+
+  .app-shell .code-qa-welcome-actions {
+    flex-wrap: wrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell .app-sider.ant-layout-sider {
+    transition: none;
+  }
+}
+
+/* 手机弹窗保留标题和操作区，字段较多时只滚动表单内容。 */
+@media (max-width: 520px) {
+  .ant-modal-root .ant-modal {
+    top: 0;
+    max-height: calc(100dvh - 24px);
+    margin: 12px auto;
+    padding-bottom: 0;
+  }
+
+  .ant-modal-root .ant-modal-container {
+    display: flex;
+    max-height: calc(100dvh - 24px);
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .ant-modal-root .ant-modal-header,
+  .ant-modal-root .ant-modal-footer {
+    flex: 0 0 auto;
+  }
+
+  .ant-modal-root .ant-modal-body {
+    min-height: 0;
+    flex: 1 1 auto;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
 }
