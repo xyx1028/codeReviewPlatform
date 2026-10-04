@@ -115,7 +115,7 @@ WORKER_ENV_FILE=.docker/worker.env docker compose -p codereviewplatform -f docke
 第一步：重新构建镜像并更新本地 Worker（本地池通常没有在途任务，可以直接重建）。
 
 ```bash
-WORKER_ENV_FILE=.docker/worker.local.env docker compose -p codereviewplatform-local -f docker-compose.worker.yml up -d --build --force-recreate --scale worker=4
+WORKER_ENV_FILE=.docker/worker.local.env docker compose -p codereviewplatform-local -f docker-compose.worker.yml up -d --build --force-recreate --scale worker=1
 ```
 
 第二步：使用本地前端和本地 Supabase 验证。

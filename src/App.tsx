@@ -884,7 +884,16 @@ function Shell({ session }: { session: Session }) {
             {/* V1.23：登录后默认落在代码问答。它是产品经理进平台的第一个动作，
                 而评审批次是评审者的工作台 —— 两类角色的首页不该是同一个。 */}
             <Route path="/" element={<Navigate to="/ask" replace />} />
-            <Route path="/ask" element={<CodeQaPage />} />
+            <Route
+              path="/ask"
+              element={
+                <CodeQaPage
+                  isMobile={isMobile}
+                  mobileNavOpen={mobileNavOpen}
+                  closeMobileNav={() => setMobileNavOpen(false)}
+                />
+              }
+            />
             <Route path="/batches" element={<BatchesPage canCreateBatch={canCreateBatch} canManageBatch={canManageBatch} />} />
             <Route path="/stories" element={<StoryBoardPage />} />
             <Route path="/operation-log" element={<OperationLogPage scope="batch" />} />

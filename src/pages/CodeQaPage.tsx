@@ -16,7 +16,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { DeleteOutlined, DownOutlined, EditOutlined, HistoryOutlined, MoreOutlined, PushpinOutlined } from '@ant-design/icons'
+import { DeleteOutlined, EditOutlined, MoreOutlined, PushpinOutlined } from '@ant-design/icons'
 import {
   Alert,
   App as AntApp,
@@ -217,13 +217,20 @@ function MessageBubbles({ turn }: { turn: CodeQaTurn }) {
   )
 }
 
-export default function CodeQaPage() {
+export default function CodeQaPage({
+  isMobile,
+  mobileNavOpen,
+  closeMobileNav,
+}: {
+  isMobile: boolean
+  mobileNavOpen: boolean
+  closeMobileNav: () => void
+}) {
   const { message, modal } = AntApp.useApp()
   const queryClient = useQueryClient()
   const [activeId, setActiveId] = useState<string | null>(null)
   // 产品页默认从居中新建会话开始；历史会话只能由用户主动选择。
   const [isStartingConversation, setIsStartingConversation] = useState(true)
-  const [mobileHistoryExpanded, setMobileHistoryExpanded] = useState(false)
   const [draft, setDraft] = useState('')
   const [welcomeDraft, setWelcomeDraft] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
@@ -350,7 +357,7 @@ export default function CodeQaPage() {
   }
 
   const startNewConversation = () => {
-    setMobileHistoryExpanded(false)
+    if (isMobile) closeMobileNav()
     setActiveId(null)
     setDraft('')
     setWelcomeDraft('')
@@ -358,7 +365,7 @@ export default function CodeQaPage() {
   }
 
   const selectConversation = (conversationId: string) => {
-    setMobileHistoryExpanded(false)
+    if (isMobile) closeMobileNav()
     setIsStartingConversation(false)
     setActiveId(conversationId)
   }
@@ -458,25 +465,15 @@ export default function CodeQaPage() {
   )
 
   return (
-    <div className={`code-qa-layout${isStartingConversation || activeId === null ? '' : ' code-qa-layout--active'}${mobileHistoryExpanded ? ' code-qa-layout--history-open' : ''}`}>
+    <div className={`code-qa-layout${isStartingConversation || activeId === null ? '' : ' code-qa-layout--active'}`}>
       <aside
-        className={mobileHistoryExpanded ? 'code-qa-sidebar code-qa-sidebar--mobile-expanded' : 'code-qa-sidebar'}
+        className="code-qa-sidebar"
         aria-label="历史会话"
+        aria-hidden={isMobile && !mobileNavOpen}
+        inert={isMobile && !mobileNavOpen}
       >
         <div className="code-qa-sidebar-heading">
           <Text className="code-qa-sidebar-title">历史对话</Text>
-          <Button
-            type="text"
-            className="code-qa-history-toggle"
-            aria-controls="code-qa-sidebar-history"
-            aria-expanded={mobileHistoryExpanded}
-            onClick={() => setMobileHistoryExpanded((expanded) => !expanded)}
-          >
-            <HistoryOutlined />
-            <span>历史对话</span>
-            {conversations.length > 0 ? <span className="code-qa-history-count">{conversations.length}</span> : null}
-            <DownOutlined className="code-qa-history-chevron" />
-          </Button>
           <Button
             type="primary"
             block
@@ -505,7 +502,7 @@ export default function CodeQaPage() {
                 ? renderConversationGroup('置顶', pinnedConversations)
                 : null}
               {recentConversations.length > 0
-                ? renderConversationGroup('默认', recentConversations)
+                ? renderConversationGroup('最近', recentConversations)
                 : null}
             </>
           )}

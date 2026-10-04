@@ -6609,8 +6609,7 @@ a.dashboard-distribution-item:focus-visible {
 /* V1.41：窄屏将共享导航移入浮层，主工作区使用完整视口宽度。 */
 .app-mobile-header,
 .app-mobile-close-button,
-.app-mobile-nav-backdrop,
-.code-qa-history-toggle {
+.app-mobile-nav-backdrop {
   display: none;
 }
 
@@ -6762,110 +6761,119 @@ a.dashboard-distribution-item:focus-visible {
     padding-inline: 12px;
   }
 
-  .app-shell .app-sider--product ~ .app-content .code-qa-sidebar,
-  .app-shell .app-sider--product ~ .app-content .code-qa-layout--welcome .code-qa-sidebar {
-    position: static;
-    width: 100%;
-    height: 52px;
-    min-height: 52px;
-    max-height: 52px;
-    box-sizing: border-box;
-    padding: 5px 8px;
-    gap: 0;
-    overflow: hidden;
+  /* 产品抽屉与会话列表共用同一左侧面板，打开即可看到全部历史。 */
+  .app-shell .app-sider--product.ant-layout-sider {
+    width: min(320px, calc(100vw - 48px)) !important;
+    min-width: min(320px, calc(100vw - 48px)) !important;
+    max-width: min(320px, calc(100vw - 48px)) !important;
+    background: #fff !important;
   }
 
-  .app-shell .app-sider--product ~ .app-content .code-qa-sidebar--mobile-expanded {
-    height: min(220px, 35dvh);
-    max-height: min(220px, 35dvh);
+  .app-shell .app-sider--product > .ant-layout-sider-children,
+  .app-shell .app-sider--product .app-sider-brand {
+    background: #fff;
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-sidebar {
+    position: fixed;
+    z-index: 92;
+    top: 112px;
+    bottom: 36px;
+    left: 0;
+    display: flex;
+    width: min(320px, calc(100vw - 48px));
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    box-sizing: border-box;
+    flex-direction: column;
+    gap: 0;
+    padding: 12px 12px 0;
+    overflow: hidden;
+    background: #fff;
+    border: 0;
+    border-radius: 0;
+    box-shadow: 8px 0 28px rgba(25, 28, 42, 0.12);
+  }
+
+  .app-shell:not(.app-shell--mobile-nav-open) .app-sider--product ~ .app-content .code-qa-sidebar {
+    display: none;
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-sidebar-history {
+    display: block;
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-conversation-group__title.ant-typography {
+    margin: 8px 10px 10px;
+    color: #27272e;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0;
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-sidebar-history .ant-list-item.code-qa-conv {
+    height: 48px;
+    min-height: 48px;
+    margin: 2px 0;
+    padding: 0 12px !important;
+    border-radius: 12px;
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-conv-title.ant-typography {
+    color: #24242b;
+    font-size: 15px;
+    line-height: 48px;
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-conv-active {
+    background: #f1f1f3;
+  }
+
+  .app-shell .app-sider--product ~ .app-content .code-qa-conv__more.ant-btn {
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
+    opacity: 1;
   }
 
   .app-shell .app-sider--product ~ .app-content .code-qa-sidebar-heading {
-    display: flex;
-    min-height: 40px;
-    align-items: center;
-    gap: 8px;
-    padding: 0;
+    order: 2;
+    min-height: 56px;
+    padding: 8px 0 0;
   }
 
   .app-shell .app-sider--product ~ .app-content .code-qa-sidebar-title {
     display: none;
   }
 
-  .app-shell .app-sider--product ~ .app-content .code-qa-history-toggle.ant-btn {
-    display: inline-flex;
-    min-width: 0;
-    height: 38px;
-    flex: 1 1 auto;
-    justify-content: flex-start;
-    gap: 8px;
-    padding: 0 8px;
-    color: #303139;
-    font-size: 13px;
-    font-weight: 650;
-    text-align: left;
-  }
-
-  .code-qa-history-count {
-    color: #92939b;
-    font-size: 12px;
-    font-weight: 500;
-  }
-
-  .code-qa-history-chevron {
-    margin-left: auto;
-    color: #888993;
-    font-size: 10px;
-    transition: transform 180ms ease;
-  }
-
-  .code-qa-sidebar--mobile-expanded .code-qa-history-chevron {
-    transform: rotate(180deg);
-  }
-
-  .app-shell .app-sider--product ~ .app-content .code-qa-sidebar-history {
-    display: none;
-  }
-
-  .app-shell .app-sider--product ~ .app-content .code-qa-sidebar--mobile-expanded .code-qa-sidebar-history {
-    display: block;
-    min-height: 0;
-    overflow-y: auto;
-  }
-
   .app-shell .app-sider--product ~ .app-content .code-qa-new-conversation.ant-btn,
   .app-shell .app-sider--product ~ .app-content .code-qa-new-conversation.ant-btn-primary {
     position: static;
-    width: auto;
-    flex: 0 0 auto;
+    display: inline-flex;
+    width: 100%;
+    height: 42px;
     margin: 0;
-  }
-
-  .app-shell .code-qa-layout:not(.code-qa-layout--active) .code-qa-new-conversation.ant-btn {
-    display: none;
+    padding: 0 12px;
+    color: #303139;
+    background: #f5f5f7;
+    border-radius: 12px;
   }
 
   .app-shell .code-qa-layout {
     min-width: 0;
     min-height: 0;
-    gap: 12px;
+    gap: 0;
   }
 
   .app-shell .code-qa-layout--active {
     height: calc(100dvh - 56px - 32px);
-    grid-template-rows: 52px minmax(0, 1fr);
-  }
-
-  .app-shell .code-qa-layout--active.code-qa-layout--history-open {
-    grid-template-rows: min(220px, 35dvh) minmax(0, 1fr);
-  }
-
-  .app-shell .code-qa-layout--active .code-qa-sidebar {
-    height: 52px;
-  }
-
-  .app-shell .code-qa-layout--active .code-qa-sidebar--mobile-expanded {
-    height: min(220px, 35dvh);
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .app-shell .code-qa-layout--active .code-qa-main {
@@ -6873,7 +6881,7 @@ a.dashboard-distribution-item:focus-visible {
   }
 
   .app-shell .code-qa-welcome {
-    min-height: calc(100dvh - 56px - 32px - 52px - 12px);
+    min-height: calc(100dvh - 56px - 32px);
     padding: 24px 0 36px;
   }
 }
@@ -6884,7 +6892,7 @@ a.dashboard-distribution-item:focus-visible {
   }
 
   .app-shell .code-qa-welcome {
-    min-height: calc(100dvh - 56px - 24px - 52px - 12px);
+    min-height: calc(100dvh - 56px - 24px);
   }
 
   .app-shell .code-qa-layout--active {
