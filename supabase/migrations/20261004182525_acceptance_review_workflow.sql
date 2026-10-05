@@ -166,12 +166,17 @@ grant execute on function public.save_analysis_review_phase(uuid,text,uuid,integ
 -- Patch existing canonical writers in place: preserve all current scope/claim gates.
 create or replace function pg_temp.patch_review_function(p_signature text,p_old text,p_new text)
 returns void language plpgsql as $$
-declare v_sql text;
+declare v_sql text; v_old text; v_new text;
 begin
-  v_sql:=pg_get_functiondef(p_signature::regprocedure);
-  if strpos(v_sql,p_new)>0 then return; end if;
-  if strpos(v_sql,p_old)=0 then raise exception 'V143 patch target missing: %',p_signature; end if;
-  execute replace(v_sql,p_old,p_new);
+  -- Dashboard-applied functions may retain CRLF, while repository SQL uses LF.
+  -- Normalize both the function source and anchors before matching; keep the
+  -- missing-target guard so an unexpected function version still fails closed.
+  v_sql:=replace(pg_get_functiondef(p_signature::regprocedure),chr(13)||chr(10),chr(10));
+  v_old:=replace(p_old,chr(13)||chr(10),chr(10));
+  v_new:=replace(p_new,chr(13)||chr(10),chr(10));
+  if strpos(v_sql,v_new)>0 then return; end if;
+  if strpos(v_sql,v_old)=0 then raise exception 'V143 patch target missing: %',p_signature; end if;
+  execute replace(v_sql,v_old,v_new);
 end;
 $$;
 
