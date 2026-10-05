@@ -1,13 +1,16 @@
-import { Fragment, useState } from 'react'
-import { Alert, Card, Empty, Pagination, Tag, Typography } from 'antd'
+import { useState } from 'react'
+import { Alert, Card, Empty, Modal, Pagination, Tag, Typography } from 'antd'
 import type { AiCodeEvidence, AiReviewResult, AiVerdict } from '../types'
 import { aiVerdictLabels } from '../lib/labels'
 import './AcceptanceReviewCard.css'
 
 const { Text } = Typography
 const evidencePageSize = 2
+const acceptancePageSize = 10
 const tones: Record<AiVerdict, string> = { IMPLEMENTED: 'success', PARTIAL: 'warning', NOT_IMPLEMENTED: 'error', UNCERTAIN: 'default' }
 const origins = { INTRODUCED: '本次引入', MISSING_SCENARIO: '遗漏场景', EXISTING: '已有隐患', UNKNOWN: '归因待确认' }
+
+type SelectedCriterion = { reportIdentity: string; criterionId: string }
 
 function EvidenceDetails({ ids, evidence }: { ids: string[]; evidence: AiCodeEvidence[] }) {
   const evidenceIdentity = ids.join('|')
@@ -40,6 +43,9 @@ function EvidenceDetails({ ids, evidence }: { ids: string[]; evidence: AiCodeEvi
 }
 
 export function AcceptanceReviewCard({ result, evidence }: { result: AiReviewResult | null; evidence: AiCodeEvidence[] }) {
+  const [listPagination, setListPagination] = useState({ reportIdentity: '', currentPage: 1 })
+  const [selectedCriterion, setSelectedCriterion] = useState<SelectedCriterion | null>(null)
+
   if (!result) return <Card className="review-ai-card" title="验收点评审"><Empty description="尚未生成评审结果" /></Card>
   const report = result.acceptance_review
   if (!report || report.version !== 1) return <Card className="review-ai-card" title="评审结果">
@@ -51,39 +57,75 @@ export function AcceptanceReviewCard({ result, evidence }: { result: AiReviewRes
     </details>
   </Card>
 
+  const reportIdentity = `${result.id}:${report.criteria.map((point) => point.id).join('|')}`
+  const totalPages = Math.max(1, Math.ceil(report.criteria.length / acceptancePageSize))
+  const page = Math.min(listPagination.reportIdentity === reportIdentity ? listPagination.currentPage : 1, totalPages)
+  const start = (page - 1) * acceptancePageSize
+  const visibleCriteria = report.criteria.slice(start, start + acceptancePageSize)
+  const findingsByCriterion = new Map(report.findings.map((finding) => [finding.criterionId, finding]))
+  const sourcesById = new Map(report.sources.map((source) => [source.id, source]))
+  const selectedPoint = selectedCriterion?.reportIdentity === reportIdentity
+    ? report.criteria.find((point) => point.id === selectedCriterion.criterionId) ?? null
+    : null
+  const selectedFinding = selectedPoint ? findingsByCriterion.get(selectedPoint.id) : undefined
   const unresolved = report.findings.filter((finding) => finding.verdict === 'UNCERTAIN').length
+  const openCriterion = (criterionId: string) => setSelectedCriterion({ reportIdentity, criterionId })
+
   return <Card className="review-ai-card" title="验收点评审" extra={<Tag color={report.verification.status === 'DISAGREEMENT' ? 'warning' : 'processing'}>{report.verification.status === 'DISAGREEMENT' ? '复核存在分歧' : '已独立复核'}</Tag>}>
     <p className="acceptance-summary">{result.summary}</p>
     {unresolved ? <Alert type="warning" showIcon title={`${unresolved} 个验收点需人工确认`} /> : null}
     <table className="acceptance-table">
       <thead><tr><th scope="col">验收点</th><th scope="col">评审结论</th><th scope="col">依据</th></tr></thead>
-      <tbody>{report.criteria.map((point) => {
-        const finding = report.findings.find((entry) => entry.criterionId === point.id)
-        return <Fragment key={point.id}>
-          <tr>
-            <td data-label="验收点"><span className="acceptance-point-id">{point.id}</span>{point.description}{point.needsClarification ? <div><Tag>需求待澄清</Tag></div> : null}</td>
-            <td data-label="评审结论"><Tag color={tones[finding?.verdict ?? 'UNCERTAIN']}>{aiVerdictLabels[finding?.verdict ?? 'UNCERTAIN']}</Tag></td>
-            <td data-label="依据">
-              <div>{finding?.reason || '该验收点缺少结论，需进一步确认。'}</div>
-              {finding?.disagreement ? <div className="acceptance-disagreement">
-                <p><strong>调查：</strong>{aiVerdictLabels[finding.disagreement.investigationVerdict]}。{finding.disagreement.investigationReason}</p>
-                <p><strong>复核：</strong>{aiVerdictLabels[finding.disagreement.reviewVerdict]}。{finding.disagreement.reviewReason}</p>
-              </div> : null}
-            </td>
-          </tr>
-          <tr className="acceptance-evidence-row">
-            <td colSpan={3}>
-              <details className="acceptance-details"><summary>查看需求出处与代码证据{finding?.evidenceIds.length ? `（${finding.evidenceIds.length}）` : ''}</summary>
-                <div className="acceptance-details-content">
-                  {point.sources.map((source, index) => <blockquote key={`${source.sourceId}-${index}`}><Text type="secondary">{report.sources.find((entry) => entry.id === source.sourceId)?.label || source.sourceId}</Text><div>{source.quote}</div></blockquote>)}
-                  <EvidenceDetails ids={finding?.evidenceIds ?? []} evidence={evidence} />
-                </div>
-              </details>
-            </td>
-          </tr>
-        </Fragment>
+      <tbody>{visibleCriteria.map((point) => {
+        const finding = findingsByCriterion.get(point.id)
+        return <tr
+          className="acceptance-overview-row"
+          key={point.id}
+          tabIndex={0}
+          aria-label={`查看验收点 ${point.id} 详情`}
+          onClick={() => openCriterion(point.id)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault()
+              openCriterion(point.id)
+            }
+          }}
+        >
+          <td data-label="验收点"><span className="acceptance-point-id">{point.id}</span>{point.description}{point.needsClarification ? <div><Tag>需求待澄清</Tag></div> : null}</td>
+          <td data-label="评审结论"><Tag color={tones[finding?.verdict ?? 'UNCERTAIN']}>{aiVerdictLabels[finding?.verdict ?? 'UNCERTAIN']}</Tag></td>
+          <td data-label="依据"><div className="acceptance-reason-preview">{finding?.reason || '该验收点缺少结论，需进一步确认。'}</div></td>
+        </tr>
       })}</tbody>
     </table>
+    {report.criteria.length > acceptancePageSize ? <div className="acceptance-criterion-pagination">
+      <Text type="secondary">显示 {start + 1}–{Math.min(start + acceptancePageSize, report.criteria.length)} / {report.criteria.length} 个验收点</Text>
+      <Pagination current={page} pageSize={acceptancePageSize} showSizeChanger={false} total={report.criteria.length} onChange={(nextPage) => setListPagination({ reportIdentity, currentPage: nextPage })} />
+    </div> : null}
+    <Modal open={Boolean(selectedPoint)} title="验收点详情" footer={null} className="acceptance-review-modal" width={780} onCancel={() => setSelectedCriterion(null)}>
+      {selectedPoint ? <div className="acceptance-detail-content">
+        <section className="acceptance-detail-section">
+          <h3><span className="acceptance-point-id">{selectedPoint.id}</span>{selectedPoint.description}</h3>
+          {selectedPoint.needsClarification ? <Tag>需求待澄清</Tag> : null}
+        </section>
+        <section className="acceptance-detail-section">
+          <h4>评审结论</h4>
+          <Tag color={tones[selectedFinding?.verdict ?? 'UNCERTAIN']}>{aiVerdictLabels[selectedFinding?.verdict ?? 'UNCERTAIN']}</Tag>
+          <p>{selectedFinding?.reason || '该验收点缺少结论，需进一步确认。'}</p>
+          {selectedFinding?.disagreement ? <div className="acceptance-disagreement">
+            <p><strong>调查：</strong>{aiVerdictLabels[selectedFinding.disagreement.investigationVerdict]}。{selectedFinding.disagreement.investigationReason}</p>
+            <p><strong>复核：</strong>{aiVerdictLabels[selectedFinding.disagreement.reviewVerdict]}。{selectedFinding.disagreement.reviewReason}</p>
+          </div> : null}
+        </section>
+        <section className="acceptance-detail-section">
+          <h4>需求出处</h4>
+          {selectedPoint.sources.map((source, index) => <blockquote key={`${source.sourceId}-${index}`}><Text type="secondary">{sourcesById.get(source.sourceId)?.label || source.sourceId}</Text><div>{source.quote}</div></blockquote>)}
+        </section>
+        <section className="acceptance-detail-section">
+          <h4>代码证据{selectedFinding?.evidenceIds.length ? `（${selectedFinding.evidenceIds.length}）` : ''}</h4>
+          <EvidenceDetails ids={selectedFinding?.evidenceIds ?? []} evidence={evidence} />
+        </section>
+      </div> : null}
+    </Modal>
     <section className="acceptance-risks" aria-label="风险项">
       <h3>风险项 <Text type="secondary">{report.risks.length} 项</Text></h3>
       {report.risks.length ? report.risks.map((risk) => <article className="acceptance-risk" key={risk.id}>
