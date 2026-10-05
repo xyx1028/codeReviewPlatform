@@ -11,9 +11,10 @@ const tones: Record<AiVerdict, string> = { IMPLEMENTED: 'success', PARTIAL: 'war
 const origins = { INTRODUCED: '本次引入', MISSING_SCENARIO: '遗漏场景', EXISTING: '已有隐患', UNKNOWN: '归因待确认' }
 
 type SelectedCriterion = { reportIdentity: string; criterionId: string }
+type SelectedRisk = { reportIdentity: string; riskId: string }
 type ListPagination = { reportIdentity: string; currentPage: number; pageSize: number }
 
-function EvidenceDetails({ ids, evidence }: { ids: string[]; evidence: AiCodeEvidence[] }) {
+export function EvidenceDetails({ ids, evidence }: { ids: string[]; evidence: AiCodeEvidence[] }) {
   const evidenceIdentity = ids.join('|')
   const [pagination, setPagination] = useState({ evidenceIdentity, currentPage: 1 })
   const evidenceEntries = ids.map((id) => ({ id, item: evidence.find((entry) => entry.evidence_id === id) }))
@@ -56,6 +57,7 @@ export function AcceptanceReviewCard({ result, evidence }: { result: AiReviewRes
   const [criteriaPagination, setCriteriaPagination] = useState<ListPagination>({ reportIdentity: '', currentPage: 1, pageSize: 10 })
   const [riskPagination, setRiskPagination] = useState<ListPagination>({ reportIdentity: '', currentPage: 1, pageSize: 10 })
   const [selectedCriterion, setSelectedCriterion] = useState<SelectedCriterion | null>(null)
+  const [selectedRisk, setSelectedRisk] = useState<SelectedRisk | null>(null)
 
   if (!result) return <Card className="review-ai-card" title="验收点评审"><Empty description="尚未生成评审结果" /></Card>
   const report = result.acceptance_review
@@ -88,9 +90,13 @@ export function AcceptanceReviewCard({ result, evidence }: { result: AiReviewRes
   const selectedPoint = selectedCriterion?.reportIdentity === reportIdentity
     ? report.criteria.find((point) => point.id === selectedCriterion.criterionId) ?? null
     : null
+  const selectedRiskItem = selectedRisk?.reportIdentity === reportIdentity
+    ? report.risks.find((risk) => risk.id === selectedRisk.riskId) ?? null
+    : null
   const selectedFinding = selectedPoint ? findingsByCriterion.get(selectedPoint.id) : undefined
   const unresolved = report.findings.filter((finding) => finding.verdict === 'UNCERTAIN').length
   const openCriterion = (criterionId: string) => setSelectedCriterion({ reportIdentity, criterionId })
+  const openRisk = (riskId: string) => setSelectedRisk({ reportIdentity, riskId })
   const changeCriteriaPage = (nextPage: number, nextPageSize: number) => setCriteriaPagination({ reportIdentity, currentPage: nextPageSize === activeCriteriaPagination.pageSize ? nextPage : 1, pageSize: nextPageSize })
   const changeRiskPage = (nextPage: number, nextPageSize: number) => setRiskPagination({ reportIdentity, currentPage: nextPageSize === activeRiskPagination.pageSize ? nextPage : 1, pageSize: nextPageSize })
 
@@ -136,13 +142,29 @@ export function AcceptanceReviewCard({ result, evidence }: { result: AiReviewRes
         forceRender: true,
         children: <section className="acceptance-risks acceptance-tab-content" aria-label="风险项">
           {report.risks.length ? <>
-            {visibleRisks.map((risk) => <article className="acceptance-risk" key={risk.id}>
-              <div><Tag color={risk.certainty === 'CONFIRMED' ? 'error' : 'warning'}>{risk.certainty === 'CONFIRMED' ? '已确认' : '待确认'}</Tag><Tag>{origins[risk.origin]}</Tag><strong>{risk.title}</strong></div>
-              <p><strong>触发条件：</strong>{risk.trigger}</p><p><strong>影响：</strong>{risk.impact}</p>
-              {risk.criterionIds.length ? <p><Text type="secondary">关联验收点：{risk.criterionIds.join('、')}</Text></p> : null}
-              {risk.reviewNote ? <p className="acceptance-disagreement">{risk.reviewNote}</p> : null}
-              <details className="acceptance-details"><summary>查看风险依据</summary><EvidenceDetails ids={risk.evidenceIds} evidence={evidence} /></details>
-            </article>)}
+            <table className="acceptance-table acceptance-risk-table">
+              <thead><tr><th scope="col">风险项</th><th scope="col">确认程度</th><th scope="col">影响</th></tr></thead>
+              <tbody>{visibleRisks.map((risk) => {
+                const riskTitle = `${risk.title}（${risk.certainty === 'CONFIRMED' ? '已确认' : '待确认'}，${origins[risk.origin]}）`
+                return <tr
+                  className="acceptance-overview-row"
+                  key={risk.id}
+                  tabIndex={0}
+                  aria-label={`查看风险项 ${risk.id} 详情`}
+                  onClick={() => openRisk(risk.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      openRisk(risk.id)
+                    }
+                  }}
+                >
+                  <td data-label="风险项"><Tooltip title={riskTitle}><span className="acceptance-cell-ellipsis"><Tag color={risk.certainty === 'CONFIRMED' ? 'error' : 'warning'}>{risk.certainty === 'CONFIRMED' ? '已确认' : '待确认'}</Tag>{' '}<Tag>{origins[risk.origin]}</Tag>{' '}{risk.title}</span></Tooltip></td>
+                  <td data-label="确认程度"><Tag color={risk.certainty === 'CONFIRMED' ? 'error' : 'warning'}>{risk.certainty === 'CONFIRMED' ? '已确认' : '待确认'}</Tag></td>
+                  <td data-label="影响"><Tooltip title={risk.impact}><span className="acceptance-reason-preview">{risk.impact}</span></Tooltip></td>
+                </tr>
+              })}</tbody>
+            </table>
             <ListPaginationBar total={report.risks.length} label="风险项" page={riskPage} pageSize={activeRiskPagination.pageSize} onChange={changeRiskPage} />
           </> : <p><Text type="secondary">本次评审未发现明确风险项。</Text></p>}
         </section>,
@@ -170,6 +192,33 @@ export function AcceptanceReviewCard({ result, evidence }: { result: AiReviewRes
         <section className="acceptance-detail-section">
           <h4>代码证据{selectedFinding?.evidenceIds.length ? `（${selectedFinding.evidenceIds.length}）` : ''}</h4>
           <EvidenceDetails ids={selectedFinding?.evidenceIds ?? []} evidence={evidence} />
+        </section>
+      </div> : null}
+    </Modal>
+    <Modal open={Boolean(selectedRiskItem)} title="风险项详情" footer={null} className="acceptance-review-modal" width={780} onCancel={() => setSelectedRisk(null)}>
+      {selectedRiskItem ? <div className="acceptance-detail-content">
+        <section className="acceptance-detail-section">
+          <h3><Tag color={selectedRiskItem.certainty === 'CONFIRMED' ? 'error' : 'warning'}>{selectedRiskItem.certainty === 'CONFIRMED' ? '已确认' : '待确认'}</Tag>{' '}<Tag>{origins[selectedRiskItem.origin]}</Tag>{' '}{selectedRiskItem.title}</h3>
+        </section>
+        <section className="acceptance-detail-section">
+          <h4>触发条件</h4>
+          <p>{selectedRiskItem.trigger}</p>
+        </section>
+        <section className="acceptance-detail-section">
+          <h4>影响</h4>
+          <p>{selectedRiskItem.impact}</p>
+        </section>
+        <section className="acceptance-detail-section">
+          <h4>关联验收点</h4>
+          {selectedRiskItem.criterionIds.length ? <p>{selectedRiskItem.criterionIds.join('、')}</p> : <Text type="secondary">未关联特定验收点</Text>}
+        </section>
+        {selectedRiskItem.reviewNote ? <section className="acceptance-detail-section">
+          <h4>复核说明</h4>
+          <p className="acceptance-disagreement">{selectedRiskItem.reviewNote}</p>
+        </section> : null}
+        <section className="acceptance-detail-section">
+          <h4>代码证据{selectedRiskItem.evidenceIds.length ? `（${selectedRiskItem.evidenceIds.length}）` : ''}</h4>
+          <EvidenceDetails ids={selectedRiskItem.evidenceIds} evidence={evidence} />
         </section>
       </div> : null}
     </Modal>

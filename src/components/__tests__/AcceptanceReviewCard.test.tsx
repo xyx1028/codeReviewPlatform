@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { AcceptanceReviewCard } from '../AcceptanceReviewCard'
+import { AcceptanceReviewCard, EvidenceDetails } from '../AcceptanceReviewCard'
 import type { AiCodeEvidence, AiReviewResult } from '../../types'
 
 function fixture(): AiReviewResult {
@@ -29,6 +29,8 @@ describe('acceptance review presentation', () => {
     for (const text of ['验收点', '风险项', '取消订单释放库存', '调查与复核存在分歧']) expect(html).toContain(text)
     expect(html).toContain('acceptance-review-tabs')
     expect(html).toContain('acceptance-cell-ellipsis')
+    expect(html).toContain('acceptance-risk-table')
+    expect(html).toContain('查看风险项 R1 详情')
     expect(html).toContain('acceptance-overview-row')
     expect(html).toContain('查看验收点 C1 详情')
     expect(html).not.toContain('acceptance-evidence-row')
@@ -56,7 +58,7 @@ describe('acceptance review presentation', () => {
     expect(html).not.toContain('acceptance-table')
   })
   it('makes missing evidence visible instead of replacing it with unrelated code', () => {
-    const html = render(fixture(), [{ ...evidence[0], evidence_id: 'unrelated-id' }])
+    const html = renderToStaticMarkup(createElement(EvidenceDetails, { ids: ['ev-1'], evidence: [{ ...evidence[0], evidence_id: 'unrelated-id' }] }))
     expect(html).toContain('该证据未加载')
     expect(html).not.toContain('src/Order.java')
   })
