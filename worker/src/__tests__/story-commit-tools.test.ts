@@ -225,6 +225,11 @@ describe('formal story commit Broker tools', () => {
     expect(list.status).toBe(200)
     expect(JSON.stringify(list.body)).toContain(CANDIDATE_ID)
     expect(JSON.stringify(list.body)).not.toContain(repo.head)
+    expect(list.body.items).toEqual([expect.objectContaining({
+      triageVerdict: null,
+      selected: false,
+      selectionLevel: null,
+    })])
 
     const forgedSha = await post(h.broker, '/attempt/list-story-commits', h.envelope({ sha: repo.head }, 'list_story_commits'))
     expect(forgedSha.status).toBe(422)
@@ -263,6 +268,29 @@ describe('formal story commit Broker tools', () => {
       scopeGeneration: 1, triageRevision: 1,
       candidateManifestHash: 'b'.repeat(64), rulesetHash: 'a'.repeat(64),
     })
+  })
+
+  it('bounds only the internal relevance envelope for an oversized frozen Unicode subject', async () => {
+    const repo = await repository()
+    const frozenScope = scope(repo.head)
+    const frozenSubject = `${'a'.repeat(499)}😀 commit details that belong to the frozen subject`
+    frozenScope.candidates[0]!.subject = frozenSubject
+    const h = await harness(repo.head, repo.gitDir, frozenScope)
+
+    const accepted = await post(h.broker, '/attempt/submit-commit-relevance', h.envelope({
+      candidateId: CANDIDATE_ID,
+      verdict: 'UNCERTAIN',
+      reasonCodes: ['DIFF_UNAVAILABLE'],
+      confidence: 0.4,
+      diffAccessIds: [],
+      summary: 'The frozen candidate has no readable diff.',
+    }, 'submit_commit_relevance_verdict'))
+
+    expect(accepted.status).toBe(200)
+    expect(accepted.body).toMatchObject({ accepted: true, triageComplete: true })
+    expect(h.verdicts).toHaveLength(1)
+    expect(frozenScope.candidates[0]!.subject).toBe(frozenSubject)
+    expect(frozenScope.candidates[0]!.subject.length).toBeGreaterThan(500)
   })
 
   it('keeps a current-run UNRELATED candidate out of PRIMARY after N/N', async () => {

@@ -1140,6 +1140,13 @@ export function startAttemptControlBroker(
         : candidate.diff_status === 'TOO_LARGE' || candidate.diff_status === 'DIFF_TOO_LARGE'
           ? 'DIFF_TOO_LARGE'
           : 'UNAVAILABLE'
+    // The relevance contract bounds this display-only field at 500 UTF-16 code units.
+    // Keep the frozen candidate (and its manifest hash) intact; only the internal
+    // validation envelope is bounded. A trailing high surrogate is removed so the
+    // truncation cannot split a Unicode code point.
+    const subjectForEnvelope = candidate.subject.length <= 500
+      ? candidate.subject
+      : candidate.subject.slice(0, 500).replace(/[\uD800-\uDBFF]$/, '')
     const envelope: CommitRelevanceEnvelope = {
       schemaVersion: 1,
       phase: 'COMMIT_RELEVANCE_TRIAGE',
@@ -1157,7 +1164,7 @@ export function startAttemptControlBroker(
         candidateId,
         repository: candidate.repository,
         shortSha: candidate.short_sha,
-        subject: candidate.subject,
+        subject: subjectForEnvelope,
         reasonCodes: candidate.reason_codes,
         diffStatus,
       },
