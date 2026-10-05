@@ -1,5 +1,7 @@
 .acceptance-summary { margin: 0 0 20px; color: #344054; line-height: 1.7; }
-.acceptance-table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 20px; }
+.acceptance-review-tabs { margin-top: 20px; }
+.acceptance-tab-content { padding-top: 4px; }
+.acceptance-table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 12px; }
 .acceptance-table th { padding: 12px; text-align: left; background: #f7f8fc; color: #475467; font-weight: 600; }
 .acceptance-table th:first-child { width: 32%; }
 .acceptance-table th:nth-child(2) { width: 18%; }
@@ -9,7 +11,13 @@
 .acceptance-overview-row:focus-visible { position: relative; z-index: 1; outline: 2px solid #5c5cff; outline-offset: -2px; }
 .acceptance-point-id { display: block; font-weight: 600; color: #5c5cff; margin-bottom: 4px; }
 .acceptance-reason-preview { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
-.acceptance-criterion-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 0 0; }
+@media (min-width: 721px) {
+  .acceptance-table td { padding: 12px; white-space: nowrap; }
+  .acceptance-table .acceptance-cell-ellipsis, .acceptance-table .acceptance-reason-preview { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .acceptance-table .acceptance-point-id { display: inline; margin: 0 8px 0 0; }
+  .acceptance-table .ant-tag { margin-inline-end: 0; vertical-align: middle; }
+}
+.acceptance-list-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 0 0; }
 .acceptance-details { margin-top: 12px; }
 .acceptance-details summary { cursor: pointer; color: #4f4fd4; line-height: 1.6; }
 .acceptance-details summary:focus-visible { outline: 2px solid #5c5cff; outline-offset: 4px; }
@@ -32,8 +40,7 @@
 .acceptance-detail-section h3 .acceptance-point-id { display: inline; margin-right: 8px; }
 .acceptance-detail-section h4 { font-size: 14px; }
 .acceptance-detail-section p { margin: 10px 0 0; line-height: 1.7; white-space: pre-wrap; }
-.acceptance-risks { margin-top: 28px; }
-.acceptance-risks h3 { margin: 0 0 12px; font-size: 16px; }
+.acceptance-risks { margin-top: 4px; }
 .acceptance-risk { padding: 16px 0; border-top: 1px solid #e5e9f2; line-height: 1.7; }
 .acceptance-risk p { margin: 8px 0; }
 .acceptance-legacy-text { white-space: pre-wrap; line-height: 1.7; }
@@ -45,7 +52,7 @@
   .acceptance-table td::before { content: attr(data-label); display: block; color: #667085; font-size: 12px; margin-bottom: 4px; }
   .acceptance-overview-row:hover td { background: transparent; }
   .acceptance-overview-row:focus-visible { outline-offset: 2px; }
-  .acceptance-criterion-pagination, .acceptance-evidence-pagination { align-items: flex-start; flex-direction: column; }
+  .acceptance-list-pagination, .acceptance-evidence-pagination { align-items: flex-start; flex-direction: column; }
   .acceptance-point-id { display: inline; margin-right: 8px; }
   .acceptance-risk .ant-tag { margin-bottom: 6px; }
   .acceptance-review-modal { max-width: calc(100vw - 24px); }

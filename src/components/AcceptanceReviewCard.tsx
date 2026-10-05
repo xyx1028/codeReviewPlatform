@@ -1,16 +1,17 @@
 import { useState } from 'react'
-import { Alert, Card, Empty, Modal, Pagination, Tag, Typography } from 'antd'
+import { Alert, Card, Empty, Modal, Pagination, Tabs, Tag, Tooltip, Typography } from 'antd'
 import type { AiCodeEvidence, AiReviewResult, AiVerdict } from '../types'
 import { aiVerdictLabels } from '../lib/labels'
 import './AcceptanceReviewCard.css'
 
 const { Text } = Typography
 const evidencePageSize = 2
-const acceptancePageSize = 10
+const listPageSizeOptions = [10, 20, 50, 100]
 const tones: Record<AiVerdict, string> = { IMPLEMENTED: 'success', PARTIAL: 'warning', NOT_IMPLEMENTED: 'error', UNCERTAIN: 'default' }
 const origins = { INTRODUCED: '本次引入', MISSING_SCENARIO: '遗漏场景', EXISTING: '已有隐患', UNKNOWN: '归因待确认' }
 
 type SelectedCriterion = { reportIdentity: string; criterionId: string }
+type ListPagination = { reportIdentity: string; currentPage: number; pageSize: number }
 
 function EvidenceDetails({ ids, evidence }: { ids: string[]; evidence: AiCodeEvidence[] }) {
   const evidenceIdentity = ids.join('|')
@@ -42,8 +43,18 @@ function EvidenceDetails({ ids, evidence }: { ids: string[]; evidence: AiCodeEvi
   </>
 }
 
+function ListPaginationBar({ total, label, page, pageSize, onChange }: { total: number; label: string; page: number; pageSize: number; onChange: (nextPage: number, nextPageSize: number) => void }) {
+  if (!total) return null
+  const start = (page - 1) * pageSize
+  return <div className="acceptance-list-pagination" aria-label={`${label}分页`}>
+    <Text type="secondary">显示 {start + 1}–{Math.min(start + pageSize, total)} / {total} 个{label}</Text>
+    <Pagination current={page} pageSize={pageSize} showSizeChanger pageSizeOptions={listPageSizeOptions} total={total} onChange={onChange} />
+  </div>
+}
+
 export function AcceptanceReviewCard({ result, evidence }: { result: AiReviewResult | null; evidence: AiCodeEvidence[] }) {
-  const [listPagination, setListPagination] = useState({ reportIdentity: '', currentPage: 1 })
+  const [criteriaPagination, setCriteriaPagination] = useState<ListPagination>({ reportIdentity: '', currentPage: 1, pageSize: 10 })
+  const [riskPagination, setRiskPagination] = useState<ListPagination>({ reportIdentity: '', currentPage: 1, pageSize: 10 })
   const [selectedCriterion, setSelectedCriterion] = useState<SelectedCriterion | null>(null)
 
   if (!result) return <Card className="review-ai-card" title="验收点评审"><Empty description="尚未生成评审结果" /></Card>
@@ -57,11 +68,21 @@ export function AcceptanceReviewCard({ result, evidence }: { result: AiReviewRes
     </details>
   </Card>
 
-  const reportIdentity = `${result.id}:${report.criteria.map((point) => point.id).join('|')}`
-  const totalPages = Math.max(1, Math.ceil(report.criteria.length / acceptancePageSize))
-  const page = Math.min(listPagination.reportIdentity === reportIdentity ? listPagination.currentPage : 1, totalPages)
-  const start = (page - 1) * acceptancePageSize
-  const visibleCriteria = report.criteria.slice(start, start + acceptancePageSize)
+  const reportIdentity = `${result.id}:${report.criteria.map((point) => point.id).join('|')}:${report.risks.map((risk) => risk.id).join('|')}`
+  const activeCriteriaPagination = criteriaPagination.reportIdentity === reportIdentity
+    ? criteriaPagination
+    : { reportIdentity, currentPage: 1, pageSize: 10 }
+  const criteriaTotalPages = Math.max(1, Math.ceil(report.criteria.length / activeCriteriaPagination.pageSize))
+  const criteriaPage = Math.min(activeCriteriaPagination.currentPage, criteriaTotalPages)
+  const criteriaStart = (criteriaPage - 1) * activeCriteriaPagination.pageSize
+  const visibleCriteria = report.criteria.slice(criteriaStart, criteriaStart + activeCriteriaPagination.pageSize)
+  const activeRiskPagination = riskPagination.reportIdentity === reportIdentity
+    ? riskPagination
+    : { reportIdentity, currentPage: 1, pageSize: 10 }
+  const riskTotalPages = Math.max(1, Math.ceil(report.risks.length / activeRiskPagination.pageSize))
+  const riskPage = Math.min(activeRiskPagination.currentPage, riskTotalPages)
+  const riskStart = (riskPage - 1) * activeRiskPagination.pageSize
+  const visibleRisks = report.risks.slice(riskStart, riskStart + activeRiskPagination.pageSize)
   const findingsByCriterion = new Map(report.findings.map((finding) => [finding.criterionId, finding]))
   const sourcesById = new Map(report.sources.map((source) => [source.id, source]))
   const selectedPoint = selectedCriterion?.reportIdentity === reportIdentity
@@ -70,37 +91,63 @@ export function AcceptanceReviewCard({ result, evidence }: { result: AiReviewRes
   const selectedFinding = selectedPoint ? findingsByCriterion.get(selectedPoint.id) : undefined
   const unresolved = report.findings.filter((finding) => finding.verdict === 'UNCERTAIN').length
   const openCriterion = (criterionId: string) => setSelectedCriterion({ reportIdentity, criterionId })
+  const changeCriteriaPage = (nextPage: number, nextPageSize: number) => setCriteriaPagination({ reportIdentity, currentPage: nextPageSize === activeCriteriaPagination.pageSize ? nextPage : 1, pageSize: nextPageSize })
+  const changeRiskPage = (nextPage: number, nextPageSize: number) => setRiskPagination({ reportIdentity, currentPage: nextPageSize === activeRiskPagination.pageSize ? nextPage : 1, pageSize: nextPageSize })
 
   return <Card className="review-ai-card" title="验收点评审" extra={<Tag color={report.verification.status === 'DISAGREEMENT' ? 'warning' : 'processing'}>{report.verification.status === 'DISAGREEMENT' ? '复核存在分歧' : '已独立复核'}</Tag>}>
     <p className="acceptance-summary">{result.summary}</p>
     {unresolved ? <Alert type="warning" showIcon title={`${unresolved} 个验收点需人工确认`} /> : null}
-    <table className="acceptance-table">
-      <thead><tr><th scope="col">验收点</th><th scope="col">评审结论</th><th scope="col">依据</th></tr></thead>
-      <tbody>{visibleCriteria.map((point) => {
-        const finding = findingsByCriterion.get(point.id)
-        return <tr
-          className="acceptance-overview-row"
-          key={point.id}
-          tabIndex={0}
-          aria-label={`查看验收点 ${point.id} 详情`}
-          onClick={() => openCriterion(point.id)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault()
-              openCriterion(point.id)
-            }
-          }}
-        >
-          <td data-label="验收点"><span className="acceptance-point-id">{point.id}</span>{point.description}{point.needsClarification ? <div><Tag>需求待澄清</Tag></div> : null}</td>
-          <td data-label="评审结论"><Tag color={tones[finding?.verdict ?? 'UNCERTAIN']}>{aiVerdictLabels[finding?.verdict ?? 'UNCERTAIN']}</Tag></td>
-          <td data-label="依据"><div className="acceptance-reason-preview">{finding?.reason || '该验收点缺少结论，需进一步确认。'}</div></td>
-        </tr>
-      })}</tbody>
-    </table>
-    {report.criteria.length > acceptancePageSize ? <div className="acceptance-criterion-pagination">
-      <Text type="secondary">显示 {start + 1}–{Math.min(start + acceptancePageSize, report.criteria.length)} / {report.criteria.length} 个验收点</Text>
-      <Pagination current={page} pageSize={acceptancePageSize} showSizeChanger={false} total={report.criteria.length} onChange={(nextPage) => setListPagination({ reportIdentity, currentPage: nextPage })} />
-    </div> : null}
+    <Tabs className="acceptance-review-tabs" defaultActiveKey="criteria" items={[
+      {
+        key: 'criteria',
+        label: <>验收点 <Text type="secondary">{report.criteria.length} 项</Text></>,
+        children: <div className="acceptance-tab-content">
+          <table className="acceptance-table">
+            <thead><tr><th scope="col">验收点</th><th scope="col">评审结论</th><th scope="col">依据</th></tr></thead>
+            <tbody>{visibleCriteria.map((point) => {
+              const finding = findingsByCriterion.get(point.id)
+              const criterionTooltip = `${point.id} ${point.description}${point.needsClarification ? '（需求待澄清）' : ''}`
+              const reason = finding?.reason || '该验收点缺少结论，需进一步确认。'
+              return <tr
+                className="acceptance-overview-row"
+                key={point.id}
+                tabIndex={0}
+                aria-label={`查看验收点 ${point.id} 详情`}
+                onClick={() => openCriterion(point.id)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    openCriterion(point.id)
+                  }
+                }}
+              >
+                <td data-label="验收点"><Tooltip title={criterionTooltip}><span className="acceptance-cell-ellipsis"><span className="acceptance-point-id">{point.id}</span>{point.description}{point.needsClarification ? <Tag>需求待澄清</Tag> : null}</span></Tooltip></td>
+                <td data-label="评审结论"><Tag color={tones[finding?.verdict ?? 'UNCERTAIN']}>{aiVerdictLabels[finding?.verdict ?? 'UNCERTAIN']}</Tag></td>
+                <td data-label="依据"><Tooltip title={reason}><span className="acceptance-reason-preview">{reason}</span></Tooltip></td>
+              </tr>
+            })}</tbody>
+          </table>
+          <ListPaginationBar total={report.criteria.length} label="验收点" page={criteriaPage} pageSize={activeCriteriaPagination.pageSize} onChange={changeCriteriaPage} />
+        </div>,
+      },
+      {
+        key: 'risks',
+        label: <>风险项 <Text type="secondary">{report.risks.length} 项</Text></>,
+        forceRender: true,
+        children: <section className="acceptance-risks acceptance-tab-content" aria-label="风险项">
+          {report.risks.length ? <>
+            {visibleRisks.map((risk) => <article className="acceptance-risk" key={risk.id}>
+              <div><Tag color={risk.certainty === 'CONFIRMED' ? 'error' : 'warning'}>{risk.certainty === 'CONFIRMED' ? '已确认' : '待确认'}</Tag><Tag>{origins[risk.origin]}</Tag><strong>{risk.title}</strong></div>
+              <p><strong>触发条件：</strong>{risk.trigger}</p><p><strong>影响：</strong>{risk.impact}</p>
+              {risk.criterionIds.length ? <p><Text type="secondary">关联验收点：{risk.criterionIds.join('、')}</Text></p> : null}
+              {risk.reviewNote ? <p className="acceptance-disagreement">{risk.reviewNote}</p> : null}
+              <details className="acceptance-details"><summary>查看风险依据</summary><EvidenceDetails ids={risk.evidenceIds} evidence={evidence} /></details>
+            </article>)}
+            <ListPaginationBar total={report.risks.length} label="风险项" page={riskPage} pageSize={activeRiskPagination.pageSize} onChange={changeRiskPage} />
+          </> : <p><Text type="secondary">本次评审未发现明确风险项。</Text></p>}
+        </section>,
+      },
+    ]} />
     <Modal open={Boolean(selectedPoint)} title="验收点详情" footer={null} className="acceptance-review-modal" width={780} onCancel={() => setSelectedCriterion(null)}>
       {selectedPoint ? <div className="acceptance-detail-content">
         <section className="acceptance-detail-section">
@@ -126,15 +173,5 @@ export function AcceptanceReviewCard({ result, evidence }: { result: AiReviewRes
         </section>
       </div> : null}
     </Modal>
-    <section className="acceptance-risks" aria-label="风险项">
-      <h3>风险项 <Text type="secondary">{report.risks.length} 项</Text></h3>
-      {report.risks.length ? report.risks.map((risk) => <article className="acceptance-risk" key={risk.id}>
-        <div><Tag color={risk.certainty === 'CONFIRMED' ? 'error' : 'warning'}>{risk.certainty === 'CONFIRMED' ? '已确认' : '待确认'}</Tag><Tag>{origins[risk.origin]}</Tag><strong>{risk.title}</strong></div>
-        <p><strong>触发条件：</strong>{risk.trigger}</p><p><strong>影响：</strong>{risk.impact}</p>
-        {risk.criterionIds.length ? <p><Text type="secondary">关联验收点：{risk.criterionIds.join('、')}</Text></p> : null}
-        {risk.reviewNote ? <p className="acceptance-disagreement">{risk.reviewNote}</p> : null}
-        <details className="acceptance-details"><summary>查看风险依据</summary><EvidenceDetails ids={risk.evidenceIds} evidence={evidence} /></details>
-      </article>) : <p><Text type="secondary">本次评审未发现明确风险项。</Text></p>}
-    </section>
   </Card>
 }

@@ -19,23 +19,32 @@ function listPagedFixture() {
   const report = result.acceptance_review!
   report.criteria = Array.from({ length: 11 }, (_, index) => ({ ...report.criteria[0], id: `C${index + 1}`, description: `第 ${index + 1} 个验收点` }))
   report.findings = report.criteria.map((point) => ({ criterionId: point.id, verdict: 'IMPLEMENTED', reason: `${point.id} 的评审依据`, evidenceIds: [] }))
+  report.risks = Array.from({ length: 11 }, (_, index) => ({ ...report.risks[0], id: `R${index + 1}`, title: `第 ${index + 1} 个风险项` }))
   return result
 }
 
 describe('acceptance review presentation', () => {
-  it('shows a concise, focusable three-column overview without a full-width detail row', () => {
+  it('shows acceptance and risk tabs while retaining a concise, focusable three-column overview', () => {
     const html = render(fixture())
-    for (const text of ['验收点', '评审结论', '依据', '取消订单释放库存', '调查与复核存在分歧', '重复调用取消接口', '库存重复增加', '该风险尚有分歧']) expect(html).toContain(text)
+    for (const text of ['验收点', '风险项', '取消订单释放库存', '调查与复核存在分歧']) expect(html).toContain(text)
+    expect(html).toContain('acceptance-review-tabs')
+    expect(html).toContain('acceptance-cell-ellipsis')
     expect(html).toContain('acceptance-overview-row')
     expect(html).toContain('查看验收点 C1 详情')
     expect(html).not.toContain('acceptance-evidence-row')
     expect(html).not.toContain('查看需求出处与代码证据')
   })
-  it('paginates overview rows ten at a time', () => {
+  it('provides adjustable ten-item pagination for the acceptance list', () => {
     const html = render(listPagedFixture())
     expect(html).toContain('显示 1–10 / 11 个验收点')
     expect(html).toContain('第 10 个验收点')
     expect(html).not.toContain('第 11 个验收点')
+    expect(html).toContain('acceptance-list-pagination')
+    expect(html).toContain('显示 1–10 / 11 个风险项')
+    expect(html).toContain('第 10 个风险项')
+    expect(html).not.toContain('第 11 个风险项')
+    expect(html).toContain('ant-pagination-options-size-changer')
+    expect(html).toContain('title="10 / page"')
   })
   it('does not fabricate per-point judgements for historical reports', () => {
     const old = fixture()
