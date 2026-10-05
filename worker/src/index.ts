@@ -469,8 +469,9 @@ export function toAgentResultRow(input: CommitReviewInput): Record<string, unkno
   const remarkItems = Array.isArray(submission.remarkItems) ? submission.remarkItems as string[] : []
   return {
     verdict: submission.verdict,
-    confidence: submission.confidence,
+    confidence: submission.acceptanceReview ? null : submission.confidence,
     summary: submission.summary,
+    acceptanceReview: submission.acceptanceReview ?? null,
     implementedContent: implementedItems.join('\n') || null,
     missingContent: missingItems.join('\n') || null,
     risks: riskItems.join('\n') || null,
@@ -1176,6 +1177,7 @@ export function startWorker(
           harness_version: loadCapabilityContract().harnessVersion,
           capability_contract_hash: contractHash(),
           storyCommitScopeVersion: 2,
+          acceptanceReviewWorkflowVersion: 1,
           // drain 状态进心跳：调度中心页面据此区分"忙"和"正在排空、马上要重建"。
           draining: draining(),
           active_attempts: activeAttempts(),

@@ -1,6 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { TransactionPsqlDbClient, quoteSql } from './helpers/local-supabase-transaction.js'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { createInterface } from 'node:readline'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -9,7 +8,6 @@ import { toAgentResultRow } from '../index.js'
 import { buildRuntimeEventReporter, type RuntimeEventReporterLike } from '../monitoring/runtime-event-reporter.js'
 import { startMockModelServer } from './helpers/acp-mock-model.js'
 import type { WorkerConfig } from '../config.js'
-import type { DbClient, RpcOptions } from '../db/client.js'
 import { JobsDb } from '../db/jobs.js'
 import { REPOSITORY_NAMES } from '../git/repositories.js'
 import { collectRepositoryHistory } from '../git/story-history.js'
@@ -22,7 +20,6 @@ const runPreparationOnly = process.env.RUN_LOCAL_SUPABASE_INTEGRATION === '1'
 const runFullE2e = process.env.RUN_V111_FULL_E2E === '1'
 const localIt = runPreparationOnly ? it : it.skip
 const fullIt = runFullE2e ? it : it.skip
-const DB_CONTAINER = process.env.LOCAL_SUPABASE_DB_CONTAINER ?? 'supabase_db_codeReviewPlatform'
 const JOB_ID = '91e20000-5000-4000-a000-000000000001'
 const TASK_ID = '91e20000-6000-4000-a000-000000000001'
 const WORKER_ID = 'v111-local-identity-e2e'
@@ -40,114 +37,6 @@ const TEST_PEPPER = 'v111-local-transaction-pepper-not-a-real-secret'
  */
 const REPOSITORIES = REPOSITORY_NAMES
 const silentLogger = new Logger({ sink: () => undefined, minLevel: 'error' })
-
-function quoteSql(value: string): string {
-  return `'${value.replaceAll("'", "''")}'`
-}
-
-function sqlValue(value: unknown, parameterName?: string): string {
-  if (value === null || value === undefined) return 'null'
-  if (typeof value === 'string') return quoteSql(value)
-  if (typeof value === 'number') return String(value)
-  if (typeof value === 'boolean') return value ? 'true' : 'false'
-  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
-    if (parameterName === 'p_reason_codes') {
-      return `array[${value.map((item) => quoteSql(item)).join(',')}]::text[]`
-    }
-    if (parameterName === 'p_diff_access_ids') {
-      return value.length === 0
-        ? 'array[]::uuid[]'
-        : `array[${value.map((item) => `${quoteSql(item)}::uuid`).join(',')}]::uuid[]`
-    }
-  }
-  return `${quoteSql(JSON.stringify(value))}::jsonb`
-}
-
-class TransactionPsqlDbClient implements DbClient {
-  private readonly child: ChildProcessWithoutNullStreams
-  private active: {
-    id: string
-    started: boolean
-    lines: string[]
-    resolve: (value: string) => void
-    reject: (error: Error) => void
-  } | null = null
-  private queue: Promise<void> = Promise.resolve()
-  private stderr = ''
-  private fatalError: Error | null = null
-  private sequence = 0
-
-  constructor() {
-    this.child = spawn('docker', [
-      'exec', '-i', DB_CONTAINER,
-      'psql', '-X', '-q', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'postgres',
-    ], { stdio: ['pipe', 'pipe', 'pipe'] })
-    createInterface({ input: this.child.stdout }).on('line', (line) => this.acceptLine(line))
-    this.child.stderr.on('data', (chunk: Buffer) => { this.stderr += chunk.toString('utf8') })
-    this.child.once('exit', (code) => {
-      this.fatalError = new Error(`local psql exited with ${code}: ${this.stderr.slice(-2000)}`)
-      if (this.active) {
-        const pending = this.active
-        this.active = null
-        pending.reject(this.fatalError)
-      }
-    })
-  }
-
-  private acceptLine(line: string): void {
-    const active = this.active
-    if (!active) return
-    if (line === `__BEGIN_${active.id}__`) {
-      active.started = true
-      return
-    }
-    if (line === `__END_${active.id}__`) {
-      this.active = null
-      active.resolve(active.lines.join('\n'))
-      return
-    }
-    if (active.started) active.lines.push(line)
-  }
-
-  private request(sql: string): Promise<string> {
-    let result!: Promise<string>
-    const scheduled = this.queue.then(() => {
-      if (this.fatalError) throw this.fatalError
-      result = new Promise<string>((resolve, reject) => {
-        const id = `${process.pid}_${++this.sequence}`
-        this.active = { id, started: false, lines: [], resolve, reject }
-        this.child.stdin.write(
-          `select ${quoteSql(`__BEGIN_${id}__`)};\n${sql}\nselect ${quoteSql(`__END_${id}__`)};\n`,
-        )
-      })
-      return result.then(() => undefined)
-    })
-    this.queue = scheduled.catch(() => undefined)
-    return scheduled.then(() => result)
-  }
-
-  async execute(sql: string): Promise<string> {
-    return this.request(sql)
-  }
-
-  async rpc<T = unknown>(fn: string, params: Record<string, unknown>, _options?: RpcOptions): Promise<T> {
-    if (!/^[a-z][a-z0-9_]*$/.test(fn)) throw new Error(`unsafe RPC name: ${fn}`)
-    const args = Object.entries(params).map(([key, value]) => {
-      if (!/^p_[a-z0-9_]+$/.test(key)) throw new Error(`unsafe RPC parameter: ${key}`)
-      return `${key}=>${sqlValue(value, key)}`
-    })
-    const text = await this.request(
-      `select coalesce(to_jsonb(public.${fn}(${args.join(',')}))::text,'null');`,
-    )
-    return JSON.parse(text || 'null') as T
-  }
-
-  async close(): Promise<void> {
-    if (this.child.exitCode !== null || this.child.signalCode !== null) return
-    this.child.stdin.end('\\q\n')
-    await new Promise<void>((resolve) => this.child.once('exit', () => resolve()))
-  }
-}
 
 function workerConfig(root: string): WorkerConfig {
   return {
@@ -236,7 +125,13 @@ begin
 
   v_model_secret:=public.admin_vault_create_secret(
     ${quoteSql(RAW_MODEL_TOKEN)},'v111_local_identity_e2e_model_key');
-  select vault.create_secret(${quoteSql(TEST_PEPPER)},'analysis_identity_pepper') into v_pepper_secret;
+  select id into v_pepper_secret from vault.secrets where name='analysis_identity_pepper';
+  if v_pepper_secret is null then
+    select vault.create_secret(${quoteSql(TEST_PEPPER)},'analysis_identity_pepper') into v_pepper_secret;
+  else
+    -- Fixture replacement lives only in this transaction and is restored by rollback.
+    perform vault.update_secret(v_pepper_secret,${quoteSql(TEST_PEPPER)});
+  end if;
   v_fingerprint:=encode(extensions.hmac(
     convert_to(${quoteSql(RAW_EMAIL)},'UTF8'),convert_to(${quoteSql(TEST_PEPPER)},'UTF8'),'sha256'),'hex');
 
@@ -278,7 +173,7 @@ begin
     execution_engine,policy_version,capability_policy_snapshot,policy_hash,harness_version,
     capability_contract_hash,analysis_context_version,commit_window_days,scope_status,
     required_worker_scope_version,attribution_algorithm_version,attribution_rule_version_id,
-    ruleset_hash,skill_catalog_hash,skill_snapshot_version,created_at
+    ruleset_hash,skill_catalog_hash,skill_snapshot_version,created_at,review_workflow_version
   ) values(
     ${quoteSql(JOB_ID)}::uuid,v_batch,v_model,jsonb_build_object(
       'model_config_id',v_model,'display_name','local e2e frozen model',
@@ -289,7 +184,7 @@ begin
     ),'feature_dev','QUEUED',v_admin,1,'deepseek-harness-acp',4,
     public.build_v4_capability_policy(v_model),null,null,null,
     2,21,'PREPARING',2,'story-attribution-v2',v_rule_version,v_rule_hash,
-    public.empty_skill_catalog_hash(),1,now()
+    public.empty_skill_catalog_hash(),1,now(),0
   );
   insert into public.analysis_story_task(id,job_id,story_id) values(v_task,${quoteSql(JOB_ID)}::uuid,v_story);
   insert into public.analysis_worker_heartbeat(worker_id,slots,current_tasks,capabilities)
@@ -377,14 +272,14 @@ describe('V1.11 local Supabase identity preparation smoke', () => {
     expect(state).toEqual({
       status: 'PROCESSING',
       scope_status: 'READY',
-      snapshots: 4,
-      manifests: 4,
+      snapshots: REPOSITORY_NAMES.length,
+      manifests: REPOSITORY_NAMES.length,
       scopes: 1,
-      matched_commits: 4,
-      mr_unavailable: 4,
+      matched_commits: REPOSITORY_NAMES.length,
+      mr_unavailable: REPOSITORY_NAMES.length,
       mr_rows: 0,
       raw_email_rows: 0,
-      strong_candidates: 4,
+      strong_candidates: REPOSITORY_NAMES.length,
     })
   }, 120_000)
 })
@@ -539,7 +434,8 @@ describe('V1.11 full local transaction E2E', () => {
             verdict: 'IMPLEMENTED',
             confidence: 93,
             summary: 'V1.11 full E2E verified the implementation and cross-repository contract.',
-            implementedContent: 'The pinned snapshots contain the required implementation.',
+            implementedItems: ['The pinned snapshots contain the required implementation.'],
+            missingItems: [], riskItems: [], testPointItems: [], remarkItems: [],
             evidence: [{
               evidenceId,
               repository: 'tmanage-backend',
@@ -624,13 +520,13 @@ describe('V1.11 full local transaction E2E', () => {
         'ai_candidate_id',(select candidate.id from public.analysis_story_commit_candidate candidate join public.analysis_story_task task on task.id=candidate.task_id where task.job_id=job.id and candidate.tier='AI_CANDIDATE' limit 1)
       )::text from public.analysis_job job where job.id=${quoteSql(JOB_ID)}::uuid;
     `))
-    expect(preparedState).toMatchObject({ status: 'PROCESSING', snapshots: 4, strong: 1, ai_candidates: 1 })
+    expect(preparedState).toMatchObject({ status: 'PROCESSING', snapshots: REPOSITORY_NAMES.length, strong: 1, ai_candidates: 1 })
     expect(preparedState.ai_candidate_id).toMatch(/^[0-9a-f-]{36}$/)
     aiCandidateId = preparedState.ai_candidate_id
 
     const task = await jobsDb.claimNextStoryTask(WORKER_ID, 900)
     expect(task?.id).toBe(TASK_ID)
-    expect(task?.snapshots).toHaveLength(4)
+    expect(task?.snapshots).toHaveLength(REPOSITORY_NAMES.length)
     const logger = new Logger({ sink: (line) => logLines.push(line), minLevel: 'debug' })
     const eventTarget = {
       workerId: WORKER_ID,
@@ -745,7 +641,7 @@ describe('V1.11 full local transaction E2E', () => {
     for (const event of recordedRuntimeEvents) persistedRuntimeEvents.report(event)
     await persistedRuntimeEvents.close()
     runtimeEvents = null
-    expect(outcome.ok, `${outcome.errorCode}: ${outcome.errorMessage}`).toBe(true)
+    expect(outcome.ok, `${outcome.errorCode}: ${outcome.errorMessage}; ${logLines.filter((line) => line.includes('rejected_submissions')).slice(-2).join('\n')}`).toBe(true)
     expect(model.servedToolNames()).toEqual([
       'read',
       'grep',

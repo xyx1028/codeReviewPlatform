@@ -99,6 +99,9 @@ export interface RootIdentitySpec {
 }
 
 export interface AttemptProfileSpec {
+  reviewWorkflow?: boolean
+  /** Platform phase filter; only narrows the already policy-approved root tools. */
+  rootToolsOverride?: readonly string[]
   taskId: string
   agentAttempt: number
   /** Directory that will hold every per-attempt tree. */
@@ -302,12 +305,13 @@ export function buildAttemptPatch(
     agentAttempt: spec.agentAttempt,
     requestTimeoutMs: spec.broker.requestTimeoutMs ?? 30000,
   }
-  const rootTools = resolveToolsForRole({
+  const allowedRootTools = resolveToolsForRole({
     // 缺省 root-reviewer：评审链路行为不变。问答传 research-child（只读角色）。
     role: spec.rootRole ?? 'root-reviewer',
     policy: spec.policy,
     delegationDepth: 0,
   })
+  const rootTools = spec.rootToolsOverride ? allowedRootTools.filter((tool) => spec.rootToolsOverride!.includes(tool)) : allowedRootTools
 
   return [
     {
@@ -614,7 +618,7 @@ export function buildAttemptPatch(
     },
     {
       id: 'review-control-tool',
-      config: brokerConfig,
+      config: { ...brokerConfig, workflowMode: spec.reviewWorkflow ?? false },
     },
   ]
 }
@@ -784,7 +788,7 @@ export function materializeAttemptProfile(
         role: spec.rootRole ?? 'root-reviewer',
         policy: spec.policy,
         delegationDepth: 0,
-      }),
+      }).filter((tool) => !spec.rootToolsOverride || spec.rootToolsOverride.includes(tool)),
       skills: skillTree,
       cleanup: () => {
         // 技能树是 0500/0400 的只读树：不先放宽权限，`rmSync` 会在它上面失败，而失败

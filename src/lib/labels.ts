@@ -323,6 +323,24 @@ export const analysisErrorCodeMeta: Record<string, AnalysisErrorMeta> = {
     suggestion: '减少子任务拆分，或调整默认策略后创建新任务。',
     retryable: false,
   },
+  REVIEW_WORKFLOW_AGENT_LIMIT: {
+    title: '独立复核所需 Agent 名额不足',
+    reason: '验收点评审及一次补查需要至少 3 个 Agent 名额，当前冻结策略不足。',
+    suggestion: '将每次任务的 Agent 数量上限调整为至少 3 后，重新创建分析任务。',
+    retryable: false,
+  },
+  REVIEW_PHASE_NO_SUBMISSION: {
+    title: '评审阶段未提交有效结果',
+    reason: '验收点提取、调查或独立复核未完成有效阶段提交，因此没有发布最终报告。',
+    suggestion: '查看阶段日志和模型响应，解决中断原因后重试。',
+    retryable: true,
+  },
+  REVIEW_WORKFLOW_INVALID: {
+    title: '逐项评审结果未通过校验',
+    reason: '验收点覆盖、需求出处、独立证据或风险绑定不符合评审契约。',
+    suggestion: '查看阶段提交被拒的具体原因，修正后重新分析。',
+    retryable: true,
+  },
   AGENT_TREE_CANCELLED: {
     title: 'Agent 任务已取消',
     reason: '本次 Agent 树被用户、Worker 关停或租约接管取消。',

@@ -1,0 +1,31 @@
+.acceptance-summary { margin: 0 0 20px; color: #344054; line-height: 1.7; }
+.acceptance-table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 20px; }
+.acceptance-table th { padding: 12px; text-align: left; background: #f7f8fc; color: #475467; font-weight: 600; }
+.acceptance-table th:first-child { width: 32%; }
+.acceptance-table th:nth-child(2) { width: 18%; }
+.acceptance-table td { padding: 18px 12px; vertical-align: top; border-bottom: 1px solid #e5e9f2; line-height: 1.7; overflow-wrap: anywhere; }
+.acceptance-point-id { display: block; font-weight: 600; color: #5c5cff; margin-bottom: 4px; }
+.acceptance-details { margin-top: 12px; }
+.acceptance-details summary { cursor: pointer; color: #4f4fd4; line-height: 1.6; }
+.acceptance-details summary:focus-visible { outline: 2px solid #5c5cff; outline-offset: 4px; }
+.acceptance-details blockquote { margin: 12px 0; padding: 8px 12px; border-left: 3px solid #d5d9e4; background: #f7f8fc; white-space: pre-wrap; }
+.acceptance-disagreement { background: #fff8e8; padding: 10px 12px; margin-top: 12px; border-left: 3px solid #d89d24; line-height: 1.7; }
+.acceptance-disagreement p { margin: 0; }
+.acceptance-disagreement p + p { margin-top: 8px; }
+.acceptance-evidence-list { list-style: none; padding: 0; margin: 12px 0 0; }
+.acceptance-evidence-list li { padding: 10px 0; border-top: 1px solid #e5e9f2; }
+.acceptance-evidence-location, .acceptance-evidence-commit { color: #667085; overflow-wrap: anywhere; font-size: 12px; }
+.acceptance-risks { margin-top: 28px; }
+.acceptance-risks h3 { margin: 0 0 12px; font-size: 16px; }
+.acceptance-risk { padding: 16px 0; border-top: 1px solid #e5e9f2; line-height: 1.7; }
+.acceptance-risk p { margin: 8px 0; }
+.acceptance-legacy-text { white-space: pre-wrap; line-height: 1.7; }
+@media (max-width: 720px) {
+  .acceptance-table, .acceptance-table tbody, .acceptance-table tr, .acceptance-table td { display: block; width: auto; }
+  .acceptance-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .acceptance-table tr { padding: 12px 0; border-top: 1px solid #e5e9f2; }
+  .acceptance-table td { border: 0; padding: 6px 0; }
+  .acceptance-table td::before { content: attr(data-label); display: block; color: #667085; font-size: 12px; margin-bottom: 4px; }
+  .acceptance-point-id { display: inline; margin-right: 8px; }
+  .acceptance-risk .ant-tag { margin-bottom: 6px; }
+}

@@ -90,6 +90,8 @@ export interface AgentAuthorityLedgerOptions {
   /** 由 Worker 生成的稳定根身份。 */
   rootAgentId: string
   rootSessionId: string
+  /** Keep slots for mandatory platform peers; children cannot consume them. */
+  reservedPlatformRootSlots?: number
   /** 注册子节点时同步写库；返回 false 表示数据库拒绝了这次 lineage。 */
   persistNode?(identity: AgentIdentity): Promise<void>
 }
@@ -116,8 +118,10 @@ export class AgentAuthorityLedger {
   private readonly rootToken: string
   private cancelled: string | null = null
   private sealed = false
+  private remainingPlatformRootSlots: number
 
   constructor(private readonly options: AgentAuthorityLedgerOptions) {
+    this.remainingPlatformRootSlots = options.reservedPlatformRootSlots ?? 0
     const role: AgentRole = 'root-reviewer'
     const tools = resolveToolsForRole({ role, policy: options.policy, delegationDepth: 0 })
     const identity: AgentIdentity = {
@@ -147,6 +151,38 @@ export class AgentAuthorityLedger {
 
   get root(): AgentIdentity {
     return this.byAgentId.get(this.options.rootAgentId)!.identity
+  }
+
+  /** Only the platform may create a peer root; no model-facing registration path calls this. */
+  async registerPlatformRoot(agentId: string, sessionId: string): Promise<{ identity: AgentIdentity; token: string }> {
+    this.assertUsable()
+    if (this.byAgentId.has(agentId)) throw new Error('platform phase root already exists')
+    if (this.totalCount() >= this.options.policy.agents.maxAgentsPerAttempt) {
+      throw new V4GovernanceError(V4_ERROR_CODES.AGENT_TREE_LIMIT_EXCEEDED, 'independent verification requires an available platform Agent slot')
+    }
+    const identity: AgentIdentity = {
+      ...this.root, agentId, sessionId, parentAgentId: null, provider: 'root', delegationDepth: 0,
+      status: 'RUNNING', startedAt: new Date().toISOString(), finishedAt: null,
+    }
+    await this.options.persistNode?.(identity)
+    const token = mintToken()
+    this.byToken.set(token, identity)
+    this.byAgentId.set(agentId, { identity, token })
+    this.childrenOf.set(agentId, new Set())
+    this.remainingPlatformRootSlots = Math.max(0, this.remainingPlatformRootSlots - 1)
+    return { identity, token }
+  }
+
+  /** Rotate the anchor root's secret between independently launched phase processes. */
+  rotatePlatformRootToken(agentId: string): string {
+    this.assertUsable()
+    const entry = this.byAgentId.get(agentId)
+    if (!entry || entry.identity.provider !== 'root' || entry.identity.status !== 'RUNNING') throw new Error('phase root is not running')
+    this.byToken.delete(entry.token)
+    const token = mintToken()
+    this.byToken.set(token, entry.identity)
+    this.byAgentId.set(agentId, { identity: entry.identity, token })
+    return token
   }
 
   /** 当前活着的 Agent 数量。 */
@@ -244,10 +280,10 @@ export class AgentAuthorityLedger {
         `delegation depth ${depth} exceeds the attempt limit of ${this.options.policy.agents.maxDelegationDepth}`,
       )
     }
-    if (this.byAgentId.size >= this.options.policy.agents.maxAgentsPerAttempt) {
+    if (this.byAgentId.size >= this.options.policy.agents.maxAgentsPerAttempt - this.remainingPlatformRootSlots) {
       throw new V4GovernanceError(
         V4_ERROR_CODES.AGENT_TREE_LIMIT_EXCEEDED,
-        `this attempt already has ${this.byAgentId.size} agents, the limit is ${this.options.policy.agents.maxAgentsPerAttempt}`,
+        `this attempt already has ${this.byAgentId.size} agents; ${this.remainingPlatformRootSlots} slots are reserved for platform verification within the limit ${this.options.policy.agents.maxAgentsPerAttempt}`,
       )
     }
     const liveSiblings = [...(this.childrenOf.get(parent.agentId) ?? [])].filter(

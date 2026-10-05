@@ -85,10 +85,12 @@ describe('aggregateCompletedResults', () => {
           test_points: ['exercise the endpoint'],
           ai_remark: ['reviewed'],
         },
+        acceptance_review: null,
       },
     ])
     expect(evidence).toEqual([
       {
+        evidence_id: 'evidence-1',
         story_code: 'PRJ-001',
         repository_name: 'kdmanage-backend',
         commit_sha: SHA,
@@ -184,17 +186,19 @@ describe('finalizeJob single Harness workflow', () => {
             risks: 'low risk',
             test_points: 'exercise the endpoint',
             ai_remark: 'reviewed',
-        analysis_detail_items: {
-          implemented_content: ['implementation details'],
-          missing_content: [],
-          risks: ['low risk'],
-          test_points: ['exercise the endpoint'],
-          ai_remark: ['reviewed'],
-        },
+            analysis_detail_items: {
+              implemented_content: ['implementation details'],
+              missing_content: [],
+              risks: ['low risk'],
+              test_points: ['exercise the endpoint'],
+              ai_remark: ['reviewed'],
+            },
+            acceptance_review: null,
           },
         ],
         p_evidence: [
           {
+            evidence_id: 'evidence-1',
             story_code: 'PRJ-001',
             repository_name: 'kdmanage-backend',
             commit_sha: SHA,

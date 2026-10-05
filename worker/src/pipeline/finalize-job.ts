@@ -65,6 +65,7 @@ interface AgentOutput {
     ai_remark: string[]
   }
   evidenceSummaries?: Record<string, string>
+  acceptanceReview?: import('../ai/review-workflow.js').AcceptanceReviewReport | null
 }
 
 /**
@@ -93,10 +94,12 @@ export function aggregateCompletedResults(tasks: CompletedStoryTask[]): {
       test_points: output.testPoints ?? null,
       ai_remark: output.aiRemark ?? null,
       analysis_detail_items: output.analysisDetailItems ?? null,
+      acceptance_review: output.acceptanceReview ?? null,
     })
 
     for (const item of task.verified_evidence ?? []) {
       evidence.push({
+        evidence_id: item.evidence_id,
         story_code: task.story_code,
         repository_name: item.repository_name,
         commit_sha: item.commit_sha,

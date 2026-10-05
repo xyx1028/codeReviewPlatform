@@ -24,7 +24,6 @@ import {
   App as AntApp,
   Button,
   Card,
-  Collapse,
   Col,
   Descriptions,
   Divider,
@@ -37,7 +36,6 @@ import {
   List,
   Menu,
   Modal,
-  Pagination,
   Popover,
   Popconfirm,
   Progress,
@@ -133,7 +131,7 @@ import {
 import { aiVerdictLabels, aiVerdictOptions, analysisJobStatusLabels, batchStatusLabels, humanReviewLabels, humanReviewOptions, resolveAnalysisError, storyTaskStatusLabels } from './lib/labels'
 import { buildUserDeletionView, describeUserDeletionError } from './lib/user-deletion'
 import { aiFillPrompt } from './lib/prompt'
-import { displayStructuredAnalysisDetailItem, parseAnalysisDetail } from './lib/analysis-detail'
+import { AcceptanceReviewCard } from './components/AcceptanceReviewCard'
 import { WorkerManagementPage } from './pages/WorkerManagementPage'
 import { RuntimeMonitoringPage } from './pages/RuntimeMonitoringPage'
 import { AgentRunDetailPage } from './pages/AgentRunDetailPage'
@@ -3345,12 +3343,11 @@ function ReviewDetailPage({ batchId, canManage }: { batchId: string; canManage: 
 
       <div className="review-detail-grid">
         <div className="review-detail-story"><StoryCard story={detail.story} /></div>
-        <div className="review-detail-ai"><AiResultCard result={detail.aiResult} /></div>
+        <div className="review-detail-ai"><AcceptanceReviewCard result={detail.aiResult} evidence={detail.evidence} /></div>
         <div className="review-detail-decision">
           <HumanReviewPanel key={`${detail.story.id}-${detail.aiResult?.id ?? 'no-ai'}`} batchId={batchId} detail={detail} />
         </div>
       </div>
-      <CodeEvidenceCard evidence={detail.evidence} />
     </div>
   )
 }
@@ -3783,182 +3780,6 @@ function StoryCard({ story }: { story: ReviewStory }) {
       </div>
       {story.description ? <div className="review-story-detail"><Text strong>需求描述</Text><Text>{story.description}</Text></div> : null}
       {story.acceptance_criteria ? <div className="review-story-detail"><Text strong>验收标准</Text><Text>{story.acceptance_criteria}</Text></div> : null}
-    </Card>
-  )
-}
-
-function AnalysisDetailContent({
-  items,
-  value,
-}: {
-  items: readonly string[] | null | undefined
-  value: string | null | undefined
-}) {
-  if (items) {
-    return (
-      <ol className="review-ai-detail-content review-ai-detail-content__list review-ai-detail-content__list--structured">
-        {items.map((item, itemIndex) => (
-          <li key={`structured-item-${itemIndex}`} className="review-ai-detail-content__item">
-            <span className="review-ai-detail-content__item-body">{displayStructuredAnalysisDetailItem(item)}</span>
-          </li>
-        ))}
-      </ol>
-    )
-  }
-
-  const blocks = parseAnalysisDetail(value)
-  return (
-    <div className="review-ai-detail-content review-ai-detail-content--legacy">
-      {blocks.map((block, blockIndex) => {
-        if (block.kind === 'paragraph') {
-          return <p key={`paragraph-${blockIndex}`} className="review-ai-detail-content__paragraph">{block.content}</p>
-        }
-
-        return (
-          <ol key={`list-${blockIndex}`} className="review-ai-detail-content__list review-ai-detail-content__list--legacy">
-            {block.items.map((item, itemIndex) => (
-              <li key={`${item.label ?? 'item'}-${itemIndex}`} className="review-ai-detail-content__item">
-                <span className="review-ai-detail-content__ordinal">{itemIndex + 1}</span>
-                <span className="review-ai-detail-content__item-body">
-                  {item.label ? <span className="review-ai-detail-content__label">{item.label}</span> : null}
-                  {item.content}
-                </span>
-              </li>
-            ))}
-          </ol>
-        )
-      })}
-    </div>
-  )
-}
-
-function AiResultCard({ result }: { result: AiReviewResult | null }) {
-  if (!result) return <Card className="review-ai-card" title="AI分析"><Empty description="未分析" /></Card>
-
-  const structuredDetails = result.analysis_detail_items
-  const sections = [
-    { title: '已实现内容', value: result.implemented_content, items: structuredDetails?.implemented_content, tone: 'success' },
-    { title: '缺失内容', value: result.missing_content, items: structuredDetails?.missing_content, tone: 'warning' },
-    { title: '风险', value: result.risks, items: structuredDetails?.risks, tone: 'danger' },
-    { title: '建议测试点', value: result.test_points, items: structuredDetails?.test_points, tone: 'info' },
-    { title: 'AI 备注', value: result.ai_remark, items: structuredDetails?.ai_remark, tone: 'neutral' },
-  ].filter((section) => structuredDetails ? section.items?.length : section.value)
-
-  return (
-    <Card className="review-ai-card" title="AI分析">
-      <div className="review-ai-highlight">
-        <Text strong>分析摘要</Text>
-        <Text>{result.summary || '暂无摘要'}</Text>
-      </div>
-
-      <div className="review-ai-details">
-        <div className="review-ai-details__heading">
-          <Text strong>分析详情</Text>
-          <Text type="secondary">切换页签查看各项结论</Text>
-        </div>
-        <Tabs
-          className="review-ai-tabs"
-          size="small"
-          items={sections.map((section) => ({
-            key: section.title,
-            label: (
-              <span className="review-ai-tab-label">
-                <span className={`review-ai-tab-dot review-ai-tab-dot--${section.tone}`} />
-                {section.title}
-              </span>
-            ),
-            children: (
-              <section className={`review-ai-tab-panel review-ai-tab-panel--${section.tone}`}>
-                <AnalysisDetailContent items={section.items} value={section.value} />
-              </section>
-            ),
-          }))}
-        />
-      </div>
-
-    </Card>
-  )
-}
-
-function CodeEvidenceCard({ evidence }: { evidence: BatchWorkspace['evidence'] }) {
-  const [evidencePages, setEvidencePages] = useState<Record<string, number>>({})
-  const [evidencePageSizes, setEvidencePageSizes] = useState<Record<string, number>>({})
-  const [activeEvidenceType, setActiveEvidenceType] = useState<string>()
-  const evidencePageSize = 10
-  const evidenceGroups = ['现有实现', '缺失依据', '风险依据'].map((type) => ({
-    type,
-    items: evidence.filter((item) => item.evidence_type === type),
-  })).filter((group) => group.items.length)
-  const overview = (item: BatchWorkspace['evidence'][number]) => {
-    const text = (item.evidence_summary || item.description).replace(/\s+/g, ' ').trim()
-    return text.length > 80 ? `${text.slice(0, 80)}…` : text
-  }
-
-  return (
-    <Card className="review-evidence-card" title="代码证据" extra={<Text type="secondary">{evidence.length} 条</Text>}>
-      {evidenceGroups.length ? (
-        <Tabs
-          activeKey={activeEvidenceType ?? evidenceGroups[0].type}
-          className="review-evidence-tabs"
-          size="small"
-          onChange={setActiveEvidenceType}
-          items={evidenceGroups.map((group) => {
-            const pageSize = evidencePageSizes[group.type] ?? evidencePageSize
-            const pageCount = Math.ceil(group.items.length / pageSize)
-            const currentPage = Math.min(evidencePages[group.type] ?? 1, pageCount)
-            const pageItems = group.items.slice((currentPage - 1) * pageSize, currentPage * pageSize)
-            return {
-              key: group.type,
-              label: `${group.type} (${group.items.length})`,
-              children: <section className="review-evidence-group">
-                <Collapse
-                  className="review-evidence-collapse"
-                  ghost
-                  items={pageItems.map((item) => {
-                    const fileName = item.file_path.split('/').filter(Boolean).at(-1) ?? item.file_path
-                    return {
-                      key: item.id,
-                      label: <div className="review-evidence-overview">
-                        <Text strong className="review-evidence-overview__summary" title={item.evidence_summary || item.description}>{overview(item)}</Text>
-                        <span className="review-evidence-overview__location">
-                          <Text type="secondary">{item.repository_name} · {fileName}</Text>
-                          {item.symbol_name ? <Tag>{item.symbol_name}</Tag> : null}
-                          {item.start_line ? <Text type="secondary">{item.start_line}{item.end_line ? ` - ${item.end_line}` : ''} 行</Text> : null}
-                        </span>
-                      </div>,
-                      children: <div className="review-evidence-detail">
-                        <div className="review-evidence-detail__meta">
-                          <Text code>{item.file_path}</Text>
-                          {item.commit_sha ? <Tag>Commit {item.commit_sha}</Tag> : null}
-                          {item.symbol_name ? <Tag>{item.symbol_name}</Tag> : null}
-                          {item.start_line ? <Text type="secondary">第 {item.start_line}{item.end_line ? ` - ${item.end_line}` : ''} 行</Text> : null}
-                        </div>
-                        <Text type="secondary">{item.description}</Text>
-                      </div>,
-                    }
-                  })}
-                />
-                <Pagination
-                  className="review-evidence-pagination"
-                  current={currentPage}
-                  pageSize={pageSize}
-                  pageSizeOptions={[10, 20, 50, 100]}
-                  showSizeChanger
-                  size="small"
-                  total={group.items.length}
-                  showTotal={(total) => `共 ${total} 条`}
-                  onChange={(page, nextPageSize) => {
-                    setEvidencePages((pages) => ({ ...pages, [group.type]: page }))
-                    if (nextPageSize !== pageSize) {
-                      setEvidencePageSizes((sizes) => ({ ...sizes, [group.type]: nextPageSize }))
-                    }
-                  }}
-                />
-              </section>,
-            }
-          })}
-        />
-      ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无代码证据" />}
     </Card>
   )
 }

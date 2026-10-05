@@ -407,6 +407,7 @@ export interface AnalysisDetailItems {
 }
 
 export interface AiReviewResult {
+  acceptance_review?: import('../worker/src/ai/review-workflow-types').AcceptanceReviewReport | null
   id: string
   story_id: string
   ai_import_record_id: string
@@ -424,6 +425,7 @@ export interface AiReviewResult {
 }
 
 export interface AiCodeEvidence {
+  evidence_id?: string | null
   id: string
   ai_review_result_id: string
   repository_name: string

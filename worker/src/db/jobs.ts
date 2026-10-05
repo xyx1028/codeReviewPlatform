@@ -50,6 +50,7 @@ export interface JobContext {
   total_stories: number
   /** V1.11：缺失即历史 v1，绝不能把在途旧 Job 隐式升级。 */
   analysis_context_version?: 1 | 2
+  review_workflow_version?: 0 | 1
   commit_window_days?: 7 | 14 | 21 | 28
   required_worker_scope_version?: 1 | 2
   story_input_catalog_hash?: string | null
@@ -1122,6 +1123,32 @@ export class JobsDb {
   }
 
   /** 注册一个 Agent Tree 节点。数据库是可信 lineage 的最终仲裁。 */
+  beginReviewPhase(input: AttemptClaim & {
+    phase: import('../ai/review-workflow.js').ReviewPhase
+    round: number
+    agentId: string
+    sessionId: string
+  }): Promise<void> {
+    return this.db.rpc<void>('begin_analysis_review_phase', {
+      p_task_id: input.taskId, p_worker_id: input.workerId, p_claim_token: input.claimToken,
+      p_agent_attempt: input.agentAttempt, p_phase: input.phase, p_round: input.round,
+      p_agent_id: input.agentId, p_session_id: input.sessionId,
+    })
+  }
+
+  saveReviewPhase(input: AttemptClaim & {
+    phase: import('../ai/review-workflow.js').ReviewPhase
+    round: number
+    agentId: string
+    result: unknown
+  }): Promise<void> {
+    return this.db.rpc<void>('save_analysis_review_phase', {
+      p_task_id: input.taskId, p_worker_id: input.workerId, p_claim_token: input.claimToken,
+      p_agent_attempt: input.agentAttempt, p_phase: input.phase, p_round: input.round,
+      p_agent_id: input.agentId, p_result: input.result,
+    })
+  }
+
   async registerAgentNode(
     input: AttemptClaim & {
       agentId: string

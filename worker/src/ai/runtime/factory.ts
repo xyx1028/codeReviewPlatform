@@ -325,6 +325,7 @@ export async function buildDeepSeekHarnessReview(
     : []
 
   return new DeepSeekHarnessAcpEngine({
+    reviewWorkflow: input.task.job.review_workflow_version === 1,
     taskId: input.task.id,
     requirementAttachments:
       input.requirementAttachmentStorage && frozenRequirementAttachments.length > 0
@@ -403,6 +404,8 @@ export async function buildDeepSeekHarnessReview(
       policyVersion: input.task.policy_version,
     },
     db: {
+      beginReviewPhase: (phase) => input.jobsDb.beginReviewPhase({ ...claim, ...phase }),
+      saveReviewPhase: (phase) => input.jobsDb.saveReviewPhase({ ...claim, ...phase }),
       registerAgentNode: (identity) =>
         input.jobsDb.registerAgentNode({
           ...claim,

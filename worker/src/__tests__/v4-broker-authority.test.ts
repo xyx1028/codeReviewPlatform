@@ -21,12 +21,14 @@ import {
   type CommitReviewInput,
   type PermissionDecisionEntry,
   type ToolAuditEntry,
+  type AttemptControlBrokerOptions,
 } from '../ai/control/attempt-control-broker.js'
 import {
   AgentAuthorityLedger,
   mintRootIdentity,
 } from '../ai/control/agent-authority-ledger.js'
 import { HierarchicalBudgetLedger } from '../ai/control/hierarchical-budget-ledger.js'
+import { ReviewWorkflowCoordinator } from '../ai/control/review-workflow-coordinator.js'
 import {
   normalizeCapabilityPolicy,
   policyHash as hashPolicy,
@@ -111,6 +113,9 @@ async function boot(
     analysisScope?: import('../db/jobs.js').StoryAnalysisScope
     workspace?: import('../ai/workspace/attempt-workspace.js').AttemptWorkspace
     onTriage?: (candidateId: string) => void
+    reviewWorkflow?: AttemptControlBrokerOptions['reviewWorkflow']
+    onAgentTerminal?: (agentId: string, status: string) => Promise<void>
+    minQueriesPerRepository?: number
   } = {},
 ): Promise<Harness> {
   const policy = normalizeCapabilityPolicy({
@@ -133,11 +138,13 @@ async function boot(
   const decisions: PermissionDecisionEntry[] = []
 
   const broker = await startAttemptControlBroker({
+    reviewWorkflow: options.reviewWorkflow,
+    markAgentTerminal: options.onAgentTerminal,
     taskId: TASK_ID,
     agentAttempt: ATTEMPT,
     sessionRevision: options.sessionRevision ?? 1,
     snapshots: fakeSnapshots(),
-    coveragePolicy: { requiredRepositories: ['kdmanage-backend'], minQueriesPerRepository: 0 },
+    coveragePolicy: { requiredRepositories: ['kdmanage-backend'], minQueriesPerRepository: options.minQueriesPerRepository ?? 0 },
     socketRoot,
     logger,
     policy,
@@ -896,6 +903,92 @@ describe('broker budget and web routes', () => {
     )
     expect(late.status).toBe(403)
     expect(late.body.code).toBe(V4_ERROR_CODES.AGENT_IDENTITY_INVALID)
+  })
+
+  it('keeps the platform anchor running after a business phase finishes', async () => {
+    const terminal: string[] = []
+    const h = await boot({
+      reviewWorkflow: {
+        phase: () => 'INVESTIGATE', activeRootId: () => 'unused',
+        capture: async () => ({ accepted: true, stageAccepted: true }),
+        finalSubmission: () => { throw new Error('verification has not completed') },
+      },
+      onAgentTerminal: async (agentId) => { terminal.push(agentId) },
+    })
+    const finished = await h.post('/attempt/finish-agent', rootEnvelope(h, { status: 'FINISHED' }))
+    expect(finished.body.stageOnly).toBe(true)
+    expect(h.authority.root.status).toBe('RUNNING')
+    expect(terminal).toEqual([])
+    const request = await h.post('/attempt/reserve-model-request', rootEnvelope(h, { kind: 'loop' }))
+    expect(request.body.allowed).toBe(true)
+    const failed = await h.post('/attempt/finish-agent', rootEnvelope(h, { status: 'FAILED' }))
+    expect(failed.body.status).toBe('FAILED')
+    expect(h.authority.root.status).toBe('FAILED')
+    expect(terminal).toEqual([h.authority.root.agentId])
+  })
+
+  it('publishes only after independent verification and rejects copied investigation evidence', async () => {
+    const workflow = new ReviewWorkflowCoordinator([{ id: 'body', label: '需求正文', text: '创建订单接口' }])
+    const h = await boot({ reviewWorkflow: workflow })
+    workflow.begin(h.authority.root.agentId)
+    const extracted = await h.post('/attempt/submit-review', rootEnvelope(h, { submission: {
+      acceptancePoints: [{ id: 'C1', description: '创建订单接口', needsClarification: false, sources: [{ sourceId: 'body', quote: '创建订单接口' }] }], evidence: [],
+    } }, 'submit_review_result'))
+    expect(extracted.body).toMatchObject({ accepted: true, stageAccepted: true })
+    expect(h.commits).toHaveLength(0)
+    await expect(h.broker.finalizeWorkflow()).rejects.toThrow('mandatory independent verification')
+    expect(workflow.advance()).toBe('INVESTIGATE')
+    workflow.begin(h.authority.root.agentId)
+    const read = await h.post('/attempt/read-code', rootEnvelope(h, { repository: 'kdmanage-backend', path: 'src/Order.java', startLine: 1, endLine: 10 }, 'read_snapshot_code'))
+    const investigationId = String(read.body.evidenceId)
+    const draft = (evidenceId: string) => ({
+      criterionReviews: [{ criterionId: 'C1', verdict: 'IMPLEMENTED', reason: '订单入口存在', evidenceIds: [evidenceId] }],
+      reviewRisks: [], evidence: validSubmission(evidenceId).evidence,
+    })
+    expect((await h.post('/attempt/submit-review', rootEnvelope(h, { submission: draft(investigationId) }, 'submit_review_result'))).body.stageAccepted).toBe(true)
+    expect(h.commits).toHaveLength(0)
+    expect(workflow.advance()).toBe('VERIFY')
+    const verifier = await h.authority.registerPlatformRoot('independent-verifier', 'independent-verifier-session')
+    workflow.begin(verifier.identity.agentId)
+    const verifyEnvelope = (payload: Record<string, unknown>, toolName: string) => envelope({ capability: verifier.token, agentId: verifier.identity.agentId, sessionId: verifier.identity.sessionId, toolName }, payload)
+    const copied = await h.post('/attempt/submit-review', verifyEnvelope({ submission: draft(investigationId) }, 'submit_review_result'))
+    expect(copied.status).not.toBe(200)
+    expect(workflow.submitted).toBe(false)
+    const independentRead = await h.post('/attempt/read-code', verifyEnvelope({ repository: 'kdmanage-backend', path: 'src/Order.java', startLine: 1, endLine: 10 }, 'read_snapshot_code'))
+    const verificationId = String(independentRead.body.evidenceId)
+    expect(verificationId).not.toBe(investigationId)
+    const verified = await h.post('/attempt/submit-review', verifyEnvelope({ submission: draft(verificationId) }, 'submit_review_result'))
+    expect(verified.body.stageAccepted).toBe(true)
+    expect(h.commits).toHaveLength(0)
+    expect(workflow.advance()).toBeNull()
+    await h.broker.finalizeWorkflow()
+    expect(h.commits).toHaveLength(1)
+    expect(h.commits[0].submission.acceptanceReview?.verification).toMatchObject({ status: 'CONFIRMED', verificationAgentId: verifier.identity.agentId })
+    expect(h.commits[0].evidence[0].producer.agentId).toBe(verifier.identity.agentId)
+  })
+
+  it('requires independent search coverage before the verifier can claim absence', async () => {
+    const workflow = new ReviewWorkflowCoordinator([{ id: 'body', label: '需求正文', text: '创建订单接口' }])
+    const h = await boot({ reviewWorkflow: workflow, minQueriesPerRepository: 1 })
+    workflow.begin(h.authority.root.agentId)
+    await h.post('/attempt/submit-review', rootEnvelope(h, { submission: {
+      acceptancePoints: [{ id: 'C1', description: '创建订单接口', needsClarification: false, sources: [{ sourceId: 'body', quote: '创建订单接口' }] }], evidence: [],
+    } }, 'submit_review_result'))
+    workflow.advance()
+    workflow.begin(h.authority.root.agentId)
+    await h.post('/attempt/search-code', rootEnvelope(h, { repository: 'kdmanage-backend', query: 'createOrder' }, 'search_snapshot_code'))
+    const draft = { criterionReviews: [{ criterionId: 'C1', verdict: 'NOT_IMPLEMENTED', reason: '已完整检索但未发现入口', evidenceIds: [] }], reviewRisks: [], evidence: [] }
+    expect((await h.post('/attempt/submit-review', rootEnvelope(h, { submission: draft }, 'submit_review_result'))).body.stageAccepted).toBe(true)
+    workflow.advance()
+    const verifier = await h.authority.registerPlatformRoot('absence-verifier', 'absence-verifier-session')
+    workflow.begin(verifier.identity.agentId)
+    const verifyEnvelope = (payload: Record<string, unknown>, toolName: string) => envelope({ capability: verifier.token, agentId: verifier.identity.agentId, sessionId: verifier.identity.sessionId, toolName }, payload)
+    const withoutSearch = await h.post('/attempt/submit-review', verifyEnvelope({ submission: draft }, 'submit_review_result'))
+    expect(withoutSearch.status).not.toBe(200)
+    expect(workflow.submitted).toBe(false)
+    await h.post('/attempt/search-code', verifyEnvelope({ repository: 'kdmanage-backend', query: 'createOrder' }, 'search_snapshot_code'))
+    const afterSearch = await h.post('/attempt/submit-review', verifyEnvelope({ submission: draft }, 'submit_review_result'))
+    expect(afterSearch.body.stageAccepted).toBe(true)
   })
 
   it('attributes an audit entry to the token holder, not to the reported agent id', async () => {

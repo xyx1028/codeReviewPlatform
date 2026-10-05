@@ -212,6 +212,7 @@ describe('Agent result mapping', () => {
         ai_remark: ['备注'],
       },
       evidenceSummaries: {},
+      acceptanceReview: null,
     })
   })
 
@@ -237,6 +238,7 @@ describe('Agent result mapping', () => {
         risks: '并发风险',
         test_points: '并发下单',
         ai_remark: '备注',
+        acceptance_review: null,
         analysis_detail_items: {
           implemented_content: ['已实现下单'],
           missing_content: ['缺少退款'],

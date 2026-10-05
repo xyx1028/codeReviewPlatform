@@ -42,6 +42,7 @@ export interface StructuredAnalysisDetailItems {
 }
 
 export interface ReviewSubmission {
+  acceptanceReview?: import('../review-workflow.js').AcceptanceReviewReport
   verdict: ReviewVerdict
   confidence: number
   summary: string

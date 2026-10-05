@@ -32,6 +32,7 @@ export interface ReviewControlConfig {
   taskId: string
   agentAttempt: number
   requestTimeoutMs?: number
+  workflowMode?: boolean
 }
 
 export const Config: z<ReviewControlConfig> = z.object({
@@ -39,12 +40,14 @@ export const Config: z<ReviewControlConfig> = z.object({
   taskId: z.string().required(),
   agentAttempt: z.number().required(),
   requestTimeoutMs: z.number(),
+  workflowMode: z.boolean(),
 })
 
 interface SubmitAccepted {
   accepted: true
   committedAt: string
   runId: string
+  stageAccepted?: boolean
 }
 
 interface SubmitRejected {
@@ -196,27 +199,56 @@ export function apply(ctx: Context, config: ReviewControlConfig): void {
   ctx.tools.register(
     defineTool({
       name: 'submit_review_result',
-      description:
-        'Submit the final review verdict for this story. Call it exactly once, after you have gathered evidence from the repository snapshots. Every evidence item must reference a range you actually read. If the submission is rejected, read the reason, fix the problem, and call this tool again.',
+      description: config.workflowMode
+        ? 'Submit this platform-assigned phase: acceptancePoints for EXTRACT, criterionReviews and reviewRisks for INVESTIGATE or VERIFY. This records a draft; the platform alone advances phases and publishes the final report. Every evidence item must reference your phase\'s own code reads. If rejected, fix the stated problem and resubmit.'
+        : 'Submit the final review verdict for this story. Call it exactly once, after you have gathered evidence from the repository snapshots. Every evidence item must reference a range you actually read. If the submission is rejected, read the reason, fix the problem, and call this tool again.',
       parameters: {
+        acceptancePoints: {
+          type: 'array', description: 'EXTRACT only: fixed requirement-derived acceptance points.', items: {
+            type: 'object', additionalProperties: false, properties: {
+              id: { type: 'string', required: true }, description: { type: 'string', required: true },
+              needsClarification: { type: 'boolean', required: true },
+              sources: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: { sourceId: { type: 'string', required: true }, quote: { type: 'string', required: true } } } },
+            },
+          },
+        },
+        criterionReviews: {
+          type: 'array', description: 'INVESTIGATE/VERIFY: exactly one independently supported finding per fixed criterion.', items: {
+            type: 'object', additionalProperties: false, properties: {
+              criterionId: { type: 'string', required: true }, verdict: { type: 'string', required: true, enum: [...VERDICTS] },
+              reason: { type: 'string', required: true }, evidenceIds: { type: 'array', required: true, items: { type: 'string' } },
+            },
+          },
+        },
+        reviewRisks: {
+          type: 'array', description: 'Requirement-related bugs, missed scenarios and hazards; [] if none found.', items: {
+            type: 'object', additionalProperties: false, properties: {
+              id: { type: 'string', required: true }, criterionIds: { type: 'array', required: true, items: { type: 'string' } },
+              title: { type: 'string', required: true }, trigger: { type: 'string', required: true }, impact: { type: 'string', required: true },
+              certainty: { type: 'string', required: true, enum: ['CONFIRMED', 'SUSPECTED'] },
+              origin: { type: 'string', required: true, enum: ['INTRODUCED', 'MISSING_SCENARIO', 'EXISTING', 'UNKNOWN'] },
+              evidenceIds: { type: 'array', required: true, items: { type: 'string' } },
+            },
+          },
+        },
         verdict: {
           type: 'string',
-          required: true,
+          ...(config.workflowMode ? {} : { required: true as const }),
           enum: [...VERDICTS],
           description:
             'IMPLEMENTED / PARTIAL require at least one existing-implementation evidence item. NOT_IMPLEMENTED requires complete search coverage; use UNCERTAIN when coverage is incomplete.',
         },
         confidence: {
           type: 'integer',
-          required: true,
+          ...(config.workflowMode ? {} : { required: true as const }),
           description: 'Confidence from 0 to 100.',
         },
-        summary: { type: 'string', required: true, description: 'Short conclusion.' },
-        implementedItems: { type: 'array', required: true, description: 'Implemented findings as single-line points. Use [] if none; do not include numbers, bullets, or line breaks.', items: { type: 'string' } },
-        missingItems: { type: 'array', required: true, description: 'Missing findings as single-line points. Use [] if none; do not include numbers, bullets, or line breaks.', items: { type: 'string' } },
-        riskItems: { type: 'array', required: true, description: 'Risk findings as single-line points. Use [] if none; do not include numbers, bullets, or line breaks.', items: { type: 'string' } },
-        testPointItems: { type: 'array', required: true, description: 'Test suggestions as single-line points. Use [] if none; do not include numbers, bullets, or line breaks.', items: { type: 'string' } },
-        remarkItems: { type: 'array', required: true, description: 'Additional remarks as single-line points. Use [] if none; do not include numbers, bullets, or line breaks.', items: { type: 'string' } },
+        summary: { type: 'string', ...(config.workflowMode ? {} : { required: true as const }), description: 'Short conclusion.' },
+        implementedItems: { type: 'array', ...(config.workflowMode ? {} : { required: true as const }), description: 'Implemented findings as single-line points. Use [] if none; do not include numbers, bullets, or line breaks.', items: { type: 'string' } },
+        missingItems: { type: 'array', ...(config.workflowMode ? {} : { required: true as const }), description: 'Missing findings as single-line points. Use [] if none; do not include numbers, bullets, or line breaks.', items: { type: 'string' } },
+        riskItems: { type: 'array', ...(config.workflowMode ? {} : { required: true as const }), description: 'Risk findings as single-line points. Use [] if none; do not include numbers, bullets, or line breaks.', items: { type: 'string' } },
+        testPointItems: { type: 'array', ...(config.workflowMode ? {} : { required: true as const }), description: 'Test suggestions as single-line points. Use [] if none; do not include numbers, bullets, or line breaks.', items: { type: 'string' } },
+        remarkItems: { type: 'array', ...(config.workflowMode ? {} : { required: true as const }), description: 'Additional remarks as single-line points. Use [] if none; do not include numbers, bullets, or line breaks.', items: { type: 'string' } },
         evidence: {
           type: 'array',
           required: true,
@@ -258,7 +290,7 @@ export function apply(ctx: Context, config: ReviewControlConfig): void {
         render: (_args, value) => [
           {
             type: 'text',
-            text: `Review committed (run ${(value as { runId: string }).runId}). Stop now; the task is complete.`,
+            text: `${(value as { committed: boolean }).committed ? 'Review committed' : 'Phase draft accepted; platform will continue the mandatory workflow'} (run ${(value as { runId: string }).runId}). Stop this phase now.`,
           },
         ],
       },
@@ -318,7 +350,7 @@ export function apply(ctx: Context, config: ReviewControlConfig): void {
         // Committed in the database. Only now may the turn end.
         exec.concludeTurn()
         return {
-          committed: true,
+          committed: !body.stageAccepted,
           runId: body.runId,
           committedAt: body.committedAt,
         }

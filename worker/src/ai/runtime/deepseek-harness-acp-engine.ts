@@ -25,7 +25,7 @@
  *      → 取消 Workflow/Jobs → 回收进程组 → 关 Broker → 清 Workspace → 数据库 fencing。
  */
 
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Logger } from '../../logger.js'
@@ -90,8 +90,10 @@ import {
 import { AGENT_REVIEW_V2_PROMPT_VERSION, buildAgentReviewV2Prompt } from '../prompts/agent-review-v2.js'
 import {
   materializeRequirementAttachments,
+  parseFrozenRequirementAttachments,
   type FrozenRequirementAttachment,
   type MaterializedRequirementAttachment,
+  type RequirementAttachmentFailure,
 } from '../requirements/attachment-materializer.js'
 import type { StoryAttachmentStorage } from '../../linky/attachment-storage.js'
 import {
@@ -114,6 +116,9 @@ import {
 } from '../../monitoring/runtime-event-reporter.js'
 import type { RuntimeEvent } from '../../monitoring/runtime-event-types.js'
 import { AttemptAttributionTracker } from '../../monitoring/runtime-attribution.js'
+import { ReviewWorkflowCoordinator } from '../control/review-workflow-coordinator.js'
+import { buildAcceptancePhasePrompt } from '../prompts/acceptance-review.js'
+import type { RequirementSource, ReviewPhase } from '../review-workflow.js'
 
 /**
  * 平台自有工具的名字。
@@ -195,6 +200,7 @@ export function toResumeCandidate(
 }
 
 export interface DeepSeekHarnessAcpEngineOptions {
+  reviewWorkflow?: boolean
   taskId: string
   agentAttempt: number
   branch: string
@@ -274,6 +280,8 @@ export interface DeepSeekHarnessAcpEngineOptions {
   commitReview(input: CommitReviewInput): Promise<CommitReviewResult>
   /** V4 治理面的数据库钩子。缺省时只在内存中治理（用于单测）。 */
   db?: {
+    beginReviewPhase?(input: { phase: ReviewPhase; round: number; agentId: string; sessionId: string }): Promise<void>
+    saveReviewPhase?(input: { phase: ReviewPhase; round: number; agentId: string; result: unknown }): Promise<void>
     registerAgentNode(identity: AgentIdentity): Promise<string | void>
     markAgentTerminal(
       agentId: string,
@@ -424,6 +432,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
   private materializedRequirementAttachments: MaterializedRequirementAttachment[] = []
   /** 取不到的附件数量，提示词里如实告知。 */
   private missingRequirementAttachments = 0
+  private requirementAttachmentFailures: RequirementAttachmentFailure[] = []
   /**
    * V1.21：`requirements/<story>/需求快照.md` 的 workspace 相对路径。
    *
@@ -488,7 +497,9 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
      */
     // fencing revision。恢复时由数据库推进，否则是本次 attempt claim 时的初值。
     let sessionRevision = this.options.sessionRevision ?? 1
-    const resumeRow = await this.loadResumeRow(log)
+    // Stage records are durable; a new claim restarts investigation safely instead of replaying
+    // a legacy single-session checkpoint as an independently verified report.
+    const resumeRow = this.options.reviewWorkflow ? null : await this.loadResumeRow(log)
     const candidate = resumeRow === null ? null : toResumeCandidate(resumeRow, this.options.agentAttempt)
     /** 派生路径与身份用的 attempt 号：恢复时跟着被恢复的那一次走。 */
     const continuityAttempt = candidate?.sourceAgentAttempt ?? this.options.agentAttempt
@@ -514,6 +525,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       policy,
       rootAgentId: identity.rootAgentId,
       rootSessionId: identity.rootSessionId,
+      reservedPlatformRootSlots: this.options.reviewWorkflow ? 2 : 0,
       persistNode: this.options.db
         ? async (node) => {
             // Agent 注册成功的时刻就是 agent_idle_ms 窗口的起点。用 persistNode 而不是
@@ -554,6 +566,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
     let workspace: AttemptWorkspace | null = null
     let sessionSlot: ReturnType<SessionRegistry['acquire']> | null = null
     let controller: AttemptTreeController | null = null
+    let workflow: ReviewWorkflowCoordinator | undefined
     const socketRoot = mkdtempSync(join(tmpdir(), 'crp-broker-'))
     // Harness 侧的取消入口。abort 它会让 ACP 客户端发 session/cancel，Harness 据此取消当前
     // turn，连带它的 Workflow 步骤、子 Agent 和 Jobs。调度侧的 input.signal 会转发到这里，
@@ -652,6 +665,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         })
         this.materializedRequirementAttachments = outcome.materialized
         this.missingRequirementAttachments = outcome.failures.length
+        this.requirementAttachmentFailures = outcome.failures
       }
       /*
        * 需求快照文件（V1.21）。
@@ -699,6 +713,37 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         payload: { duration_ms: Date.now() - workspaceStartedMs },
         durationMs: Date.now() - workspaceStartedMs,
       })
+
+      if (this.options.reviewWorkflow) {
+        if (policy.agents.maxAgentsPerAttempt < 3) throw Object.assign(new Error('验收点评审与最多一轮补查需要至少 3 个 Agent 名额，请调整任务冻结策略后重新分析。'), { code: 'REVIEW_WORKFLOW_AGENT_LIMIT' })
+        const sources: RequirementSource[] = [
+          { id: 'title', label: '需求标题', text: this.options.story.name },
+          { id: 'details', label: '需求详情', text: this.options.story.description ?? '' },
+          { id: 'acceptance', label: '原始验收标准', text: this.options.story.acceptanceCriteria ?? '' },
+        ].filter((source) => source.text.trim())
+        if (this.requirementSnapshotPath) sources.push({ id: 'requirement-snapshot', label: '冻结需求全量详情', text: readFileSync(join(workspace.cwd, this.requirementSnapshotPath), 'utf8') })
+        for (const attachment of this.materializedRequirementAttachments) {
+          if (attachment.readablePath) sources.push({ id: attachment.readablePath, label: attachment.filename, text: readFileSync(join(workspace.cwd, attachment.readablePath), 'utf8') })
+          if (!attachment.readablePath || attachment.textTruncated) sources.push({
+            id: `input-gap:${attachment.relativePath}`, label: `${attachment.filename}（材料待确认）`, requiresClarification: true,
+            text: `附件 ${attachment.filename} ${attachment.textTruncated ? '文本提取已截断' : '无法提取完整文本（包括图片等非文本附件）'}，其中的验收要求尚未核实，需要人工补充可读材料。`,
+          })
+        }
+        this.requirementAttachmentFailures.forEach((attachment, index) => sources.push({
+          id: `input-gap:missing-${index + 1}`, label: `${attachment.filename}（附件未取得）`, requiresClarification: true,
+          text: `冻结附件 ${attachment.filename} 未取得（${attachment.code}），其中的验收要求尚未核实，需要人工补充材料。`,
+        }))
+        if (!this.options.requirementAttachments?.storage && parseFrozenRequirementAttachments(this.options.analysisScope?.requirement_context).length) sources.push({
+          id: 'input-gap:attachment-storage', label: '冻结附件未读取', requiresClarification: true,
+          text: '本次未提供冻结附件下载通道，附件内容尚未核实，需要补充可读材料后重新分析。',
+        })
+        if (this.options.analysisScope?.requirement_context && !this.requirementSnapshotPath) sources.push({
+          id: 'input-gap:requirement-snapshot', label: '全量需求详情未取得', requiresClarification: true,
+          text: '全量冻结需求快照未能生成，当前仅有字段投影，需确认是否遗漏原始详情中的验收要求。',
+        })
+        if (this.options.db && (!this.options.db.beginReviewPhase || !this.options.db.saveReviewPhase)) throw new Error('REVIEW_WORKFLOW_DB_HOOKS_MISSING')
+        workflow = new ReviewWorkflowCoordinator(sources, this.options.db?.saveReviewPhase)
+      }
 
       const persistCollectedArtifacts = async (): Promise<void> => {
         if (!this.options.db || !workspace) return
@@ -749,6 +794,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         policyHash,
         authority,
         budget,
+        reviewWorkflow: workflow,
         egress,
         workspace,
         analysisScope: this.options.analysisScope,
@@ -833,6 +879,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       }
 
       profile = materializeAttemptProfile({
+        reviewWorkflow: this.options.reviewWorkflow,
         taskId: this.options.taskId,
         // 与 Session / Workspace 同一个 attempt 号：profile hash 覆盖这两个根目录，
         // 跟着新 attempt 走会让恢复门禁必然拒绝。
@@ -1040,7 +1087,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
         // 平台没有 Harness Job 清单可枚举，见 AttemptTreeControllerOptions.jobs 的说明：
         // Job 进程由下面的 reaper 按进程组兜底回收。
         jobs: null,
-        reaper: { reap: () => spawnedChild.reapProcessTree() },
+        reaper: { reap: () => child?.reapProcessTree() ?? spawnedChild.reapProcessTree() },
         // 真正的 DB fencing：把 cancel_requested_at 与 cancel_reason 落到 run 上，之后所有
         // 迟到的工具调用、usage 上报和提交在 RPC 层就被拒。对已提交/已封存的 attempt 是
         // no-op（RPC 只更新 status='RUNNING' and sealed_at is null 的行）。
@@ -1082,6 +1129,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       let checkpointInFlight = false
       let checkpointsWritten = 0
       const writeCheckpoint = async (reason: 'PERIODIC' | 'TURN_END'): Promise<void> => {
+        if (workflow) return
         if (checkpointInFlight) return
         if (liveSessionId === null || sessionSlot === null || !this.options.db) return
         if (broker?.committed() != null) return
@@ -1130,12 +1178,13 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       }
       try {
         emit({ type: 'ACP_TURN_STARTED', payload: {} })
-        turn = await runTurn(
+        const harnessCwd = workspace.cwd
+        const invoke = (process: AcpProcessHandle, tools: string[], prompt: string, resumeId?: string) => runTurn(
           {
-            process: child,
-            cwd: workspace.cwd,
+            process,
+            cwd: harnessCwd,
             // 权限面来自角色策略，不再是固定五个工具。
-            permittedTools: [...rootTools],
+            permittedTools: tools,
             onToolCall: (name) => {
               agentToolCalls[name] = (agentToolCalls[name] ?? 0) + 1
             },
@@ -1158,6 +1207,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
             },
             onSessionCreated: (sessionId) => {
               liveSessionId = sessionId
+              if (workflow) return
               if (checkpointTimer !== null) return
               checkpointTimer = setInterval(() => {
                 void writeCheckpoint('PERIODIC')
@@ -1167,13 +1217,80 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
                 ;(checkpointTimer as { unref: () => void }).unref()
               }
             },
-            resumeSessionId,
+            resumeSessionId: resumeId,
           },
-          this.prompt(rootTools.length),
+          prompt,
           // 用 harnessAbort 而不是 input.signal：controller 的 cancelWorkflows 也要能触发
           // session/cancel，所以取消入口必须是引擎自己持有的那一个。
           harnessAbort.signal,
         )
+        if (!workflow) {
+          turn = await invoke(child, [...rootTools], this.prompt(rootTools.length), resumeSessionId)
+        } else {
+          // The initial profile remains the attempt trust anchor. Each business phase is a new
+          // process/session with its own root credentials; no conversation is inherited.
+          await child.terminate()
+          if ((await child.reapProcessTree()).length) throw new Error('PROCESS_TREE_CLEANUP_FAILED')
+          profile.cleanup()
+          const stageWorkspace = workspace
+          const stageSessionRoot = sessionSlot.sessionRoot
+          let nextPhase: ReviewPhase | null = workflow.phase()
+          while (nextPhase !== null) {
+            input.signal.throwIfAborted()
+            if (!this.options.isLeaseValid()) throw new Error('TASK_LEASE_LOST')
+            const phaseIdentity = nextPhase === 'VERIFY'
+              ? mintRootIdentity(`${this.options.taskId}:verify:${workflow.supplementRounds}`, continuityAttempt)
+              : identity
+            workflow.begin(phaseIdentity.rootAgentId)
+            await this.options.db?.beginReviewPhase?.({
+              phase: nextPhase, round: workflow.supplementRounds,
+              agentId: phaseIdentity.rootAgentId, sessionId: phaseIdentity.rootSessionId,
+            })
+            const credential = nextPhase === 'VERIFY'
+              ? await authority.registerPlatformRoot(phaseIdentity.rootAgentId, phaseIdentity.rootSessionId)
+              : { identity: authority.root, token: authority.rotatePlatformRootToken(identity.rootAgentId) }
+            profile = materializeAttemptProfile({
+              taskId: this.options.taskId, agentAttempt: pathAttempt,
+              attemptsRoot: join(this.options.attemptsRoot, 'review-stages', workflow.phaseKey),
+              route: this.options.route, policy, identity: phaseIdentity,
+              broker: { socketPath: broker.socketPath, requestTimeoutMs: this.options.route.requestTimeoutMs },
+              cwd: stageWorkspace.cwd, sessionRoot: join(stageSessionRoot, workflow.phaseKey),
+              repositories: this.options.snapshots.pins().map((pin) => pin.repository),
+              skills: { catalogHash: skillCatalogHash, bundles: this.options.skills?.bundles ?? [] },
+              analysisScopeHash: this.options.analysisScopeIdentity,
+              reviewWorkflow: true,
+              rootToolsOverride: nextPhase === 'EXTRACT' ? ['submit_review_result'] : undefined,
+            })
+            child = startProcess({
+              dshHome: profile.dshHome, profileName: profile.profileName, patchPath: profile.patchPath,
+              cwd: stageWorkspace.cwd, apiKeyEnvVar: this.options.route.apiKeyEnvVar, apiKey: this.options.apiKey,
+              brokerToken: broker.token, rootCapability: credential.token,
+              extraEnv: { ...stageWorkspace.shellSpec().env, ...(this.options.modelProxyEnv ?? {}) },
+              ulimits: stageWorkspace.shellSpec().limits,
+            })
+            log.info('review_workflow_phase_started', { event: 'review_workflow_phase_started', phase: nextPhase, supplement_round: workflow.supplementRounds, agent_id: phaseIdentity.rootAgentId })
+            turn = await invoke(child, [...profile.rootTools], buildAcceptancePhasePrompt(this.prompt(profile.rootTools.length), workflow))
+            if (!workflow.submitted) throw Object.assign(new Error(`phase ${nextPhase} ended without a validated submission: ${turn.promptError ?? turn.stopReason}`), { code: 'REVIEW_PHASE_NO_SUBMISSION' })
+            await broker.flushAudit()
+            await child.terminate()
+            if ((await child.reapProcessTree()).length) throw new Error('PROCESS_TREE_CLEANUP_FAILED')
+            // Retire this phase's children and secret before the next root receives credentials.
+            for (const node of authority.all()) {
+              let ancestor = authority.get(node.agentId)
+              while (ancestor && ancestor.agentId !== phaseIdentity.rootAgentId) ancestor = ancestor.parentAgentId ? authority.get(ancestor.parentAgentId) : undefined
+              if (!ancestor) continue
+              authority.revoke(node.agentId)
+              if (node.agentId !== identity.rootAgentId && authority.finish(node.agentId, 'FINISHED')) {
+                await this.options.db?.markAgentTerminal(node.agentId, 'FINISHED')
+              }
+            }
+            profile.cleanup()
+            log.info('review_workflow_phase_finished', { event: 'review_workflow_phase_finished', phase: nextPhase, supplement_round: workflow.supplementRounds })
+            nextPhase = workflow.advance()
+          }
+          await broker.finalizeWorkflow()
+        }
+
       } finally {
         input.signal.removeEventListener('abort', revokeOnAbort)
         if (checkpointTimer !== null) {
@@ -1183,6 +1300,7 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       }
 
       const committed = broker.committed()
+      if (!turn) throw new Error('REVIEW_PHASE_NO_TURN')
 
       // 提交路径已在 commitReview wrapper 中、claim 仍有效时登记 Artifact；未提交路径
       // 仍在 turn 结束后扫描，保留失败 attempt 产生的补丁和构建日志。

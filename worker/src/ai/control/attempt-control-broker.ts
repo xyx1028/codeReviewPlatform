@@ -203,6 +203,17 @@ export interface PermissionDecisionEntry {
 }
 
 export interface AttemptControlBrokerOptions {
+  /** Platform-controlled stages capture drafts; only finalizeWorkflow can publish them. */
+  reviewWorkflow?: {
+    phase(): 'EXTRACT' | 'INVESTIGATE' | 'VERIFY'
+    activeRootId(): string
+    capture(raw: Record<string, unknown>, context: {
+      identity: AgentIdentity
+      phaseEvidenceIds: Set<string>
+      verify(submission: ReviewSubmission): ReturnType<typeof verifyReviewSubmission>
+    }): Promise<unknown>
+    finalSubmission(): ReviewSubmission
+  }
   taskId: string
   agentAttempt: number
   /**
@@ -319,6 +330,7 @@ export interface AttemptControlHandle {
   token: string
   usage(): BrokerUsageSnapshot
   committed(): CommitReviewResult | null
+  finalizeWorkflow(): Promise<CommitReviewResult>
   /**
    * Record the resolved profile hash once the attempt's profile exists. The
    * broker must be listening before the profile is materialized (the profile
@@ -372,6 +384,7 @@ export function startAttemptControlBroker(
   const contract = loadCapabilityContract()
   const evidenceLedger = new EvidenceLedger(options.taskId, options.agentAttempt)
   const coverageLedger = new SearchCoverageLedger()
+  const phaseCoverage = new Map<string, SearchCoverageLedger>()
 
   mkdirSync(options.socketRoot, { recursive: true, mode: 0o700 })
   chmodSync(options.socketRoot, 0o700)
@@ -670,7 +683,7 @@ export function startAttemptControlBroker(
     try {
       switch (route) {
         case '/attempt/search-code':
-          responsePayload = await searchCode(body)
+          responsePayload = await searchCode(body, identity)
           break
         case '/attempt/find-files':
           responsePayload = await findFiles(body)
@@ -877,7 +890,7 @@ export function startAttemptControlBroker(
     return allowed
   }
 
-  async function searchCode(body: Record<string, unknown>): Promise<unknown> {
+  async function searchCode(body: Record<string, unknown>, identity: AgentIdentity): Promise<unknown> {
     const repository = String(body.repository ?? '')
     const allowedPaths = assertSnapshotScope(repository)
     const result = await options.snapshots.search({
@@ -887,13 +900,21 @@ export function startAttemptControlBroker(
       maxResults: typeof body.maxResults === 'number' ? body.maxResults : undefined,
       allowedPaths,
     })
-    coverageLedger.record({
+    const entry = {
       repository: repository as RepositoryName,
       query: String(body.query ?? ''),
       pathGlob: typeof body.pathGlob === 'string' ? body.pathGlob : undefined,
       hits: result.hits.length,
       truncated: result.truncated,
-    })
+    }
+    coverageLedger.record(entry)
+    if (options.reviewWorkflow) {
+      let root = identity
+      while (root.parentAgentId) root = options.authority.get(root.parentAgentId)!
+      const ledger = phaseCoverage.get(root.agentId) ?? new SearchCoverageLedger()
+      ledger.record(entry)
+      phaseCoverage.set(root.agentId, ledger)
+    }
     return result
   }
 
@@ -1270,6 +1291,12 @@ export function startAttemptControlBroker(
     const raw = String(body.status ?? 'FINISHED')
     const status: 'FINISHED' | 'FAILED' | 'CANCELLED' =
       raw === 'FAILED' || raw === 'CANCELLED' ? raw : 'FINISHED'
+    // The anchor owns the database attempt until the platform publishes the independently
+    // verified result. A completed business phase must not settle that attempt early.
+    if (options.reviewWorkflow && !committed && status === 'FINISHED' &&
+        identity.agentId === options.authority.root.agentId) {
+      return { accepted: true, status: 'FINISHED', stageOnly: true }
+    }
     // 一个 Agent 只能给自己收尾。让别人代为收尾就等于给了它一个取消同级 Agent 的原语。
     options.authority.finish(identity.agentId, status)
     options.authority.revoke(identity.agentId)
@@ -1705,6 +1732,7 @@ export function startAttemptControlBroker(
   async function submitReview(
     body: Record<string, unknown>,
     identity: AgentIdentity,
+    platformFinal = false,
   ): Promise<unknown> {
     if (committed) {
       // Idempotent: a retried submission must not create a second result.
@@ -1716,6 +1744,28 @@ export function startAttemptControlBroker(
         V4_ERROR_CODES.SUBMIT_ROOT_ONLY,
         'only the root reviewer may submit; return your findings to your parent instead',
       )
+    }
+
+    if (options.reviewWorkflow && !platformFinal) {
+      if (identity.agentId !== options.reviewWorkflow.activeRootId()) {
+        throw new Error('REVIEW_PHASE_IDENTITY_MISMATCH: only the active platform phase may submit')
+      }
+      const phaseEvidenceIds = new Set<string>()
+      for (const [evidenceId, producer] of evidenceProducer) {
+        let node = options.authority.get(producer.agentId)
+        while (node) {
+          if (node.agentId === identity.agentId) { phaseEvidenceIds.add(evidenceId); break }
+          node = node.parentAgentId ? options.authority.get(node.parentAgentId) : undefined
+        }
+      }
+      return options.reviewWorkflow.capture(body.submission as Record<string, unknown>, {
+        identity, phaseEvidenceIds,
+        verify: async (submission) => {
+          await completeCommitTriage()
+          if (!triageComplete) return { ok: false, code: 'TRIAGE_INCOMPLETE', reason: 'database triage completion is required' }
+          return verifyReviewSubmission({ submission, evidenceLedger, coverageLedger: phaseCoverage.get(identity.agentId) ?? new SearchCoverageLedger(), snapshots: options.snapshots, coveragePolicy: options.coveragePolicy })
+        },
+      })
     }
 
     const submission = body.submission as ReviewSubmission | undefined
@@ -1826,6 +1876,12 @@ export function startAttemptControlBroker(
         token,
         usage,
         committed: () => committed,
+        finalizeWorkflow: async () => {
+          if (!options.reviewWorkflow) throw new Error('REVIEW_WORKFLOW_MISSING')
+          const result = await submitReview({ submission: options.reviewWorkflow.finalSubmission() }, options.authority.root, true) as { accepted: boolean; code?: string; reason?: string }
+          if (!result.accepted || !committed) throw new Error(result.reason ?? result.code ?? 'REVIEW_WORKFLOW_COMMIT_REJECTED')
+          return committed
+        },
         setConfigHash: (hash: string) => {
           configHash = hash
         },

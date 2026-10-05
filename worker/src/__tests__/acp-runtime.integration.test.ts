@@ -550,6 +550,64 @@ async function buildSnapshotRepo(): Promise<{ gitDir: string; commitSha: string 
 
 const EVIDENCE_ID_PATTERN = /ev_[0-9a-f-]{36}/
 
+describe.skipIf(!ENABLED)('V1.43 platform phases (real dsh process and pinned snapshot)', () => {
+  it('extracts criteria, investigates, then independently rereads before a single final commit', async () => {
+    const { gitDir, commitSha } = await buildSnapshotRepo()
+    const attemptsRoot = mkdtempSync(join(tmpdir(), 'acp-v143-attempt-'))
+    const sessionRoot = mkdtempSync(join(tmpdir(), 'acp-v143-session-'))
+    const repository = 'kdmanage-backend'
+    const criteria = [{ id: 'C1', description: '实现下单接口', needsClarification: false, sources: [{ sourceId: 'details', quote: '实现 createOrder 下单接口' }] }]
+    const ids: string[] = []
+    const submit = (body: string) => {
+      const id = [...body.matchAll(/ev_[0-9a-f-]{36}/g)].at(-1)?.[0]
+      if (!id) throw new Error('phase did not receive snapshot evidence')
+      ids.push(id)
+      return { name: 'submit_review_result', args: {
+        criterionReviews: [{ criterionId: 'C1', verdict: 'IMPLEMENTED', reason: '下单入口存在', evidenceIds: [id] }], reviewRisks: [],
+        evidence: [{ evidenceId: id, repository, filePath: 'src/OrderService.java', startLine: 3, endLine: 6, evidenceType: '现有实现', evidenceSummary: '订单服务下单入口实现证据', description: 'createOrder 入口' }],
+      } }
+    }
+    const read = { name: 'read_snapshot_code', args: { repository, path: 'src/OrderService.java', startLine: 1, endLine: 20 } }
+    const model = await startMockModelServer([
+      { name: 'submit_review_result', args: { acceptancePoints: criteria, evidence: [] } },
+      read, submit, read, submit,
+    ])
+    const events: Record<string, unknown>[] = []
+    const log = new Logger({ sink: (line) => events.push(JSON.parse(line)), minLevel: 'info' })
+    const commits: CommitReviewInput[] = []
+    const engine = new DeepSeekHarnessAcpEngine({
+      reviewWorkflow: true, taskId: 'v143-real-task', agentAttempt: 1, branch: 'feature_dev',
+      story: { code: 'PRJ-001', name: '下单接口', description: '实现 createOrder 下单接口。', acceptanceCriteria: '可以创建订单。' },
+      snapshots: new SnapshotStore([{ name: repository, commitSha, gitDir }]),
+      route: { providerId: 'review-route', displayName: 'V143 test', baseUrl: model.baseUrl, modelName: 'poc-model', contextWindow: 131072, maxTokens: 4096, apiKeyEnvVar: 'REVIEW_MODEL_API_KEY', requestTimeoutMs: 60000 },
+      policy: V4_DEFAULT_POLICY, coveragePolicy: { requiredRepositories: [repository], minQueriesPerRepository: 0 },
+      apiKey: 'v143-not-a-real-key', attemptsRoot, sessionRoot, workerId: 'v143-test-worker', infrastructure: {}, forbiddenRoots: [], logger: log,
+      isLeaseValid: () => true,
+      commitReview: async (input) => { commits.push(input); return { runId: 'v143-final', committedAt: new Date().toISOString() } },
+    })
+    try {
+      const result = await engine.runReview({ signal: new AbortController().signal, logger: log })
+      expect(result.ok, `${result.errorCode}: ${result.errorMessage}`).toBe(true)
+      expect(commits).toHaveLength(1)
+      expect(ids).toHaveLength(2)
+      expect(ids[0]).not.toBe(ids[1])
+      expect(commits[0].submission.acceptanceReview?.criteria).toEqual(criteria)
+      expect(commits[0].submission.acceptanceReview?.findings[0].evidenceIds).toEqual([ids[1]])
+      expect(commits[0].evidence[0].commitSha).toBe(commitSha)
+      const phases = events.filter((entry) => entry.event === 'review_workflow_phase_started')
+      expect(phases.map((entry) => entry.phase)).toEqual(['EXTRACT', 'INVESTIGATE', 'VERIFY'])
+      expect(phases[1].agent_id).not.toBe(phases[2].agent_id)
+      expect(commits[0].submission.acceptanceReview?.verification.verificationAgentId).toBe(phases[2].agent_id)
+      expect(model.requestCount()).toBe(5)
+    } finally {
+      await model.close()
+      rmSync(gitDir, { recursive: true, force: true })
+      rmSync(attemptsRoot, { recursive: true, force: true })
+      rmSync(sessionRoot, { recursive: true, force: true })
+    }
+  }, 180000)
+})
+
 describe.skipIf(!ENABLED)('resolved tool inventory contract (real dsh process)', () => {
   it(
     'offers the model exactly the tool surface the V4 contract prescribes for the root',
