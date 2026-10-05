@@ -9,12 +9,19 @@
 .acceptance-details summary { cursor: pointer; color: #4f4fd4; line-height: 1.6; }
 .acceptance-details summary:focus-visible { outline: 2px solid #5c5cff; outline-offset: 4px; }
 .acceptance-details blockquote { margin: 12px 0; padding: 8px 12px; border-left: 3px solid #d5d9e4; background: #f7f8fc; white-space: pre-wrap; }
+.acceptance-evidence-row td { padding: 0 12px 18px; border-bottom: 1px solid #e5e9f2; }
+.acceptance-evidence-row .acceptance-details { margin: 0; border: 1px solid #e5e9f2; border-radius: 8px; background: #fbfcff; }
+.acceptance-evidence-row .acceptance-details summary { padding: 12px 14px; font-weight: 600; }
+.acceptance-evidence-row .acceptance-details[open] summary { border-bottom: 1px solid #e5e9f2; background: #f3f5ff; }
+.acceptance-details-content { padding: 2px 14px 14px; }
 .acceptance-disagreement { background: #fff8e8; padding: 10px 12px; margin-top: 12px; border-left: 3px solid #d89d24; line-height: 1.7; }
 .acceptance-disagreement p { margin: 0; }
 .acceptance-disagreement p + p { margin-top: 8px; }
 .acceptance-evidence-list { list-style: none; padding: 0; margin: 12px 0 0; }
-.acceptance-evidence-list li { padding: 10px 0; border-top: 1px solid #e5e9f2; }
+.acceptance-evidence-list li { padding: 12px 0; border-top: 1px solid #e5e9f2; }
+.acceptance-evidence-list li:first-child { border-top: 0; }
 .acceptance-evidence-location, .acceptance-evidence-commit { color: #667085; overflow-wrap: anywhere; font-size: 12px; }
+.acceptance-evidence-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; border-top: 1px solid #e5e9f2; }
 .acceptance-risks { margin-top: 28px; }
 .acceptance-risks h3 { margin: 0 0 12px; font-size: 16px; }
 .acceptance-risk { padding: 16px 0; border-top: 1px solid #e5e9f2; line-height: 1.7; }
@@ -26,6 +33,12 @@
   .acceptance-table tr { padding: 12px 0; border-top: 1px solid #e5e9f2; }
   .acceptance-table td { border: 0; padding: 6px 0; }
   .acceptance-table td::before { content: attr(data-label); display: block; color: #667085; font-size: 12px; margin-bottom: 4px; }
+  .acceptance-evidence-row { padding-top: 0 !important; }
+  .acceptance-evidence-row td { padding: 0; }
+  .acceptance-evidence-row td::before { display: none; }
+  .acceptance-evidence-row .acceptance-details { margin-top: 2px; }
+  .acceptance-details-content { padding: 2px 12px 12px; }
+  .acceptance-evidence-pagination { align-items: flex-start; flex-direction: column; }
   .acceptance-point-id { display: inline; margin-right: 8px; }
   .acceptance-risk .ant-tag { margin-bottom: 6px; }
 }

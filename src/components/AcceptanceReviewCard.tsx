@@ -1,24 +1,42 @@
-import { Alert, Card, Empty, Tag, Typography } from 'antd'
+import { Fragment, useState } from 'react'
+import { Alert, Card, Empty, Pagination, Tag, Typography } from 'antd'
 import type { AiCodeEvidence, AiReviewResult, AiVerdict } from '../types'
 import { aiVerdictLabels } from '../lib/labels'
 import './AcceptanceReviewCard.css'
 
 const { Text } = Typography
+const evidencePageSize = 2
 const tones: Record<AiVerdict, string> = { IMPLEMENTED: 'success', PARTIAL: 'warning', NOT_IMPLEMENTED: 'error', UNCERTAIN: 'default' }
 const origins = { INTRODUCED: '本次引入', MISSING_SCENARIO: '遗漏场景', EXISTING: '已有隐患', UNKNOWN: '归因待确认' }
 
 function EvidenceDetails({ ids, evidence }: { ids: string[]; evidence: AiCodeEvidence[] }) {
+  const evidenceIdentity = ids.join('|')
+  const [pagination, setPagination] = useState({ evidenceIdentity, currentPage: 1 })
+  const evidenceEntries = ids.map((id) => ({ id, item: evidence.find((entry) => entry.evidence_id === id) }))
+  const totalPages = Math.max(1, Math.ceil(evidenceEntries.length / evidencePageSize))
+  const page = Math.min(pagination.evidenceIdentity === evidenceIdentity ? pagination.currentPage : 1, totalPages)
+  const start = (page - 1) * evidencePageSize
+  const visibleEntries = evidenceEntries.slice(start, start + evidencePageSize)
+
   if (!ids.length) return <Text type="secondary">暂无可引用代码证据</Text>
-  return <ul className="acceptance-evidence-list">{ids.map((id) => {
-    const item = evidence.find((entry) => entry.evidence_id === id)
-    if (!item) return <li key={id}><Text type="warning">该证据未加载，需进一步确认</Text></li>
-    return <li key={id}>
-      <Text strong>{item.evidence_summary || item.description}</Text>
-      <div className="acceptance-evidence-location">{item.repository_name} / {item.file_path}{item.start_line ? `：${item.start_line}${item.end_line && item.end_line !== item.start_line ? `–${item.end_line}` : ''} 行` : ''}</div>
-      {item.commit_sha ? <div className="acceptance-evidence-commit">代码版本：{item.commit_sha}</div> : null}
-      {item.evidence_summary ? <div>{item.description}</div> : null}
-    </li>
-  })}</ul>
+
+  return <>
+    <ul className="acceptance-evidence-list" aria-label="代码证据">
+      {visibleEntries.map(({ id, item }) => {
+        if (!item) return <li key={id}><Text type="warning">该证据未加载，需进一步确认</Text></li>
+        return <li key={id}>
+          <Text strong>{item.evidence_summary || item.description}</Text>
+          <div className="acceptance-evidence-location">{item.repository_name} / {item.file_path}{item.start_line ? `：${item.start_line}${item.end_line && item.end_line !== item.start_line ? `–${item.end_line}` : ''} 行` : ''}</div>
+          {item.commit_sha ? <div className="acceptance-evidence-commit">代码版本：{item.commit_sha}</div> : null}
+          {item.evidence_summary ? <div>{item.description}</div> : null}
+        </li>
+      })}
+    </ul>
+    {evidenceEntries.length > evidencePageSize ? <div className="acceptance-evidence-pagination">
+      <Text type="secondary">显示 {start + 1}–{Math.min(start + evidencePageSize, evidenceEntries.length)} / {evidenceEntries.length} 条</Text>
+      <Pagination current={page} pageSize={evidencePageSize} size="small" showSizeChanger={false} total={evidenceEntries.length} onChange={(nextPage) => setPagination({ evidenceIdentity, currentPage: nextPage })} />
+    </div> : null}
+  </>
 }
 
 export function AcceptanceReviewCard({ result, evidence }: { result: AiReviewResult | null; evidence: AiCodeEvidence[] }) {
@@ -41,21 +59,29 @@ export function AcceptanceReviewCard({ result, evidence }: { result: AiReviewRes
       <thead><tr><th scope="col">验收点</th><th scope="col">评审结论</th><th scope="col">依据</th></tr></thead>
       <tbody>{report.criteria.map((point) => {
         const finding = report.findings.find((entry) => entry.criterionId === point.id)
-        return <tr key={point.id}>
-          <td data-label="验收点"><span className="acceptance-point-id">{point.id}</span>{point.description}{point.needsClarification ? <div><Tag>需求待澄清</Tag></div> : null}</td>
-          <td data-label="评审结论"><Tag color={tones[finding?.verdict ?? 'UNCERTAIN']}>{aiVerdictLabels[finding?.verdict ?? 'UNCERTAIN']}</Tag></td>
-          <td data-label="依据">
-            <div>{finding?.reason || '该验收点缺少结论，需进一步确认。'}</div>
-            {finding?.disagreement ? <div className="acceptance-disagreement">
-              <p><strong>调查：</strong>{aiVerdictLabels[finding.disagreement.investigationVerdict]}。{finding.disagreement.investigationReason}</p>
-              <p><strong>复核：</strong>{aiVerdictLabels[finding.disagreement.reviewVerdict]}。{finding.disagreement.reviewReason}</p>
-            </div> : null}
-            <details className="acceptance-details"><summary>查看需求出处与代码证据{finding?.evidenceIds.length ? `（${finding.evidenceIds.length}）` : ''}</summary>
-              {point.sources.map((source, index) => <blockquote key={`${source.sourceId}-${index}`}><Text type="secondary">{report.sources.find((entry) => entry.id === source.sourceId)?.label || source.sourceId}</Text><div>{source.quote}</div></blockquote>)}
-              <EvidenceDetails ids={finding?.evidenceIds ?? []} evidence={evidence} />
-            </details>
-          </td>
-        </tr>
+        return <Fragment key={point.id}>
+          <tr>
+            <td data-label="验收点"><span className="acceptance-point-id">{point.id}</span>{point.description}{point.needsClarification ? <div><Tag>需求待澄清</Tag></div> : null}</td>
+            <td data-label="评审结论"><Tag color={tones[finding?.verdict ?? 'UNCERTAIN']}>{aiVerdictLabels[finding?.verdict ?? 'UNCERTAIN']}</Tag></td>
+            <td data-label="依据">
+              <div>{finding?.reason || '该验收点缺少结论，需进一步确认。'}</div>
+              {finding?.disagreement ? <div className="acceptance-disagreement">
+                <p><strong>调查：</strong>{aiVerdictLabels[finding.disagreement.investigationVerdict]}。{finding.disagreement.investigationReason}</p>
+                <p><strong>复核：</strong>{aiVerdictLabels[finding.disagreement.reviewVerdict]}。{finding.disagreement.reviewReason}</p>
+              </div> : null}
+            </td>
+          </tr>
+          <tr className="acceptance-evidence-row">
+            <td colSpan={3}>
+              <details className="acceptance-details"><summary>查看需求出处与代码证据{finding?.evidenceIds.length ? `（${finding.evidenceIds.length}）` : ''}</summary>
+                <div className="acceptance-details-content">
+                  {point.sources.map((source, index) => <blockquote key={`${source.sourceId}-${index}`}><Text type="secondary">{report.sources.find((entry) => entry.id === source.sourceId)?.label || source.sourceId}</Text><div>{source.quote}</div></blockquote>)}
+                  <EvidenceDetails ids={finding?.evidenceIds ?? []} evidence={evidence} />
+                </div>
+              </details>
+            </td>
+          </tr>
+        </Fragment>
       })}</tbody>
     </table>
     <section className="acceptance-risks" aria-label="风险项">
