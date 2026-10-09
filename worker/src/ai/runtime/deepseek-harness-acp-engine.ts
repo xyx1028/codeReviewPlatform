@@ -83,11 +83,9 @@ import type { SnapshotStore } from '../snapshot/snapshot-store.js'
 import type { CoveragePolicy } from '../snapshot/search-coverage-ledger.js'
 import {
   AGENT_REVIEW_PROMPT_VERSION,
-  AGENT_REVIEW_SYSTEM_PROMPT,
   buildAgentReviewPrompt,
   type AgentReviewStory,
-} from '../prompts/agent-review-v1.js'
-import { AGENT_REVIEW_V2_PROMPT_VERSION, buildAgentReviewV2Prompt } from '../prompts/agent-review-v2.js'
+} from '../prompts/agent-review.js'
 import {
   materializeRequirementAttachments,
   parseFrozenRequirementAttachments,
@@ -1708,14 +1706,19 @@ export class DeepSeekHarnessAcpEngine implements ReviewRunner {
       maxDelegationDepth: this.options.policy.agents.maxDelegationDepth,
       toolCount: rootToolCount,
     }
-    if (this.options.analysisScope) {
-      return buildAgentReviewV2Prompt({ ...base, scope: this.options.analysisScope })
+    if (this.options.analysisScope === undefined) {
+      // 提示词只有 V2 一种形态，scope 是它的必需输入；没有 scope 的任务是老 V1 存量，
+      // 明确失败而不是悄悄降级出一份口径不同的提示词。
+      throw new ReviewExecutionError(
+        'analysisScope is required to build the review prompt',
+        'ANALYSIS_SCOPE_REQUIRED',
+      )
     }
-    return `${AGENT_REVIEW_SYSTEM_PROMPT}\n\n---\n\n${buildAgentReviewPrompt(base)}`
+    return buildAgentReviewPrompt({ ...base, scope: this.options.analysisScope })
   }
 
   private promptVersion(): string {
-    return this.options.analysisScope ? AGENT_REVIEW_V2_PROMPT_VERSION : AGENT_REVIEW_PROMPT_VERSION
+    return AGENT_REVIEW_PROMPT_VERSION
   }
 
   private usage(broker: AttemptControlHandle): ReviewUsage {

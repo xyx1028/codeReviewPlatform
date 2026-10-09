@@ -144,6 +144,7 @@ function buildConfig(root: string): WorkerConfig {
     workerId: 'worker-drain-test',
     workspaceRoot: root,
     codeCacheRoot: join(root, 'cache'),
+    codeCacheMaxBytes: 1024 * 1024 * 1024,
     pollIntervalMs: 500,
     storyTaskLeaseSeconds: 900,
     heartbeatIntervalMs: 30000,

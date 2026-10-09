@@ -551,6 +551,7 @@ Session 卷为什么必须持久：Session JSONL 是 Worker 重启后重放、�
 | Session JSONL | `session.retentionDays`（默认 7 天） | `session-retention` 周期扫描 | 卷用量 > 80% `AGENT_SESSION_VOLUME_MAX_BYTES` 预警；> 100% 记 `session_volume_over_capacity` 并按最旧优先回收 |
 | Workspace / attempt 临时树 | attempt 结束即删；孤儿 > `ORPHAN_WORKSPACE_MAX_AGE_MS`（默认 6h） | `overlay-cleaner` / 周期清理 | 卷所在磁盘 > 85% 告警 |
 | Artifact（Patch/报告） | `analysis_artifact.retention_until`（随 checkpoint 保留期） | 保留期到期后随记录清理 | 同 Session 卷磁盘告警 |
+| 代码快照缓存 `worker-cache`（`<repo>/<sha>` 与 `<repo>/.v111-history/<sha>`） | 无固定期限；超过 `CODE_CACHE_MAX_BYTES`（默认 20 GiB）按最后使用时间从旧到新回收 | 每个 Story Task 领到任务、**fetch 之前**回收一次 | 记 `code_cache_over_capacity` 即表示回收后仍超限（剩下的全在保护窗口内），此时卷会继续涨，必须扩容或降并发 |
 
 正常回收路径的成功事件：`session_retention_completed`、`overlay_cleanup_completed`。失败事件：
 `session_retention_scan_failed`、`session_retention_delete_failed`、`workspace_cleanup_failed`、
@@ -559,6 +560,45 @@ Session 卷为什么必须持久：Session JSONL 是 Worker 重启后重放、�
 
 宿主机侧：Session 卷所在磁盘必须启用静态加密；卷目录保持 0700 且属于容器内非 root
 `worker` 用户（镜像已预置，空卷首次挂载即继承该权限）。
+
+### 15.2b 代码快照缓存的容量回收
+
+`worker-cache`（`CODE_CACHE_ROOT`，默认 `/workspace/cache`）是**全部副本共享**的命名卷，
+里面有两类目录，都参与同一份 LRU 回收，都可以无损重新 fetch：
+
+```text
+<repo>/<commit-sha>/            attempt 直接读取的固定快照（depth-1 检出）
+<repo>/.v111-history/<head>/    V1.11 提交历史用的裸仓库，一个 Job head 一个
+```
+
+**为什么不能只按 LRU 删。** `SnapshotStore` 在整个 attempt 期间直接对快照目录执行 git
+命令，`/ask` 的问答轮次还会把它 symlink 进轮次工作目录。删掉一个正在被读的目录**不会**
+得到一个干净的报错 —— 路径探测会把失败当成"文件不存在"，模型看到一个空仓库，可能据此
+判定"未实现"。所以回收有两层保护：
+
+| 保护 | 覆盖 | 失效条件 |
+|---|---|---|
+| `keep` | 本次任务的 `<repo>/<sha>` | 只知道本进程本次任务 |
+| 在用标记（目录 mtime/atime） | 所有副本、所有使用方 | 最后一次标记超过保护窗口 |
+
+保护窗口 = `max(STORY_TASK_LEASE_SECONDS, CODE_QA_TURN_TIMEOUT_MS, 15 分钟)`。Story
+attempt **每个心跳**刷新一次标记，所以在用期间永远落在窗口内；问答轮次只在准备时标记一次，
+窗口因此必须盖住它的硬超时。崩掉的 Worker 留下的目录会在一个窗口后自然变成可回收。
+
+| 日志事件 | 含义 | 处置 |
+|---|---|---|
+| `code_cache_reclaimed` | 回收成功，带 `removed` / `bytes` / `skipped_in_use` / `total_bytes` | 正常事件。`skipped_in_use` 持续偏高说明并发在用量接近上限 |
+| `code_cache_over_capacity` | 回收**后仍然超限**，剩下的全在保护窗口内 | 不是回收 bug。卷会继续涨到满，必须上调 `CODE_CACHE_MAX_BYTES`、扩卷，或降低 `WORKER_STORY_CONCURRENCY` |
+
+排查卷用量时按目录分别看，别只看快照：
+
+```bash
+docker run --rm -v codereviewplatform_worker-cache:/c alpine \
+  sh -c 'du -sh /c/*; echo ---; du -sh /c/*/.v111-history 2>/dev/null'
+```
+
+**不要手工 `rm -rf` 缓存目录。** 发布后的快照是只读树（0o555/0o444），`rm` 会在只读子目录
+上失败，而失败是静默的；回收路径会先放宽权限再删。如果确实要手工清，先确认没有在途任务。
 
 ## 15.3 RPM / TPM / 模型费用告警
 
@@ -786,6 +826,7 @@ Session 日志由 `dsh-session-persistence-jsonl` 写在持久卷上，布局是
 | `EVIDENCE_ORIGIN_INVALID` | Artifact 被错误用于证明现有实现 | 可自纠 | 仅 `PINNED_SNAPSHOT` 可证明代码已存在，Artifact 只能支撑建议 |
 | `ATTEMPT_ALREADY_SEALED` | Attempt 已提交或终止 | 终止 | 拒绝迟到写入，属预期 fencing |
 | `PROCESS_TREE_CLEANUP_FAILED` | 后代进程未完全回收 | 终止 | 见 15.4；确认 `procps` 可用、无残留构建/测试进程 |
+| `ANALYSIS_SCOPE_REQUIRED` | 任务没有冻结的 `analysis_scope`（`analysis_context_version` 不是 2） | 终止 | 存量 v1 Job。提示词只剩 V2 一种形态，这类任务没有合法执行形态。在 `factory.ts` 读取模型凭据、下载技能、spawn dsh **之前**拒绝，所以没有成本浪费。处置：确认该 Job 是老批次后让它终态失败，重新发起一次新批次；**不要**为了跑通它去放宽这个判定 |
 
 ## 15.9 V4 扩缩容与滚动重启
 

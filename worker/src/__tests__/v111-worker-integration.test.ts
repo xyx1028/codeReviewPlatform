@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { computeConfigHash, resolveProfileTemplateDir } from '../ai/acp/profile-materializer.js'
-import { buildAgentReviewV2Prompt } from '../ai/prompts/agent-review-v2.js'
+import { buildAgentReviewPrompt } from '../ai/prompts/agent-review.js'
 import { buildScopedStoryDescription } from '../ai/runtime/factory.js'
 import type { WorkerConfig } from '../config.js'
 import type { JobsDb, PreparationClaim } from '../db/jobs.js'
@@ -41,6 +41,7 @@ function config(root: string): WorkerConfig {
     workerId: 'worker-v111',
     workspaceRoot: join(root, 'jobs'),
     codeCacheRoot: join(root, 'cache'),
+    codeCacheMaxBytes: 1024 * 1024 * 1024,
     pollIntervalMs: 1000,
     storyTaskLeaseSeconds: 900,
     heartbeatIntervalMs: 30000,
@@ -408,7 +409,7 @@ describe('agent-review-v2 context', () => {
     const description = buildScopedStoryDescription(task, {
       requirement_context: { detailed_description: 'controlled detail', ignored: 'must-not-leak' },
     })
-    const prompt = buildAgentReviewV2Prompt({
+    const prompt = buildAgentReviewPrompt({
       story: { code: 'PRJ-001', name: 'Demo story', description },
       branch: 'feature_dev',
       pins: [{ repository: 'kdmanage-backend', commitSha: 'a'.repeat(40) }],

@@ -18,8 +18,7 @@ import {
   loadCapabilityContract,
   V4_POLICY_VERSION,
 } from './ai/policy/v4-capability-policy.js'
-import { AGENT_REVIEW_PROMPT_VERSION } from './ai/prompts/agent-review-v1.js'
-import { AGENT_REVIEW_V2_PROMPT_VERSION } from './ai/prompts/agent-review-v2.js'
+import { AGENT_REVIEW_PROMPT_VERSION } from './ai/prompts/agent-review.js'
 import type { ReviewRunner } from './ai/runtime/contracts.js'
 import { buildDeepSeekHarnessReview } from './ai/runtime/factory.js'
 import { enforceSessionRetention } from './ai/session/session-retention.js'
@@ -60,7 +59,10 @@ import {
 } from './db/jobs.js'
 import { GitLabReadonlyClient, GitLabReadonlyError } from './git/gitlab-readonly-client.js'
 import {
+  DEFAULT_IN_USE_GRACE_MS,
+  markCacheEntryInUse,
   prepareRepositoryAtSnapshot,
+  reclaimRepoCache,
   type PreparedRepository,
 } from './git/prepare.js'
 import type { BranchName, RepositoryName } from './git/repositories.js'
@@ -138,6 +140,45 @@ export async function prepareTaskRepositories(
   const startedMs = Date.now()
   // 本地准备完成不含绝对路径：payload 只有耗时。
   runtimeEvents?.report({ type: 'TASK_REPOSITORIES_STARTED', payload: {} })
+
+  // 回收放在**准备之前**：先腾出空间再 fetch，否则"超限"是靠这次 fetch 把卷写满来
+  // 发现的。本次要用的快照全部 keep，正在被别的 attempt 读的目录由在用保护窗口兜住。
+  // 保护窗口要盖住**所有**会长时间直接读缓存目录的使用方：
+  //   Story attempt —— 每个心跳刷新一次标记，所以一个租约长度就够；
+  //   问答轮次     —— 轮次内不刷新（只在准备时标记一次），所以必须盖住它的硬超时。
+  const inUseGraceMs = Math.max(
+    config.storyTaskLeaseSeconds * 1000,
+    config.codeQa.turnTimeoutMs,
+    DEFAULT_IN_USE_GRACE_MS,
+  )
+  const reclaimed = reclaimRepoCache({
+    cacheRoot: config.codeCacheRoot,
+    maxBytes: config.codeCacheMaxBytes,
+    inUseGraceMs,
+    keep: new Set(
+      task.snapshots.map((snapshot) => `${snapshot.repository_name}/${snapshot.commit_sha}`),
+    ),
+  })
+  if (reclaimed.removed > 0) {
+    rootLogger.info('code_cache_reclaimed', {
+      event: 'code_cache_reclaimed',
+      removed: reclaimed.removed,
+      bytes: reclaimed.bytes,
+      skipped_in_use: reclaimed.skippedInUse,
+      total_bytes: reclaimed.totalBytes,
+      max_bytes: config.codeCacheMaxBytes,
+    })
+  }
+  if (reclaimed.totalBytes > config.codeCacheMaxBytes) {
+    // 回收完还超限，只可能是剩下的全部在保护窗口内。这不是回收 bug，而是容量真的不够
+    // 当前并发 —— 它必须被看见，否则下一步就是卷写满后一片 ENOSPC。
+    rootLogger.warn('code_cache_over_capacity', {
+      event: 'code_cache_over_capacity',
+      total_bytes: reclaimed.totalBytes,
+      max_bytes: config.codeCacheMaxBytes,
+      skipped_in_use: reclaimed.skippedInUse,
+    })
+  }
 
   for (const snapshot of task.snapshots) {
     repositories.push(
@@ -237,6 +278,11 @@ export async function runStoryTask(
     workerId: config.workerId,
     intervalMs: config.heartbeatIntervalMs,
     send: async (taskId, workerId) => {
+      // 心跳顺带刷新快照缓存的在用标记。`SnapshotStore` 整个 attempt 都在直接读这些
+      // 目录，而 `worker-cache` 是全部 replica 共享的卷 —— 别的 replica 的回收只能
+      // 靠这个标记知道"这里有人在读"。不刷新的话，一个跑得久的 attempt 会在中途失去
+      // 它的代码快照，而失败形态是"路径不存在"这种看起来像"未实现"的静默结果。
+      for (const repository of repositories ?? []) markCacheEntryInUse(repository.path)
       const state = await jobsDb.heartbeatAttempt({
         taskId,
         workerId,
@@ -371,10 +417,7 @@ export async function runStoryTask(
               policy_hash: input.identity.policyHash,
             },
             configHash: input.configHash ?? null,
-            promptVersion:
-              (task.job.analysis_context_version ?? 1) === 2
-                ? AGENT_REVIEW_V2_PROMPT_VERSION
-                : AGENT_REVIEW_PROMPT_VERSION,
+            promptVersion: AGENT_REVIEW_PROMPT_VERSION,
             modelLabel: `${task.model.display_name} / ${task.model.model_name}`,
             scopeGeneration: input.scopeIdentity?.generation ?? null,
             triageRevision: input.scopeIdentity?.triageRevision ?? null,

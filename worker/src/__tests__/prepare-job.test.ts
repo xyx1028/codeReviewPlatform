@@ -20,6 +20,7 @@ const config: WorkerConfig = {
   workerId: 'worker-preparation',
   workspaceRoot: '/tmp/jobs',
   codeCacheRoot: '/tmp/cache',
+  codeCacheMaxBytes: 1024 * 1024 * 1024,
   pollIntervalMs: 1000,
   storyTaskLeaseSeconds: 900,
   heartbeatIntervalMs: 30000,

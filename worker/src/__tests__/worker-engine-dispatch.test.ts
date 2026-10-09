@@ -32,6 +32,7 @@ function config(): WorkerConfig {
     workerId: 'w1',
     workspaceRoot: '/tmp/jobs',
     codeCacheRoot: '/tmp/cache',
+    codeCacheMaxBytes: 1024 * 1024 * 1024,
     pollIntervalMs: 5000,
     storyTaskLeaseSeconds: 900,
     heartbeatIntervalMs: 30000,

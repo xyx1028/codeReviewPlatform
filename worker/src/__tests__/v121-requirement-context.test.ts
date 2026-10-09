@@ -27,7 +27,7 @@ import { AttemptWorkspace } from '../ai/workspace/attempt-workspace.js'
 import { V4_DEFAULT_POLICY } from '../ai/policy/v4-capability-policy.js'
 import { Logger } from '../logger.js'
 import { buildScopedStoryDescription } from '../ai/runtime/factory.js'
-import { buildAgentReviewV2Prompt } from '../ai/prompts/agent-review-v2.js'
+import { buildAgentReviewPrompt } from '../ai/prompts/agent-review.js'
 import type { StoryAnalysisScope } from '../db/jobs.js'
 import type { StoryTask } from '../db/jobs.js'
 
@@ -203,7 +203,7 @@ describe('buildScopedStoryDescription', () => {
 })
 
 describe('agent-review-v2 prompt', () => {
-  const prompt = buildAgentReviewV2Prompt({
+  const prompt = buildAgentReviewPrompt({
     story: {
       code: 'US-2026-009302',
       name: '【console】新增SaaS连接器做账套唯一性校验',
@@ -242,7 +242,7 @@ describe('agent-review-v2 prompt', () => {
   })
 
   it('二进制附件只要求读取文本视图，并提示不可读与截断风险', () => {
-    const result = buildAgentReviewV2Prompt({
+    const result = buildAgentReviewPrompt({
       story: {
         code: 'US-1', name: 'Demo', description: '正文',
         attachments: [
@@ -264,7 +264,7 @@ describe('agent-review-v2 prompt', () => {
   })
 
   it('没有登记标签的冻结键不会泄漏进提示词', () => {
-    const leaky = buildAgentReviewV2Prompt({
+    const leaky = buildAgentReviewPrompt({
       story: {
         code: 'US-1',
         name: 'Demo',
@@ -285,7 +285,7 @@ describe('agent-review-v2 prompt', () => {
   })
 
   it('没有快照文件与附件时不提它们（legacy v1 冻结路径）', () => {
-    const minimal = buildAgentReviewV2Prompt({
+    const minimal = buildAgentReviewPrompt({
       story: { code: 'US-1', name: 'Demo', description: '正文' },
       branch: 'feature_dev',
       pins: [{ repository: 'kdmanage-backend', commitSha: 'a'.repeat(40) }],

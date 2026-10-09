@@ -15,7 +15,7 @@ import {
   policyHash,
   V4_DEFAULT_POLICY,
 } from '../ai/policy/v4-capability-policy.js'
-import type { JobsDb, StoryTask } from '../db/jobs.js'
+import type { JobsDb, StoryAnalysisScope, StoryTask } from '../db/jobs.js'
 import type { PreparedRepository } from '../git/prepare.js'
 import { Logger } from '../logger.js'
 
@@ -23,9 +23,35 @@ const SHA = 'a'.repeat(40)
 const JOB_ID = '11111111-2222-4333-8444-555555555555'
 const TASK_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 const CLAIM_TOKEN = '99999999-8888-4777-8666-555555555555'
+const AGENT_RUN_ID = '77777777-6666-4555-8444-333333333333'
 const MANIFEST = loadCapabilityContract()
 const MANIFEST_HASH = contractHash(MANIFEST)
 const DEFAULT_POLICY_HASH = policyHash(V4_DEFAULT_POLICY)
+
+/** 最小可用 scope：这套断言只关心 runner 是否建起来，候选内容无关。 */
+function fakeScope(): StoryAnalysisScope {
+  return {
+    task_id: TASK_ID,
+    generation: 1,
+    scope_mode: 'DEVELOPER_WINDOW',
+    status: 'READY',
+    current_scope_level: 'PRIMARY',
+    algorithm_version: 'story-attribution-v2',
+    ruleset_hash: 'a'.repeat(64),
+    candidate_manifest_hash: 'b'.repeat(64),
+    scope_error_code: null,
+    degradation_reasons: [],
+    candidate_count: 0,
+    strong_count: 0,
+    ai_candidate_count: 0,
+    triage_revision: 1,
+    triage_required_count: 0,
+    triage_completed_count: 0,
+    triage_complete: true,
+    story_input_hash: 'c'.repeat(64),
+    candidates: [],
+  }
+}
 
 function silentLogger(): Logger {
   return new Logger({ sink: () => {}, minLevel: 'error' })
@@ -46,7 +72,7 @@ function baseTask(overrides: Partial<StoryTask> = {}): StoryTask {
     policy_hash: DEFAULT_POLICY_HASH,
     harness_version: MANIFEST.harnessVersion,
     capability_contract_hash: MANIFEST_HASH,
-    agent_run_id: null,
+    agent_run_id: AGENT_RUN_ID,
     session_revision: 1,
     job: {
       id: JOB_ID,
@@ -54,6 +80,18 @@ function baseTask(overrides: Partial<StoryTask> = {}): StoryTask {
       model_config_id: 'm',
       requested_branch: 'feature_dev',
       total_stories: 1,
+      /*
+       * 全部在建 Job 都是 v2：前端只会下 `p_analysis_context_version = 2`，而提示词
+       * 只有 V2 一种形态（scope 是它的必需输入）。夹具跟着现实走，否则这套断言覆盖的是
+       * 一条生产上不存在、且已被显式拒绝的路径。
+       */
+      analysis_context_version: 2,
+      story_input_catalog_hash: 'catalog-hash',
+      identity_snapshot_hash: 'identity-hash',
+      repository_manifest_hash: 'manifest-hash',
+      selected_scope_hash: 'scope-hash',
+      attribution_algorithm_version: 'story-attribution-v2',
+      ruleset_hash: 'ruleset-hash',
     },
     model: {
       model_config_id: 'm',
@@ -115,6 +153,7 @@ function fakeJobsDb(secret = 'unit-test-secret') {
       calls.push(input)
       return secret
     },
+    getStoryTaskAnalysisScope: async () => fakeScope(),
   } as unknown as JobsDb
   return { db, calls }
 }
@@ -169,6 +208,19 @@ describe('buildDeepSeekHarnessReview', () => {
         buildInput(db, baseTask(), [preparedRepository({ commitSha: 'HEAD' })]),
       ),
     ).rejects.toThrow(/40-hex commit sha/)
+    expect(calls).toEqual([])
+  })
+
+  it('rejects a legacy v1 task before downloading skills or spawning dsh', async () => {
+    const { db, calls } = fakeJobsDb()
+    const legacy = baseTask()
+    // 缺失即 v1（见 JobContext.analysis_context_version 的注释）。提示词统一成 V2 之后
+    // 这条路径没有合法形态，必须在 spawn 之前就失败，而不是起完 Harness 再挂。
+    const task = { ...legacy, job: { ...legacy.job, analysis_context_version: undefined } }
+
+    await expect(buildDeepSeekHarnessReview(buildInput(db, task))).rejects.toMatchObject({
+      code: 'ANALYSIS_SCOPE_REQUIRED',
+    })
     expect(calls).toEqual([])
   })
 })

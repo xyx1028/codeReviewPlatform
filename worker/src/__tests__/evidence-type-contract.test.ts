@@ -18,7 +18,7 @@ import {
   ALLOWED_EVIDENCE_TYPES,
   EXISTING_IMPLEMENTATION_EVIDENCE,
 } from '../ai/snapshot/deterministic-verifier.js'
-import { AGENT_REVIEW_SYSTEM_PROMPT } from '../ai/prompts/agent-review-v1.js'
+import { AGENT_REVIEW_SYSTEM_PROMPT } from '../ai/prompts/agent-review.js'
 
 const root = join(import.meta.dirname, '../../..')
 

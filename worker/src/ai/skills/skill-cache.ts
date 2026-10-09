@@ -32,6 +32,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { directorySize, relaxTree } from '../../fs/cache-tree.js'
 import {
   bundleHashDirName,
   canonicalManifest,
@@ -285,72 +286,11 @@ export class SkillCache {
   }
 }
 
-function directorySize(root: string): number {
-  let total = 0
-  const stack = [root]
-  while (stack.length > 0) {
-    const current = stack.pop()!
-    let names: string[]
-    try {
-      names = readdirSync(current)
-    } catch {
-      continue
-    }
-    for (const name of names) {
-      const path = join(current, name)
-      let stats
-      try {
-        stats = statSync(path)
-      } catch {
-        continue
-      }
-      if (stats.isDirectory()) stack.push(path)
-      else total += stats.size
-    }
-  }
-  return total
-}
-
 /**
- * 恢复可写权限，让 `rm -r` 能删掉一棵只读树。
- *
- * cache 目录发布后是 0500/0400。删除一个目录里的条目需要**目录**的写权限，所以不先
- * 放宽权限的 `rmSync` 会在只读子目录上失败 —— 而"回收静默失败"的表现是磁盘慢慢满，
- * 一个月后才有人发现。
+ * 只读树的解锁实现与仓库快照 cache 共用一份（`fs/cache-tree.ts`）。这里继续导出它，
+ * 是因为"回收前先解锁"这件事属于 cache 的对外契约，调用方不该去猜它在哪一层。
  */
-export function relaxTree(root: string): void {
-  if (!existsSync(root)) return
-  const stack = [root]
-  const dirs: string[] = []
-  while (stack.length > 0) {
-    const current = stack.pop()!
-    dirs.push(current)
-    let names: string[]
-    try {
-      chmodSync(current, 0o700)
-      names = readdirSync(current)
-    } catch {
-      continue
-    }
-    for (const name of names) {
-      const path = join(current, name)
-      try {
-        const stats = statSync(path)
-        if (stats.isDirectory()) stack.push(path)
-        else chmodSync(path, 0o600)
-      } catch {
-        continue
-      }
-    }
-  }
-  for (const dir of dirs.reverse()) {
-    try {
-      chmodSync(dir, 0o700)
-    } catch {
-      continue
-    }
-  }
-}
+export { relaxTree }
 
 /** 供测试与运维检查：cache 目录是否可读。 */
 export function assertCacheRootUsable(cacheRoot: string): void {

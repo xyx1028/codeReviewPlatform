@@ -17,6 +17,7 @@ import { SnapshotStore } from '../snapshot/snapshot-store.js'
 import type { CoveragePolicy } from '../snapshot/search-coverage-ledger.js'
 import { checkoutPinnedCommit } from '../../git/prepare.js'
 import { DeepSeekHarnessAcpEngine } from './deepseek-harness-acp-engine.js'
+import { ReviewExecutionError } from './errors.js'
 import {
   parseFrozenSkillCatalog,
   provisionSkillCatalog,
@@ -157,6 +158,21 @@ export async function buildDeepSeekHarnessReview(
 ): Promise<DeepSeekHarnessAcpEngine> {
   if (input.repositories.length === 0) {
     throw new Error('DeepSeek Harness review requires prepared repositories')
+  }
+
+  /*
+   * 提示词只剩 V2 一种形态，冻结的 `analysis_scope` 是它的必需输入。没有 scope 的任务
+   * 是 `analysis_context_version = 1` 的存量行（缺失即 v1）。
+   *
+   * 这一判定刻意放在**最前面**：引擎里构建提示词时也有同一条兜底，但那时模型凭据已经
+   * 从 Vault 取出、技能已经下载、Harness 已经起来了，白烧一遍准备成本，而且运维看到的
+   * 是一个"Harness 跑起来又挂了"的现场，真实原因却是这个 Job 根本不该进 V2 执行路径。
+   */
+  if ((input.task.job.analysis_context_version ?? 1) !== 2) {
+    throw new ReviewExecutionError(
+      'claimed task has no frozen analysis scope (analysis_context_version is not 2)',
+      'ANALYSIS_SCOPE_REQUIRED',
+    )
   }
 
   const runtimeEvents = input.runtimeEvents ?? new NullRuntimeEventReporter()

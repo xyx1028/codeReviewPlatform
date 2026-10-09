@@ -65,6 +65,30 @@ function tempRoot(prefix: string): string {
 
 const RANGE_CONTENT = 'class Order {}'
 
+/** 提示词统一 V2 后 analysisScope 是必需输入；这些用例断言恢复/取消接线，scope 内容无关。 */
+function minimalScope(): import('../db/jobs.js').StoryAnalysisScope {
+  return {
+    task_id: TASK_ID,
+    generation: 1,
+    scope_mode: 'DEVELOPER_WINDOW',
+    status: 'READY',
+    current_scope_level: 'PRIMARY',
+    algorithm_version: 'story-attribution-v2',
+    ruleset_hash: 'a'.repeat(64),
+    candidate_manifest_hash: 'b'.repeat(64),
+    scope_error_code: null,
+    degradation_reasons: [],
+    candidate_count: 0,
+    strong_count: 0,
+    ai_candidate_count: 0,
+    triage_revision: ATTEMPT,
+    triage_required_count: 0,
+    triage_completed_count: 0,
+    triage_complete: true,
+    candidates: [],
+  }
+}
+
 function fakeSnapshots(): SnapshotStore {
   return {
     pins: () => [
@@ -220,6 +244,8 @@ function build(input: {
     branch: 'feature_dev',
     story: { code: 'PRJ-001', name: 'resume story', description: 'desc' },
     snapshots: fakeSnapshots(),
+    analysisScope: minimalScope(),
+    analysisScopeIdentity: 'scope-hash',
     route: {
       providerId: 'review-route',
       displayName: 'resume',
@@ -567,6 +593,8 @@ describe('engine session resume wiring', () => {
       branch: 'feature_dev',
       story: { code: 'PRJ-001', name: 's', description: 'd' },
       snapshots: fakeSnapshots(),
+      analysisScope: minimalScope(),
+      analysisScopeIdentity: 'scope-hash',
       route: {
         providerId: 'review-route',
         displayName: 'r',
@@ -631,6 +659,8 @@ describe('engine session resume wiring', () => {
       branch: 'feature_dev',
       story: { code: 'PRJ-001', name: 's', description: 'd' },
       snapshots: fakeSnapshots(),
+      analysisScope: minimalScope(),
+      analysisScopeIdentity: 'scope-hash',
       route: {
         providerId: 'review-route',
         displayName: 'r',

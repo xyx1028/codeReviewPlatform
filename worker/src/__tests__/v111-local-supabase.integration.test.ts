@@ -50,6 +50,7 @@ function workerConfig(root: string): WorkerConfig {
     workerId: WORKER_ID,
     workspaceRoot: join(root, 'jobs'),
     codeCacheRoot: join(root, 'cache'),
+    codeCacheMaxBytes: 1024 * 1024 * 1024,
     pollIntervalMs: 1000,
     storyTaskLeaseSeconds: 900,
     heartbeatIntervalMs: 30_000,

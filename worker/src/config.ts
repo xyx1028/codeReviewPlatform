@@ -19,6 +19,7 @@ export interface WorkerConfig {
   workerId: string
   workspaceRoot: string
   codeCacheRoot: string
+  codeCacheMaxBytes: number
   pollIntervalMs: number
   storyTaskLeaseSeconds: number
   heartbeatIntervalMs: number
@@ -291,6 +292,15 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
   const workerId = requireStr(env, 'WORKER_ID')
   const workspaceRoot = optStr(env, 'WORKSPACE_ROOT', '/workspace/jobs')!
   const codeCacheRoot = optStr(env, 'CODE_CACHE_ROOT', '/workspace/cache')!
+  const codeCacheMaxBytes = intInRange(
+    env,
+    'CODE_CACHE_MAX_BYTES',
+    // 20 GiB。缓存按 <repo>/<sha> 只增不减，回收是无损的（需要时可重新 fetch），
+    // 所以上限按"一个组一周的评审窗口"估，而不是尽量留。
+    20 * 1024 * 1024 * 1024,
+    1024 * 1024 * 1024,
+    1024 * 1024 * 1024 * 1024,
+  )
   const pollIntervalMs = intInRange(env, 'POLL_INTERVAL_MS', 5000, 500, 600000)
   const storyTaskLeaseSeconds = intInRange(
     env,
@@ -400,6 +410,7 @@ export function loadConfig(env: Env = process.env): WorkerConfig {
     workerId,
     workspaceRoot,
     codeCacheRoot,
+    codeCacheMaxBytes,
     pollIntervalMs,
     storyTaskLeaseSeconds,
     heartbeatIntervalMs,

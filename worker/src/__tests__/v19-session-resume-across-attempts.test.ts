@@ -52,6 +52,30 @@ const TASK_ID = 'resume-task'
 const SHA = 'd'.repeat(40)
 const cleanup: string[] = []
 
+/** 提示词统一 V2 后 analysisScope 是必需输入；本套断言跨 attempt 续跑，scope 内容无关。 */
+function minimalScope(agentAttempt: number): import('../db/jobs.js').StoryAnalysisScope {
+  return {
+    task_id: TASK_ID,
+    generation: 1,
+    scope_mode: 'DEVELOPER_WINDOW',
+    status: 'READY',
+    current_scope_level: 'PRIMARY',
+    algorithm_version: 'story-attribution-v2',
+    ruleset_hash: 'a'.repeat(64),
+    candidate_manifest_hash: 'b'.repeat(64),
+    scope_error_code: null,
+    degradation_reasons: [],
+    candidate_count: 0,
+    strong_count: 0,
+    ai_candidate_count: 0,
+    triage_revision: agentAttempt,
+    triage_required_count: 0,
+    triage_completed_count: 0,
+    triage_complete: true,
+    candidates: [],
+  }
+}
+
 /** 快照只读面在这套测试里不参与断言：用 stub 避免真实 git 仓库依赖。 */
 function fakeSnapshots(): SnapshotStore {
   return {
@@ -177,6 +201,8 @@ function build(input: {
     taskId: TASK_ID,
     agentAttempt: input.agentAttempt,
     branch: 'feature_dev',
+    analysisScope: minimalScope(input.agentAttempt),
+    analysisScopeIdentity: 'scope-hash',
     story: {
       code: 'US-RESUME-1',
       name: 'resume',

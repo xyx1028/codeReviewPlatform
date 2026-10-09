@@ -15,7 +15,13 @@ import {
   historyEnumerationArgs,
   type HistoryEnumerationStatus,
 } from './history-range.js'
-import { authArgs, type PrepareOptions, type PreparedRepository } from './prepare.js'
+import {
+  authArgs,
+  HISTORY_DIR,
+  markCacheEntryInUse,
+  type PrepareOptions,
+  type PreparedRepository,
+} from './prepare.js'
 import { getRepositoryUrl } from './repositories.js'
 import { runCommand, SpawnError } from './run.js'
 
@@ -483,8 +489,11 @@ export async function collectRepositoryHistory(input: CollectRepositoryHistoryIn
   if (!Number.isFinite(endMs)) throw new Error('headResolvedAt must be an ISO timestamp')
   const rangeEnd = new Date(endMs).toISOString()
   const rangeStart = new Date(endMs - input.windowDays * 86_400_000).toISOString()
-  const historyPath = join(input.cacheRoot, input.prepared.repository, '.v111-history', input.prepared.commitSha)
+  const historyPath = join(input.cacheRoot, input.prepared.repository, HISTORY_DIR, input.prepared.commitSha)
   const fetched = await fetchHistory(input, historyPath, rangeStart)
+  // 历史裸仓库同样参与容量回收。枚举期间显式标记在用，否则另一个 replica 的回收
+  // 可能在 rev-list 跑到一半时把它删掉 —— 那会表现成一次莫名的 FAILED 枚举。
+  markCacheEntryInUse(historyPath)
   let ancestorVerified = false
   let revListOutput = ''
   if (fetched.baseSha !== null) {

@@ -157,6 +157,18 @@ describe('loadConfig', () => {
     )
   })
 
+  it('loads the repo cache capacity ceiling and rejects a below-minimum value', () => {
+    expect(loadConfig(baseEnv()).codeCacheMaxBytes).toBe(20 * 1024 * 1024 * 1024)
+    expect(
+      loadConfig(baseEnv({ CODE_CACHE_MAX_BYTES: String(2 * 1024 * 1024 * 1024) }))
+        .codeCacheMaxBytes,
+    ).toBe(2 * 1024 * 1024 * 1024)
+    // 下限 1 GiB：小于一个仓库一次检出的体积时，回收会把刚发布的快照立刻删掉。
+    expect(() => loadConfig(baseEnv({ CODE_CACHE_MAX_BYTES: '1024' }))).toThrow(
+      /CODE_CACHE_MAX_BYTES/,
+    )
+  })
+
   it('defaults the model image-input declaration to off and rejects a typo', () => {
     // 默认必须是 false：声明了 image 而模型其实不支持，图片会被发给一个处理不了它的
     // provider —— 那比"读不到图片"严重得多。
