@@ -28,3 +28,23 @@ vite.config.ts
 tsconfig.app.json
 tsconfig.node.json
 index.html
+
+# The Worker image intentionally excludes the browser source tree.  The
+# company Web Dockerfile needs these files to build the Vite SPA, while the
+# secret-bearing .env files above remain excluded for every image.
+!src/
+!src/**
+!public/
+!public/**
+!index.html
+!vite.config.ts
+!tsconfig.json
+!tsconfig.app.json
+!tsconfig.node.json
+!Dockerfile.workercompany
+!worker/
+!worker/harness/
+!worker/harness/**
+!supabase/
+!supabase/migrations/
+!supabase/migrations/**

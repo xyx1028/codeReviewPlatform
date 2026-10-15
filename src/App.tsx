@@ -353,7 +353,7 @@ function SetupPage() {
           type="warning"
           showIcon
           title="缺少 Supabase 环境变量"
-          description="复制 .env.example 为 .env.local，并填写 VITE_SUPABASE_URL 与 VITE_SUPABASE_ANON_KEY。数据库初始化 SQL 位于 supabase/migrations/0001_review_platform.sql。"
+          description="本地开发请填写 .env.local；公司自部署请填写 runtime-config.js 中的 Supabase 浏览器地址和 anon key。数据库初始化 SQL 位于 supabase/migrations/0001_review_platform.sql。"
         />
       </Card>
     </main>

@@ -1,4 +1,4 @@
-# 内网自部署（V1.48）模板与脚本
+# 内网自部署（V1.48 + V1.49）模板与脚本
 
 执行方案在
 [`需求开发评审一致性平台/V1.48-内网自部署Supabase/需求开发评审一致性平台-V1.48内网自部署Supabase-最终执行方案.md`](../../需求开发评审一致性平台/V1.48-内网自部署Supabase/需求开发评审一致性平台-V1.48内网自部署Supabase-最终执行方案.md)。
@@ -14,6 +14,8 @@ deploy/supabase-selfhost/
   docker-compose.crp.yml        # Supabase 官方 compose 的覆盖层：端口收回环 + 共享网络别名
   Dockerfile.edge-runtime-cache # 预热 Edge Functions 依赖的 linux/amd64 运行时镜像
   worker.override.yml           # Worker 接入 Supabase 的 compose 网络、1 副本
+  docker-compose.web.yml        # 前端镜像接入既有网络，仅回环暴露 4180
+  web-server.mjs                # SPA 深链接回退与静态缓存，无额外运行时镜像
   env/
     supabase.env.nonsecret.example   # 自部署 Supabase .env 的非秘密部分
     frontend.env.selfhost.example    # 前端构建（.env.selfhost.local）
@@ -42,7 +44,7 @@ deploy/supabase-selfhost/
 3. 配置 Functions 运行时变量 → 方案 §7.4
 4. scripts/apply-migrations.sh --dry-run，确认后 --apply → 迁移 + Functions
 5. 建管理员 / MCP 专用 REVIEWER / 普通账号；配模型、Git 身份、Skill
-6. npm run build:selfhost → dist/ 发到 nginx（review.conf）
+6. CI 同一 release 构建 Worker 镜像 + 前端镜像；Linux 拉取前端镜像 → Nginx 反向代理到 4180
 7. Worker：worker.selfhost.env + worker.override.yml，1 副本
 8. MCP：mcp.env.selfhost.local + systemd + nginx（mcp.conf）
 9. backup.sh → restore-verify.sh → 服务器重启验收
@@ -102,9 +104,33 @@ docker compose ps functions
 结果是 8000 仍然暴露在 `0.0.0.0` —— 部署看起来成功，实际上公司网里谁都能直连数据库 API。
 `preflight.sh` 会检查这一条。
 
-**构建时写死的前端配置。** `VITE_*` 是 `vite build` 时写进产物的。换域名或换 anon key
-之后必须重新 `npm run build:selfhost` 并重新发布 `dist/`；改服务器上的 `.env` 不会生效，
-页面还会连旧地址。
+**前端运行时配置。** 当前公司 DevOps 的通用构建服务没有 Docker build args，因此前端镜像不写入
+`VITE_*` 值。镜像带有空的 `public/runtime-config.js`；Linux 把真实的 `runtime-config.js` 只读挂载到
+容器里。改 Supabase 浏览器地址、anon key 或 Linky 地址时，只改这个 Linux 文件并重启 Web 容器，不需要
+重新构建镜像。它会发送给浏览器，所以只能写公开的 anon key，绝不能放 service-role key、数据库密码、GitLab
+Token 或模型 API key。
+
+**前端镜像运行。** Worker 和前端由同一 release 流水线分别构建。前端构建完成后，Linux 以
+镜像摘要启动 `docker-compose.web.yml`，只绑定 `127.0.0.1:4180`；公司浏览器通过宿主机
+Nginx 的 `review.conf` 访问 HTTPS 域名。前端容器只加入既有 `crp-selfhost-net`，不会新建
+自动分配的 Docker 默认网络。首次创建配置文件的命令如下，域名必须换成 IT 分配的正式地址：
+
+```bash
+mkdir -p /home/kduser/crp/web
+cp deploy/supabase-selfhost/env/frontend.runtime-config.js.example \
+  /home/kduser/crp/web/runtime-config.js
+chmod 644 /home/kduser/crp/web/runtime-config.js
+# 编辑 /home/kduser/crp/web/runtime-config.js：填正式 Supabase HTTPS 地址与 .env 中的 ANON_KEY
+
+export CRP_WEB_RUNTIME_CONFIG=/home/kduser/crp/web/runtime-config.js
+export CRP_WEB_IMAGE='mirrors.kingdee.com/kingdee/lingee/patch/kwork-code-review-web@sha256:<digest>'
+docker compose -p crp-selfhost-web -f deploy/supabase-selfhost/docker-compose.web.yml up -d
+```
+
+**流水线先测连通，再发布。** `scripts/pipeline-deploy.py` 的默认 `tcp-check` 只检查 DevOps
+执行器能否解析并连接目标 Linux `172.18.54.40:22` 的 SSH 端口。当前 DevOps 节点界面不能
+设置变量，所以该只读探测目标暂时写在脚本内；它不登录、不传密码、不改服务器。通过后再由受保护
+SSH/JumpServer 凭据执行单独的身份校验，最后才开放人工审批后的迁移、Functions、Worker 与前端发布。
 
 **容器里的 localhost 不是宿主机。** Worker 与 MCP 若作为容器运行，Supabase 地址用
 `http://crp-supabase-api:8000`（本目录的 override 提供的别名）；Mac 上那套

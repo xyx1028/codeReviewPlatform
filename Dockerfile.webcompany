@@ -1,0 +1,51 @@
+# Company CI image for the browser SPA.  It deliberately uses the company
+# Node image in both stages: no runtime dependency on Docker Hub or a public
+# Nginx image is introduced.
+# This is the same amd64-only company base already proven by the Worker CI
+# build. The alpine tag currently resolves to arm64, so it must not be used by
+# this linux/amd64 pipeline.
+FROM kcr.kingdee.com/ai-2030/node:24-bookworm-slim-amd64 AS build
+
+WORKDIR /app
+
+# Keep npm install cacheable and install the lock-file-pinned toolchain (Vite
+# and TypeScript are build-time dependencies).
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# `build:selfhost` deliberately performs the Harness manifest consistency
+# check before building the SPA.  Copy only the contract inputs it reads; the
+# Worker executable and any local environment files never enter this image.
+COPY tsconfig.json tsconfig.app.json tsconfig.node.json ./
+COPY index.html vite.config.ts ./
+COPY Dockerfile.workercompany ./
+COPY scripts/v4-harness-manifest.mjs ./scripts/v4-harness-manifest.mjs
+COPY worker/harness ./worker/harness
+COPY worker/src/ai/review-workflow-types.ts ./worker/src/ai/review-workflow-types.ts
+COPY supabase/migrations ./supabase/migrations
+COPY src ./src
+COPY public ./public
+
+# Company DevOps has no Docker build-arg input. The image therefore ships an
+# empty public/runtime-config.js; Linux bind-mounts its public browser config
+# over that file at runtime. No environment value is baked into the image.
+RUN WORKER_DOCKERFILE=Dockerfile.workercompany npm run build:selfhost
+
+FROM kcr.kingdee.com/ai-2030/node:24-bookworm-slim-amd64 AS runtime
+
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=8080
+
+COPY --from=build --chown=node:node /app/dist ./dist
+COPY --chown=node:node deploy/supabase-selfhost/web-server.mjs ./web-server.mjs
+
+USER node
+EXPOSE 8080
+
+# The base image has no curl/wget. Node 24 includes fetch, so the health check
+# adds no package and verifies the same HTTP listener used by host Nginx.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:8080/__health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+
+CMD ["node", "web-server.mjs"]

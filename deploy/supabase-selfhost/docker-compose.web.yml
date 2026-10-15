@@ -1,0 +1,25 @@
+# Browser SPA container for company Linux.
+#
+# Run with CRP_WEB_IMAGE=<immutable image digest> docker compose -f this-file up -d.
+# The only Docker network is the existing Supabase network, so this Compose
+# project cannot create an auto-selected 172.x bridge range.
+services:
+  web:
+    image: ${CRP_WEB_IMAGE:?set CRP_WEB_IMAGE to the CI-built frontend image digest}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4180:8080"
+    networks:
+      - supabase
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ${CRP_WEB_RUNTIME_CONFIG:?set CRP_WEB_RUNTIME_CONFIG to the Linux runtime-config.js path}:/app/dist/runtime-config.js:ro
+
+networks:
+  supabase:
+    external: true
+    name: crp-selfhost-net

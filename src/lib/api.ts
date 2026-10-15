@@ -1,5 +1,6 @@
 import type { Session } from '@supabase/supabase-js'
 import { requireSupabase } from './supabase'
+import { runtimeConfig } from './runtime-config'
 import type { UserDeletionImpact } from './user-deletion'
 import type {
   AttributionRuleCatalog,
@@ -100,7 +101,7 @@ function unwrap<T>({ data, error }: { data: T | null; error: { message: string }
   return data as T
 }
 
-export const wechatLoginEnabled = import.meta.env.VITE_WECHAT_LOGIN_ENABLED === 'true'
+export const wechatLoginEnabled = runtimeConfig.wechatLoginEnabled
 
 let pendingWechatAuthError: string | null = null
 
@@ -149,7 +150,7 @@ async function sha256Hex(value: string): Promise<string> {
 
 export async function startWechatSignIn(): Promise<void> {
   if (!wechatLoginEnabled) throw new Error('微信登录未启用')
-  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined
+  const supabaseUrl = runtimeConfig.supabaseUrl
   if (!supabaseUrl || typeof window === 'undefined') throw new Error('Supabase 未配置')
 
   const randomBytes = crypto.getRandomValues(new Uint8Array(32))
@@ -1911,7 +1912,7 @@ export function adminPublishSkillVersion(input: {
  * 请求已发布 Bundle 的短期下载路径。
  *
  * 只有 ADMIN 能调用。返回的相对路径包含**短期访问凭据**：不落库、不进日志，也永远不作为
- * 冻结 locator。浏览器用公开 VITE_SUPABASE_URL 补全 origin；Worker 走 service-role +
+ * 冻结 locator。浏览器用公开 Supabase URL 补全 origin；Worker 走 service-role +
  * 冻结 bucket/key 那条路。
  */
 export function adminCreateSkillDownloadUrl(versionId: string) {
