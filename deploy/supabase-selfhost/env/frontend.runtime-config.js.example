@@ -1,0 +1,14 @@
+// Copy to a Linux-only file, for example:
+//   /home/kduser/crp/web/runtime-config.js
+// This file is sent to browsers. It may contain only public client settings;
+// never put SUPABASE_SERVICE_ROLE_KEY, database passwords, GitLab tokens, or
+// model API keys here.
+window.__CRP_RUNTIME_CONFIG__ = Object.freeze({
+  // Company browser address for the Supabase API, not crp-supabase-api and not 127.0.0.1.
+  supabaseUrl: 'https://supabase.corp.example',
+  // Copy ANON_KEY from /home/kduser/crp/supabase/.env.
+  supabaseAnonKey: '',
+  wechatLoginEnabled: false,
+  // Empty retains the product default Linky address.
+  linkyApiBaseUrl: '',
+})
