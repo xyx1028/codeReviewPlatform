@@ -137,7 +137,14 @@ function check() {
     fail(`manifest.enabledPlugins are disabled in cordis.patch.yml: ${enabledButDisabled.join(', ')}`)
   }
 
-  const dockerfile = readFileSync(join(root, 'Dockerfile.worker'), 'utf8')
+  // Local development builds use Dockerfile.worker. The company CI image uses
+  // Dockerfile.workercompany; pass that filename explicitly during its build
+  // instead of copying a second Dockerfile into the image only for this check.
+  const dockerfileName = process.env.WORKER_DOCKERFILE || 'Dockerfile.worker'
+  if (dockerfileName.includes('/') || dockerfileName.includes('\\')) {
+    fail('WORKER_DOCKERFILE must be a Dockerfile name in the repository root')
+  }
+  const dockerfile = readFileSync(join(root, dockerfileName), 'utf8')
   const dockerPluginList = dockerfile.match(/for plugin in ([^;]+); do/)?.[1]?.trim().split(/\s+/).sort() ?? []
   if (stableStringify(dockerPluginList) !== stableStringify([...current.manifest.platformPlugins].sort())) {
     fail('Docker platform plugin links differ from manifest.platformPlugins')

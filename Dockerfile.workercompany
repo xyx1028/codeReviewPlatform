@@ -38,7 +38,6 @@ RUN npm ci
 # runtime: the profile is materialized per attempt, and the contract is the
 # authority the Worker validates the resolved tool inventory against.
 COPY tsconfig.worker.json ./
-COPY Dockerfile.worker ./
 COPY scripts ./scripts
 COPY supabase/migrations ./supabase/migrations
 COPY worker ./worker
@@ -55,7 +54,10 @@ RUN test -f /app/worker/harness/code-review-acp/v4-capability-contract.json
 # volatile-session-persistence 与 model-budget-governor（前者被 JSONL 持久化替换，后者被
 # 跨 Agent 的分层预算取代）。链错的后果是容器里 profile 解析不到插件而启动失败，
 # 所以下面用 `test -d` 在构建期就把它挡住，而不是留到运行时。
-RUN npm run worker:build \
+# Only mount the company Dockerfile for this build-time contract check. It is
+# neither copied from Dockerfile.worker nor retained in the resulting image.
+RUN --mount=type=bind,source=Dockerfile.workercompany,target=/app/Dockerfile.workercompany \
+  WORKER_DOCKERFILE=Dockerfile.workercompany npm run worker:build \
   && mkdir -p /app/node_modules/@codereview \
   && for plugin in agent-authority-policy usage-reporter platform-web snapshot-tools review-control-tool; do \
        test -d "/app/dist-worker/harness-plugins/$plugin" \
