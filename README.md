@@ -273,6 +273,47 @@ requirements/<story>/<附件原名>（随快照冻结的字节，sha256 校验�
 
 运维面（新日志事件、确认全量生效的 SQL、回滚、复跑命令）见 `worker/OPERATIONS.md` 第 22 节。
 
+## 远程 MCP 提交需求评审（V1.47）
+
+同事不用打开平台页面：在 Qoder / Codex / Claude Code 里配一个 MCP 地址加一串访问凭证，
+用对话就能把**公司内任意一条需求**（不限需求负责人）提交去评审。
+
+```text
+AI 客户端 ──Streamable HTTP + Bearer 凭证──► mcp/code-review-mcp（你部署，常驻）
+                                              └─ anon key + 平台账号 JWT ─► 既有 RPC
+                                                   建批次 → request_linky_batch_import_for_analysis
+                                                        ↑ 到这里就返回回执（批次编号 + 受理编号 + 链接）
+                                              之后 Worker 照原样：冻结需求 → 建分析任务 → Agent 评审
+```
+
+首版**只有一个工具** `start_requirement_review`，入参四个、都必填：项目组、需求编号、
+目标分支（`feature_dev`/`feature_sit`/`release`）、提交时间窗口（7/14/21/28 天）。模型由服务端配置，
+调用方不能指定。
+
+```bash
+npm run mcp:install
+# 填好 mcp/code-review-mcp/.env（见该目录 README 的环境变量表）
+npm run mcp:start
+npm run mcp:live-check -- --url http://127.0.0.1:8848/mcp --token <凭证>   # 只读自检
+```
+
+三条边界值得单独记住：
+
+- **受理编号是需求导入单 id，不是分析任务 id。** 分析任务由平台在需求快照冻结完成后自动创建，
+  提交那一刻它还不存在（`analysis_status='PENDING'`、`analysis_job_id` 为 null）。回一个
+  "看起来像 job id"的东西，只会让使用者拿着查不到的编号去平台里找。
+- **首版不提供进度/结果查询，也不轮询。** 回执里给批次详情链接
+  （`/batches/<id>/ai-result`），进度与结论只在平台页面上看 —— 对话里画一个没有后端事实的
+  进度条，是这个平台一直拒绝做的事。
+- **不绕过平台权限，也不交出任何密钥。** 只用 anon key + 平台账号 JWT，service-role key、
+  模型 API Key、Linky 凭证都不在这条链路上；账号角色不够时提交会被 RLS 如实拒绝。
+  凭证等于能消耗模型额度，按人发放，暴露到局域网外必须套 HTTPS。
+
+不需要数据库迁移、不需要 Edge Function、不需要重建 Worker 镜像：这一版没有新表、新 RPC，
+Worker 与能力契约都没动。完整配置、客户端配置片段与安全模型见
+[`mcp/code-review-mcp/README.md`](mcp/code-review-mcp/README.md)，方案与验证记录见
+`需求开发评审一致性平台/V1.47-远程MCP提交需求评审/`。
+
 ## 微信扫码登录与账号绑定
 
 登录页支持微信开放平台网站应用扫码登录，邮箱老用户可在“个人中心”绑定微信并继续使用原账号。部署前需要应用 `0013_wechat_identity.sql`、配置微信服务端 Secrets，并以公开回调模式部署 Edge Function。

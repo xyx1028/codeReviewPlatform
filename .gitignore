@@ -32,5 +32,12 @@ coverage
 supabase/.temp/
 .docker/*.env
 
+# 远程 MCP 服务的本地配置（含平台账号密码与访问凭证），只保留 .env.example
+mcp/**/.env
+mcp/**/.env.selfhost.local
+
+# 内网自部署的本地构建配置（含内网域名与 anon key），只保留 deploy/ 下的模板
+.env.selfhost.local
+
 # 本地数据库备份（含真实账号与业务数据，绝不入库）
 .local-db-backups/

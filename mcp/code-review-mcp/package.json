@@ -1,0 +1,26 @@
+{
+  "name": "codereview-mcp",
+  "version": "0.1.0",
+  "description": "远程 MCP 服务：在 Qoder / Codex 等客户端里通过对话，把指定需求提交到需求开发评审一致性平台做代码评审。",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "codereview-mcp": "src/index.mjs"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "start:selfhost": "node --env-file=.env.selfhost.local src/index.mjs",
+    "test": "node --test 'test/**/*.test.mjs'",
+    "live-check": "node scripts/live-check.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1"
+  }
+}

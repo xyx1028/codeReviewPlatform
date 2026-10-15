@@ -1,0 +1,54 @@
+# 自部署 Supabase 的 Compose 覆盖层（V1.48）
+#
+# 放到 /srv/crp/supabase/ 下与官方 docker-compose.yml 一起用：
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.crp.yml
+#
+# 它只做两件事，刻意不改官方服务定义：
+#
+# 1. **把宿主机端口收到回环**。官方默认把 API 网关暴露在 0.0.0.0:8000；这台机器在公司网里，
+#    任何能连到它的人都能绕过反向代理直接打 Supabase。收到 127.0.0.1 后，只有反向代理
+#    （宿主机进程）或同网络的容器能访问。
+# 2. **给 API 网关一个稳定别名 crp-supabase-api**。Worker / MCP 容器靠这个名字连，
+#    不用 host.docker.internal（那是 Docker Desktop 的东西，Linux 上不存在）。
+#
+# `!override` 需要 Docker Compose 2.24.4+；没有它的话 ports 会与官方定义合并而不是替换，
+# 结果是 8000 仍然暴露在 0.0.0.0。部署前先 `docker compose version` 确认。
+# 服务名对应官方 self-hosted/v0.8.2，升级版本时重新核对。
+
+services:
+  # Envoy 网关（container_name: supabase-envoy）。官方唯一对外发布的端口就是它的 8000。
+  api-gw:
+    ports: !override
+      - "127.0.0.1:54341:8000"
+    networks:
+      default:
+        aliases:
+          - crp-supabase-api
+          # 官方配置里 envoy / kong 两个别名是内部服务引用的名字，覆盖 networks 时
+          # 必须一并写回，否则 storage、studio 等容器解析不到网关。
+          - envoy
+          - kong
+
+  # 连接池。官方把 ${POSTGRES_PORT}:5432 与 ${POOLER_PROXY_PORT_TRANSACTION}:6543
+  # 发布在这里（不是 db 服务），所以 .env 里的 POSTGRES_PORT=5432 默认会把
+  # 数据库入口暴露在 0.0.0.0:5432 —— 必须收回环。
+  supavisor:
+    ports: !override
+      - "127.0.0.1:54342:5432"
+      - "127.0.0.1:54343:6543"
+
+# Studio **不要**在这里加 ports：v0.8.2 的 studio 服务本来就不发布宿主机端口，
+# 它走网关的 `/` 路由（Envoy 用 DASHBOARD_USERNAME/PASSWORD 做 basic auth）。
+# 在这里写 ports 等于**新增**一个暴露面，与收紧的目的正好相反。
+# 要限制 Studio，做法是反向代理只转发 API 前缀、不转发 `/`（见 nginx/supabase.conf），
+# 管理员走 SSH 隧道访问 127.0.0.1:54341。
+
+# 附件/技能包上限要调就在这里覆盖（50MB = 52428800 是官方写死在 compose 里的默认值，
+# .env 里加 FILE_SIZE_LIMIT 是静默无效的）。改了要同步 nginx 的 client_max_body_size。
+#  storage:
+#    environment:
+#      FILE_SIZE_LIMIT: 104857600
+
+networks:
+  default:
+    name: crp-selfhost-net

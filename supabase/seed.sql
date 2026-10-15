@@ -29,6 +29,8 @@ begin
     insert into auth.users (
       instance_id, id, aud, role, email,
       encrypted_password, email_confirmed_at,
+      confirmation_token, recovery_token, email_change_token_new,
+      email_change,
       raw_app_meta_data, raw_user_meta_data,
       created_at, updated_at,
       is_sso_user, is_anonymous
@@ -36,6 +38,8 @@ begin
       '00000000-0000-0000-0000-000000000000',
       v_user_id, 'authenticated', 'authenticated', v_email,
       crypt(v_password, gen_salt('bf')), now(),
+      '', '', '',
+      '',
       '{"provider":"email","providers":["email"]}'::jsonb,
       jsonb_build_object('sub', v_user_id::text, 'email', v_email,
                          'email_verified', true, 'phone_verified', false, 'name', v_name),
@@ -56,6 +60,10 @@ begin
     update auth.users
     set encrypted_password = crypt(v_password, gen_salt('bf')),
         email_confirmed_at = coalesce(email_confirmed_at, now()),
+        confirmation_token = '',
+        recovery_token = '',
+        email_change_token_new = '',
+        email_change = '',
         updated_at = now()
     where id = v_user_id;
   end if;

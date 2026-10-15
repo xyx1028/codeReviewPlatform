@@ -1,0 +1,10 @@
+# One-time transport package for the official Supabase self-hosted Docker
+# configuration.  The named build context `supabase_source` must point to the
+# `supabase_source` must point directly to the checked-out repository's
+# `docker/` directory at tag self-hosted/v0.8.2.
+#
+# This package deliberately contains no generated .env, database data, or
+# application secrets.  It is copied out on the target Linux host before
+# `docker compose up -d`.
+FROM scratch
+COPY --from=supabase_source . /

@@ -1,0 +1,51 @@
+[Unit]
+# 远程 MCP 常驻服务 —— V1.48
+#
+# 安装：
+#   sudo cp deploy/supabase-selfhost/systemd/crp-mcp.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now crp-mcp
+#   systemctl status crp-mcp && journalctl -u crp-mcp -f
+#
+# 刻意用 EnvironmentFile 而不是 node --env-file：systemd 自己读环境文件，
+# 不依赖 Node 版本（--env-file 要 Node 20.6+），也不要求工作目录里有那个文件。
+# 注意 EnvironmentFile 不做 shell 展开，值里不要写引号。
+Description=CodeReview Platform remote MCP (start_requirement_review)
+Documentation=file:///srv/crp/app/mcp/code-review-mcp/README.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# 用专用非 root 账号；这个进程持有平台账号密码与访问凭证
+User=crp
+Group=crp
+
+WorkingDirectory=/srv/crp/app/mcp/code-review-mcp
+
+# 含平台账号密码与访问凭证，权限 0600、owner crp
+EnvironmentFile=/srv/crp/secrets/mcp.env
+
+# node 的绝对路径按服务器实际安装填（which node）。
+# 绝不要照抄 Mac 的 /opt/homebrew/bin/node。
+ExecStart=/usr/bin/node src/index.mjs
+
+Restart=always
+RestartSec=5
+
+# 日志走 journald：进程只往 stderr 写结构化日志，stdout 在 stdio 模式下是协议通道
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crp-mcp
+
+# 基础加固。进程只需要出网连 Supabase，不需要写文件系统。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=
+# 若把 CRP_MCP_HOST 设为 127.0.0.1（推荐，由 Nginx 转发），可再加：
+# IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target
