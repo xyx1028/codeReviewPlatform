@@ -13,10 +13,12 @@
  * 来自 Linky。
  */
 
+import { runtimeConfig } from './runtime-config'
+
 const DEFAULT_BASE = 'https://feature.kingdee.com:2055/quality-platform/api/linky'
 
 export function linkyApiBase(): string {
-  const configured = import.meta.env.VITE_LINKY_API_BASE_URL as string | undefined
+  const configured = runtimeConfig.linkyApiBaseUrl
   return (configured && configured.trim() !== '' ? configured : DEFAULT_BASE).replace(/\/+$/, '')
 }
 

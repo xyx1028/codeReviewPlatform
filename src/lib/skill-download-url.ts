@@ -1,3 +1,5 @@
+import { runtimeConfig } from './runtime-config'
+
 const SKILL_BUNDLE_SIGNED_PATH_PREFIX = '/storage/v1/object/sign/skill-bundles/'
 const PATH_VALIDATION_ORIGIN = 'https://signed-path.invalid'
 
@@ -33,7 +35,7 @@ export function buildSkillBundleDownloadUrl(signedPath: string, supabaseUrl: str
 }
 
 export function getSkillBundleDownloadUrl(signedPath: string): string {
-  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined
-  if (!supabaseUrl) throw new Error('请先配置 VITE_SUPABASE_URL')
+  const supabaseUrl = runtimeConfig.supabaseUrl
+  if (!supabaseUrl) throw new Error('请先配置 Supabase 浏览器地址')
   return buildSkillBundleDownloadUrl(signedPath, supabaseUrl)
 }

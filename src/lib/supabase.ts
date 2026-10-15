@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
+import { runtimeConfig } from './runtime-config'
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
+const { supabaseUrl, supabaseAnonKey } = runtimeConfig
 
 export const supabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey)
 
@@ -16,7 +16,7 @@ export const supabase = supabaseConfigured
 
 export function requireSupabase() {
   if (!supabase) {
-    throw new Error('请先配置 VITE_SUPABASE_URL 和 VITE_SUPABASE_ANON_KEY')
+    throw new Error('请先配置 Supabase 浏览器地址和 anon key')
   }
   return supabase
 }
