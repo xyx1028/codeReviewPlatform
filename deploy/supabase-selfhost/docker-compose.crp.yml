@@ -29,6 +29,15 @@ services:
           - envoy
           - kong
 
+  # 函数依赖在构建阶段预下载到 Deno cache，Linux 启动/调用时不访问 jsr.io 或 esm.sh。
+  # 每次 Functions 新增或升级远程依赖后，重建并发布相同方式的新 tag。
+  functions:
+    image: kcr.kingdee.com/ai-2030/supabase:edge-runtime-v1.76.2-crp-r3
+    # 官方 compose 的 deno-cache named volume 会覆盖镜像内 /root/.cache/deno，导致 r3
+    # 预热的离线依赖不可见。保留源码挂载，显式替换掉该缓存卷。
+    volumes: !override
+      - ./volumes/functions:/home/deno/functions:z
+
   # 连接池。官方把 ${POSTGRES_PORT}:5432 与 ${POOLER_PROXY_PORT_TRANSACTION}:6543
   # 发布在这里（不是 db 服务），所以 .env 里的 POSTGRES_PORT=5432 默认会把
   # 数据库入口暴露在 0.0.0.0:5432 —— 必须收回环。

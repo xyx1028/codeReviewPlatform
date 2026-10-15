@@ -1,0 +1,41 @@
+# Company self-hosted Supabase Functions must start without access to jsr.io or
+# esm.sh. This image warms Deno's module cache at build time, then keeps the
+# standard Edge Runtime entrypoint and command unchanged.
+#
+# The named build context `supabase_source` must be the `docker/` directory
+# from Supabase self-hosted/v0.8.2. Its official main dispatcher must match the
+# compose configuration shipped to the Linux server.
+ARG BASE_IMAGE=kcr.kingdee.com/ai-2030/supabase:edge-runtime-v1.76.2
+FROM ${BASE_IMAGE}
+
+COPY --from=supabase_source volumes/functions/main/index.ts /home/deno/functions/main/index.ts
+# The repository's main .dockerignore deliberately excludes supabase/functions
+# from normal application builds. Receive it as a named context so this Docker
+# image alone can cache the Function dependencies without widening that context.
+COPY --from=functions_source . /home/deno/functions/
+
+# Start the same main dispatcher used in production, then call each Function
+# once during image build. This is deliberate: `bundle` misses type metadata
+# that Edge Runtime resolves only while it creates a user worker. The warm-up
+# leaves the complete Deno cache in the image, but discards the copied sources;
+# production still mounts the versioned sources from the self-hosted directory.
+RUN set -eu; \
+    export VERIFY_JWT=false SUPABASE_URL=http://127.0.0.1:54341 SUPABASE_ANON_KEY=warmup-anon SUPABASE_SERVICE_ROLE_KEY=warmup-service; \
+    edge-runtime start --main-service /home/deno/functions/main > /tmp/edge-runtime-warmup.log 2>&1 & runtime_pid=$!; \
+    ready=false; \
+    for attempt in $(seq 1 30); do \
+      if bash -lc 'echo >/dev/tcp/127.0.0.1/9000' 2>/dev/null; then ready=true; break; fi; \
+      sleep 1; \
+    done; \
+    if [ "$ready" != true ]; then cat /tmp/edge-runtime-warmup.log; exit 1; fi; \
+    for function_path in /home/deno/functions/*/index.ts; do \
+      function_name="${function_path%/index.ts}"; function_name="${function_name##*/}"; \
+      FUNCTION_NAME="$function_name" bash -lc 'exec 3<>/dev/tcp/127.0.0.1/9000; printf "POST /${FUNCTION_NAME} HTTP/1.1\\r\\nHost: localhost\\r\\napikey: warmup-anon\\r\\nAuthorization: Bearer warmup-anon\\r\\nContent-Type: application/json\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\n{}" >&3; head -n 1 <&3 >/dev/null'; \
+    done; \
+    # User-worker graph writes finish asynchronously after the HTTP response.
+    # Wait and assert the cache is materially larger than the base-image cache
+    # before stopping the runtime and committing this image layer.
+    sleep 5; \
+    test "$(find /root/.cache/deno -type f | wc -l)" -ge 200; \
+    kill "$runtime_pid"; wait "$runtime_pid" || true; \
+    rm -rf /home/deno/functions /tmp/edge-runtime-warmup.log

@@ -12,6 +12,7 @@
 ```text
 deploy/supabase-selfhost/
   docker-compose.crp.yml        # Supabase 官方 compose 的覆盖层：端口收回环 + 共享网络别名
+  Dockerfile.edge-runtime-cache # 预热 Edge Functions 依赖的 linux/amd64 运行时镜像
   worker.override.yml           # Worker 接入 Supabase 的 compose 网络、1 副本
   env/
     supabase.env.nonsecret.example   # 自部署 Supabase .env 的非秘密部分
@@ -27,6 +28,7 @@ deploy/supabase-selfhost/
   scripts/
     preflight.sh                # 目标服务器环境自检（只读）
     apply-migrations.sh         # GitLab release 更新 + 数据库增量迁移 + Edge Functions
+    build-edge-runtime-cache.sh # 构建并推送预热 Functions 依赖的 linux/amd64 镜像
     backup.sh                   # 数据库 + Storage + 配置 + Session 卷备份（只读）
     restore-verify.sh           # 恢复到**临时库**做验证，不碰在服务的库
 ```
@@ -53,7 +55,45 @@ deploy/supabase-selfhost/
 的连接串。默认只预览；`--apply` 会再预览一次，由 CLI 交互确认数据库迁移，然后复制变更的
 Function 目录、重启容器并测试两个必需函数。Function 加载失败会恢复旧文件，但已经成功的
 数据库迁移不会回滚。脚本不运行 seed、`db reset` 或云端 linked 项目。发布前确保脚本本身
-已被同步到公司 Linux；Function 的 `esm.sh` 依赖在离线环境需先准备，否则加载测试会失败。
+已被同步到公司 Linux。
+
+### 离线 Edge Functions 镜像
+
+公司 Linux 不需要在 Function 启动或首次调用时访问 `jsr.io`、`esm.sh`、npmjs。覆盖层已把
+`functions` 服务固定为公司的缓存镜像：
+
+```text
+kcr.kingdee.com/ai-2030/supabase:edge-runtime-v1.76.2-crp-r3
+```
+
+它在构建阶段真实加载官方分发器和三个项目 Function，把 Deno 的 JS、类型定义和 NPM 元数据写进
+镜像缓存；运行时仍从 `volumes/functions/` 挂载 Function 源码。因此普通的 SQL/Function 发布无需
+重新构建镜像。只有新增 Function 或新增/升级远程依赖时，才重建一个新标签并更新
+`docker-compose.crp.yml` 的 `functions.image`。
+
+官方 compose 原本还会挂载一个名为 `deno-cache` 的 Docker 卷到 `/root/.cache/deno`。覆盖层通过
+`volumes: !override` 移除了这个卷；否则空卷会盖住镜像内已预热的缓存，Functions 会再次尝试访问公网。
+
+在已登录 KCR 的构建机上执行以下命令创建新标签；`CRP_SUPABASE_DOCKER_DIR` 指向此前下载的
+官方 `self-hosted/v0.8.2` 的 `docker/` 目录。脚本会把 Functions 暂存到系统临时目录，构建完成
+即删除，不会把它们提交到镜像的运行时源码目录。
+
+```bash
+CRP_SUPABASE_DOCKER_DIR=/Users/kingdee/crp-selfhost/supabase-source/docker \
+  bash deploy/supabase-selfhost/scripts/build-edge-runtime-cache.sh \
+  edge-runtime-v1.76.2-crp-r4
+```
+
+首次在 Linux 使用此镜像：
+
+```bash
+cd /home/kduser/crp/supabase
+docker compose pull functions
+docker compose up -d --no-deps --force-recreate functions
+docker compose ps functions
+```
+
+这只重建 Functions 容器，不会重新执行数据库迁移，也不会影响其他 Supabase 服务。
 
 ## 三个最容易踩的点
 

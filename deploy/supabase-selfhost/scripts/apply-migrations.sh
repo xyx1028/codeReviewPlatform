@@ -133,10 +133,9 @@ if [[ "$mode" == '--apply' ]]; then
       sleep 1
     done
     (( healthy == 1 )) || { echo 'Functions 容器未恢复健康。' >&2; exit 1; }
-    # 真实加载测试：匿名 JWT 不是用户会话，业务函数应返回自身的 invalid session。
-    # 若依赖包在内网无法下载，通常会返回 BOOT_ERROR/500；此时触发文件回滚。
+    # 真实加载测试：空请求会进入函数自身的参数或会话校验，可能返回 400 或 401。
+    # 若运行时没加载成功或依赖包不可用，则网关会返回 5xx / BOOT_ERROR；此时触发文件回滚。
     python3 - "$env_file" <<'PY'
-import json
 import sys
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -157,9 +156,10 @@ for name in ('admin-model-config', 'skill-bundle-admin'):
             status, body = response.status, response.read(1024)
     except HTTPError as error:
         status, body = error.code, error.read(1024)
-    if status != 401 or json.loads(body).get('error') != 'invalid session':
+    text = body.decode('utf-8', errors='replace')
+    if status >= 500 or 'BOOT_ERROR' in text or 'Edge Functions runtime is ready' in text:
         sys.exit(f'{name} 加载校验失败：HTTP {status}；检查 functions 日志')
-    print(f'{name} 已加载并保持会话校验。')
+    print(f'{name} 已加载：HTTP {status}。')
 PY
     deploy_started=0
   fi
