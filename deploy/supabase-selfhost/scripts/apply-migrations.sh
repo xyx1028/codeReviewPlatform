@@ -11,7 +11,6 @@ if [[ "$mode" != "--dry-run" && "$mode" != "--apply" || $# -gt 1 ]]; then
   exit 2
 fi
 
-source_dir="${CRP_MIGRATION_SOURCE:-/home/kduser/crp/migration-source}"
 supabase_dir="${CRP_SUPABASE_DIR:-/home/kduser/crp/supabase}"
 env_file="${CRP_SUPABASE_ENV:-$supabase_dir/.env}"
 cli="${CRP_SUPABASE_CLI:-/home/kduser/.local/bin/supabase}"
@@ -22,41 +21,54 @@ for command_name in git python3 flock; do
 done
 [[ -x "$cli" ]] || { echo "找不到 Supabase CLI：$cli" >&2; exit 1; }
 [[ -r "$env_file" ]] || { echo "读不到服务器 Supabase .env：$env_file" >&2; exit 1; }
-[[ -d "$source_dir/.git" ]] || { echo "找不到 GitLab 迁移仓库：$source_dir" >&2; exit 1; }
 [[ -f "$supabase_dir/docker-compose.yml" ]] || { echo "找不到 Supabase Compose：$supabase_dir" >&2; exit 1; }
 functions_root="$supabase_dir/volumes/functions"
 [[ -f "$functions_root/main/index.ts" ]] || {
   echo "找不到现有 Edge Functions 入口：$functions_root/main/index.ts" >&2; exit 1;
 }
 
-exec 9>"$source_dir/../.crp-migration.lock"
+exec 9>"$supabase_dir/../.crp-migration.lock"
 flock -n 9 || { echo '另一轮迁移正在运行。' >&2; exit 1; }
 
-cd "$source_dir"
-[[ "$(git remote get-url origin)" == "$expected_origin" ]] || {
-  echo 'Git origin 不是预期的公司仓库，已停止。' >&2; exit 1;
+work_dir=''
+stage=''
+deploy_started=0
+changed_functions=()
+cleanup() {
+  status=$?
+  trap - EXIT
+  if (( status != 0 && deploy_started == 1 )); then
+    echo 'Function 更新失败，恢复之前的文件并重新启动 Functions；已成功执行的数据库迁移不会自动回滚。' >&2
+    for name in "${changed_functions[@]}"; do
+      rm -rf -- "$functions_root/$name"
+      [[ ! -d "$stage/old-$name" ]] || mv "$stage/old-$name" "$functions_root/$name"
+    done
+    (cd "$supabase_dir" && docker compose restart functions) || true
+  fi
+  [[ -z "$stage" ]] || rm -rf -- "$stage"
+  [[ -z "$work_dir" ]] || rm -rf -- "$work_dir"
 }
-[[ "$(git branch --show-current)" == 'release' ]] || {
-  echo '当前不是 release 分支，已停止。' >&2; exit 1;
-}
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  echo '迁移仓库有未提交改动，已停止；请先处理改动。' >&2
-  exit 1
-fi
+trap cleanup EXIT
 
-# 只在内存中缓存本用户凭据 30 分钟；稀疏检出和 pull 共用，避免重复输入。
+# 只在内存中缓存本用户凭据 30 分钟；clone 和稀疏检出的二次 fetch 共用。
 # 清空其他 credential.helper，避免误用明文落盘的 store helper。
 git_cached() { git -c credential.helper= -c 'credential.helper=cache --timeout=1800' "$@"; }
 
-echo '从 GitLab 更新 release 分支（首次可能提示输入一次账号和密码）…'
-git_cached sparse-checkout set supabase
-git_cached pull --ff-only origin release
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/crp-release.XXXXXXXX")"
+source_dir="$work_dir/repo"
+echo '临时拉取 GitLab release 分支（首次可能提示输入一次账号和密码）…'
+git_cached clone --depth 1 --single-branch --branch release --filter=blob:none --sparse \
+  "$expected_origin" "$source_dir"
+git_cached -C "$source_dir" sparse-checkout set supabase
+cd "$source_dir"
+[[ "$(git remote get-url origin)" == "$expected_origin" && "$(git branch --show-current)" == release ]] || {
+  echo '拉取的仓库或分支不符合预期，已停止。' >&2; exit 1;
+}
 [[ -f supabase/config.toml ]] || { echo '缺少 supabase/config.toml。' >&2; exit 1; }
 shopt -s nullglob
 migrations=(supabase/migrations/*.sql)
 (( ${#migrations[@]} > 0 )) || { echo '没有找到迁移文件，已停止。' >&2; exit 1; }
 functions=()
-changed_functions=()
 for function_path in supabase/functions/*/; do
   [[ -f "$function_path/index.ts" ]] || continue
   function_name="${function_path%/}"
@@ -103,20 +115,6 @@ if [[ "$mode" == '--apply' ]]; then
   "$cli" db push --db-url "$db_url" --skip-vault
   if (( ${#changed_functions[@]} > 0 )); then
     stage="$(mktemp -d "$functions_root/.crp-stage.XXXXXXXX")"
-    deploy_started=0
-    cleanup() {
-      status=$?
-      if (( status != 0 && deploy_started == 1 )); then
-        echo 'Function 更新失败，恢复之前的文件并重新启动 Functions；已成功执行的数据库迁移不会自动回滚。' >&2
-        for name in "${changed_functions[@]}"; do
-          rm -rf "$functions_root/$name"
-          [[ ! -d "$stage/old-$name" ]] || mv "$stage/old-$name" "$functions_root/$name"
-        done
-        (cd "$supabase_dir" && docker compose restart functions) || true
-      fi
-      rm -rf "$stage"
-    }
-    trap cleanup EXIT
     for name in "${changed_functions[@]}"; do
       cp -a "supabase/functions/$name" "$stage/$name"
     done
@@ -164,8 +162,6 @@ for name in ('admin-model-config', 'skill-bundle-admin'):
     print(f'{name} 已加载并保持会话校验。')
 PY
     deploy_started=0
-    trap - EXIT
-    rm -rf "$stage"
   fi
   echo "迁移及 Functions 更新已完成，代码版本：$(git rev-parse --short HEAD)。"
 else

@@ -46,9 +46,10 @@ deploy/supabase-selfhost/
 9. backup.sh → restore-verify.sh → 服务器重启验收
 ```
 
-更新脚本在公司 Linux 的 `/home/kduser/crp/migration-source` 上运行，用 Git 内存缓存让
-稀疏检出与 `git pull --ff-only` 共用一次 GitLab 凭据（缓存 30 分钟，不写密码文件）。
-随后使用 `/home/kduser/crp/supabase/.env` 中的数据库口令生成仅指向 `127.0.0.1:54342`
+将更新脚本固定放在公司 Linux 的 `/home/kduser/crp/apply-migrations.sh`。每次运行时，脚本在
+`/tmp` 下临时拉取 GitLab `release` 分支的 `supabase/`，运行结束（包括失败）就删除临时检出；
+不再维护持久的 `migration-source`。Git 内存缓存让 clone 与稀疏检出的请求共用 GitLab 凭据
+（缓存 30 分钟，不写密码文件）。随后使用 `/home/kduser/crp/supabase/.env` 中的数据库口令生成仅指向 `127.0.0.1:54342`
 的连接串。默认只预览；`--apply` 会再预览一次，由 CLI 交互确认数据库迁移，然后复制变更的
 Function 目录、重启容器并测试两个必需函数。Function 加载失败会恢复旧文件，但已经成功的
 数据库迁移不会回滚。脚本不运行 seed、`db reset` 或云端 linked 项目。发布前确保脚本本身
