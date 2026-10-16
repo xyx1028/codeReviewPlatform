@@ -5,7 +5,7 @@
 // model API keys here.
 window.__CRP_RUNTIME_CONFIG__ = Object.freeze({
   // Company browser address for the Supabase API, not crp-supabase-api and not 127.0.0.1.
-  supabaseUrl: 'https://supabase.corp.example',
+  supabaseUrl: 'https://crp-supabase.kingdee.com',
   // Copy ANON_KEY from /home/kduser/crp/supabase/.env.
   supabaseAnonKey: '',
   wechatLoginEnabled: false,
