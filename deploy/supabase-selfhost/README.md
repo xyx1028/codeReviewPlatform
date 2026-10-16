@@ -1,4 +1,4 @@
-# 内网自部署（V1.48 + V1.49）模板与脚本
+# 内网自部署（V1.48 + V1.49 + V1.50）模板与脚本
 
 执行方案在
 [`需求开发评审一致性平台/V1.48-内网自部署Supabase/需求开发评审一致性平台-V1.48内网自部署Supabase-最终执行方案.md`](../../需求开发评审一致性平台/V1.48-内网自部署Supabase/需求开发评审一致性平台-V1.48内网自部署Supabase-最终执行方案.md)。
@@ -31,7 +31,8 @@ deploy/supabase-selfhost/
     crp-mcp.service             # MCP 常驻（EnvironmentFile，不依赖 node --env-file）
   scripts/
     preflight.sh                # 目标服务器环境自检（只读）
-    apply-migrations.sh         # GitLab release 更新 + 数据库增量迁移 + Edge Functions
+    apply-migrations.sh         # release 临时检出 + 数据库增量迁移 + Edge Functions
+    release.sh                  # 日常总发布：迁移/Functions + Worker drain + Web
     build-edge-runtime-cache.sh # 构建并推送预热 Functions 依赖的 linux/amd64 镜像
     backup.sh                   # 数据库 + Storage + 配置 + Session 卷备份（只读）
     restore-verify.sh           # 恢复到**临时库**做验证，不碰在服务的库
@@ -52,9 +53,56 @@ deploy/supabase-selfhost/
 9. backup.sh → restore-verify.sh → 服务器重启验收
 ```
 
-将更新脚本固定放在公司 Linux 的 `/home/kduser/crp/apply-migrations.sh`。每次运行时，脚本在
-`/tmp` 下临时拉取 GitLab `release` 分支的 `supabase/`，运行结束（包括失败）就删除临时检出；
-不再维护持久的 `migration-source`。Git 内存缓存让 clone 与稀疏检出的请求共用 GitLab 凭据
+## 日常发布（V1.50）
+
+CI 成功后会给出一个统一应用镜像。日常发布只需要在公司 Linux 的
+`/home/kduser/crp/app` 执行总脚本；它不会构建镜像，使用的就是 CI 已推送的镜像。
+
+首次拿到 V1.50 时，先把包含脚本的 release 同步一次：
+
+```bash
+cd /home/kduser/crp/app
+git pull --ff-only origin release
+```
+
+随后先预览，再确认真实发布。`--dry-run` 不改数据库、Functions、Web 或 Worker；`--apply`
+会先同步 release，脚本本身有更新时自动以新版本重新执行。首次可能要求输入一次 GitLab 凭据，
+迁移阶段仍由 Supabase CLI 交互确认。未传 `--image` 时，脚本会查询 Nexus 的精确应用组件，自动选择
+最大的 `release_时间戳` 标签；不会选择同仓库的 `/cache` 镜像。
+
+```bash
+# 自动选择 Nexus 最新 release_ 时间戳镜像。
+bash deploy/supabase-selfhost/scripts/release.sh --dry-run
+
+# 自动选择并执行完整发布。
+bash deploy/supabase-selfhost/scripts/release.sh --apply
+
+# 先预览本次 release 的 SQL 迁移与 Function 差异。
+bash deploy/supabase-selfhost/scripts/release.sh --dry-run \
+  --image 'mirrors.kingdee.com/kingdee/lingee/patch/kwork-code-review:release_<构建号>'
+
+# 确认预览后执行完整发布。
+bash deploy/supabase-selfhost/scripts/release.sh --apply \
+  --image 'mirrors.kingdee.com/kingdee/lingee/patch/kwork-code-review:release_<构建号>'
+```
+
+若需要固定发布某一次流水线制品，则显式传 `--image`。自动查询失败时，交互终端会提示粘贴镜像地址；
+非交互调用必须显式传 `--image`。自动模式只比较 CI 使用的 `release_数字时间戳` 标签，不按 Nexus 页面
+更新时间排序。
+
+真实发布顺序固定为：同步 `release` → 增量 SQL → Edge Functions → 拉统一镜像 → Worker
+排空并更新 → Web 更新 → 本机健康检查。Worker 有在途任务时会停止领取新任务并等待其自行结束，
+不会强制中断；默认最多等 3600 秒，可传 `--worker-timeout <秒>` 调整。成功后，脚本将当前和上一次
+应用镜像写入 `/home/kduser/crp/last-release.env`，文件不包含任何密钥。
+
+总脚本不会改 Nginx、TLS 证书、浏览器运行时配置或 Worker 环境文件；这些是机器配置，不能被一次
+应用发布覆盖。数据库迁移仅前滚，应用镜像回退也不会自动回滚已执行的 SQL 或 Functions。
+
+迁移与 Function 子步骤由仓库内的 `deploy/supabase-selfhost/scripts/apply-migrations.sh` 提供，
+`release.sh --apply` 会在发布过程中自动调用它。之前单独放在公司 Linux
+`/home/kduser/crp/apply-migrations.sh` 的副本不再作为日常入口。每次运行时，子脚本在 `/tmp`
+下临时拉取 GitLab `release` 分支的 `supabase/`，运行结束（包括失败）就删除临时检出；不再维护持久的
+`migration-source`。Git 内存缓存让 clone 与稀疏检出的请求共用 GitLab 凭据
 （缓存 30 分钟，不写密码文件）。随后使用 `/home/kduser/crp/supabase/.env` 中的数据库口令生成仅指向 `127.0.0.1:54342`
 的连接串。默认只预览；`--apply` 会再预览一次，由 CLI 交互确认数据库迁移，然后复制变更的
 Function 目录、重启容器并测试两个必需函数。Function 加载失败会恢复旧文件，但已经成功的
