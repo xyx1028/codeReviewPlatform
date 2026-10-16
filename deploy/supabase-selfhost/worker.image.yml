@@ -1,0 +1,7 @@
+# Points the Worker at the same immutable release image used by the Web service.
+# Keep this layer separate: docker-compose.worker.yml remains usable for local
+# Docker builds, while Linux uses --no-build and only pulls this digest.
+services:
+  worker:
+    image: ${CRP_APP_IMAGE:?set CRP_APP_IMAGE to the CI-built application image digest}
+    build: !reset null

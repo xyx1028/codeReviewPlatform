@@ -1,27 +1,11 @@
-# Worker 的部署覆盖层（V1.48 内网自部署）
+# Worker deployment overlay for the company Linux host (V1.49).
 #
-# 用法（在公司 Linux 的代码目录 /srv/crp/app 下执行）：
-#   WORKER_ENV_FILE=.docker/worker.selfhost.env \
-#   docker compose -p crp-selfhost-worker \
-#     -f docker-compose.worker.yml \
-#     -f deploy/supabase-selfhost/worker.override.yml \
-#     up -d --build --scale worker=1
-#
-# 两点刻意如此：
-#
-# 1. **接入 Supabase 的 Compose 网络**（external，由 docker-compose.crp.yml 创建）。
-#    Worker 于是能用 http://crp-supabase-api:8000 直连 API 网关，不经过反向代理、
-#    不依赖 host.docker.internal，也不占用公司域名的 HTTPS 流量。
-# 2. **初期 1 副本**。空闲轮询也会打数据库，先用 1 副本 + 15 秒轮询把空转压下去
-#    （见 .docker/worker.selfhost.env.example）；容量不够再 --scale 上去。
-#
-# 注意：named volumes 与主 compose 文件保持一致，不要在这里重定义，否则会丢掉
-# Session 续跑依据（worker-sessions）。
-
+# The Worker joins only the existing Supabase network.  Do not add a default
+# network here: Docker would choose a fresh 172.x subnet, which previously
+# overlapped with company routing.
 services:
   worker:
     networks:
-      - default
       - supabase
 
 networks:

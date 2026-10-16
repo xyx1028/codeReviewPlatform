@@ -1,5 +1,7 @@
-# Worker image for the AI automation MVP. (Plan §17.1, §17.2)
-# Runs as a non-root user; no ports are exposed (outbound-only worker).
+# Unified company release image for the AI review platform. (Plan §17.1, §17.2)
+# The default command is the outbound-only Worker. The same immutable image also
+# contains the browser SPA; docker-compose.web.yml overrides only CMD to run
+# `node web-server.mjs`, so one CI artifact yields two independent containers.
 FROM kcr.kingdee.com/ai-2030/node:24-bookworm-slim-amd64
 
 # git + ripgrep are required by the read-only code tools; ca-certificates for TLS.
@@ -37,11 +39,17 @@ RUN npm ci
 # (worker/harness/code-review-acp/v4-capability-contract.json), both required at
 # runtime: the profile is materialized per attempt, and the contract is the
 # authority the Worker validates the resolved tool inventory against.
-COPY tsconfig.worker.json ./
+COPY tsconfig.json tsconfig.app.json tsconfig.node.json tsconfig.worker.json ./
+COPY index.html vite.config.ts ./
 COPY Dockerfile.workercompany ./
 COPY scripts ./scripts
 COPY supabase/migrations ./supabase/migrations
 COPY worker ./worker
+# Browser build inputs. The image retains an empty public/runtime-config.js; Linux
+# bind-mounts its browser-safe values over dist/runtime-config.js at startup.
+COPY src ./src
+COPY public ./public
+COPY deploy/supabase-selfhost/web-server.mjs ./web-server.mjs
 # Fail the build early if the frozen V4 capability contract did not make it into
 # the image; the Worker refuses to run without it.
 RUN test -f /app/worker/harness/code-review-acp/v4-capability-contract.json
@@ -59,6 +67,7 @@ RUN test -f /app/worker/harness/code-review-acp/v4-capability-contract.json
 # this company Dockerfile for the contract check, then remove it before the
 # image layer is finalized. Dockerfile.worker is never copied into this image.
 RUN WORKER_DOCKERFILE=Dockerfile.workercompany npm run worker:build \
+  && WORKER_DOCKERFILE=Dockerfile.workercompany npm run build:selfhost \
   && mkdir -p /app/node_modules/@codereview \
   && for plugin in agent-authority-policy usage-reporter platform-web snapshot-tools review-control-tool; do \
        test -d "/app/dist-worker/harness-plugins/$plugin" \
@@ -80,6 +89,7 @@ ENV AGENT_ATTEMPTS_ROOT=/workspace/agent-attempts
 ENV AGENT_SESSION_ROOT=/workspace/agent-sessions
 
 # Create the non-root user and the workspace it owns. (Plan §17.2)
+# The Web service uses this same non-root account and only reads /app/dist.
 # All four runtime roots are pre-created 0700 so a freshly mounted empty volume
 # already has the right ownership and permissions before the worker starts.
 RUN groupadd --system worker \
@@ -92,4 +102,5 @@ RUN groupadd --system worker \
 
 USER worker
 
+# docker-compose.web.yml overrides this with: node web-server.mjs.
 CMD ["npm", "run", "worker:start"]

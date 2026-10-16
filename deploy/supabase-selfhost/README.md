@@ -13,8 +13,9 @@
 deploy/supabase-selfhost/
   docker-compose.crp.yml        # Supabase 官方 compose 的覆盖层：端口收回环 + 共享网络别名
   Dockerfile.edge-runtime-cache # 预热 Edge Functions 依赖的 linux/amd64 运行时镜像
-  worker.override.yml           # Worker 接入 Supabase 的 compose 网络、1 副本
-  docker-compose.web.yml        # 前端镜像接入既有网络，仅回环暴露 4180
+  worker.override.yml           # Worker 仅接入固定的 Supabase 网络
+  worker.image.yml              # Worker 指向统一应用镜像，关闭本机构建
+  docker-compose.web.yml        # 同一应用镜像以 Web 入口运行，仅回环暴露 4180
   web-server.mjs                # SPA 深链接回退与静态缓存，无额外运行时镜像
   env/
     supabase.env.nonsecret.example   # 自部署 Supabase .env 的非秘密部分
@@ -44,8 +45,8 @@ deploy/supabase-selfhost/
 3. 配置 Functions 运行时变量 → 方案 §7.4
 4. scripts/apply-migrations.sh --dry-run，确认后 --apply → 迁移 + Functions
 5. 建管理员 / MCP 专用 REVIEWER / 普通账号；配模型、Git 身份、Skill
-6. CI 同一 release 构建 Worker 镜像 + 前端镜像；Linux 拉取前端镜像 → Nginx 反向代理到 4180
-7. Worker：worker.selfhost.env + worker.override.yml，1 副本
+6. CI 每个 release 只构建一个统一应用镜像；Linux 用同一 digest 分别启动 Worker 与 Web → Nginx 反向代理到 4180
+7. Worker：worker.selfhost.env + worker.override.yml + worker.image.yml，1 副本
 8. MCP：mcp.env.selfhost.local + systemd + nginx（mcp.conf）
 9. backup.sh → restore-verify.sh → 服务器重启验收
 ```
@@ -110,10 +111,11 @@ docker compose ps functions
 重新构建镜像。它会发送给浏览器，所以只能写公开的 anon key，绝不能放 service-role key、数据库密码、GitLab
 Token 或模型 API key。
 
-**前端镜像运行。** Worker 和前端由同一 release 流水线分别构建。前端构建完成后，Linux 以
-镜像摘要启动 `docker-compose.web.yml`，只绑定 `127.0.0.1:4180`；公司浏览器通过宿主机
-Nginx 的 `review.conf` 访问 HTTPS 域名。前端容器只加入既有 `crp-selfhost-net`，不会新建
-自动分配的 Docker 默认网络。首次创建配置文件的命令如下，域名必须换成 IT 分配的正式地址：
+**统一应用镜像运行。** Worker 与前端共用同一个 release 镜像摘要：Worker 保持默认启动命令，
+Web 服务通过 Compose 把命令改成 `node web-server.mjs`。两者仍是两个独立容器，因此可以分别查看日志、
+重启和扩容；只是只需要一条流水线产出和一次镜像拉取。两个服务都只加入既有的
+`crp-selfhost-net`，不会创建自动分配的 Docker 默认网络。Web 只绑定 `127.0.0.1:4180`；公司浏览器
+经宿主机 Nginx 的 HTTPS 域名访问。首次创建浏览器配置后，用同一个 `CRP_APP_IMAGE` 部署：
 
 ```bash
 mkdir -p /home/kduser/crp/web
@@ -122,9 +124,16 @@ cp deploy/supabase-selfhost/env/frontend.runtime-config.js.example \
 chmod 644 /home/kduser/crp/web/runtime-config.js
 # 编辑 /home/kduser/crp/web/runtime-config.js：填正式 Supabase HTTPS 地址与 .env 中的 ANON_KEY
 
+export CRP_APP_IMAGE='mirrors.kingdee.com/kingdee/lingee/patch/kwork-code-review@sha256:<digest>'
 export CRP_WEB_RUNTIME_CONFIG=/home/kduser/crp/web/runtime-config.js
-export CRP_WEB_IMAGE='mirrors.kingdee.com/kingdee/lingee/patch/kwork-code-review-web@sha256:<digest>'
+
 docker compose -p crp-selfhost-web -f deploy/supabase-selfhost/docker-compose.web.yml up -d
+WORKER_ENV_FILE=.docker/worker.selfhost.env \
+  docker compose -p crp-selfhost-worker \
+    -f docker-compose.worker.yml \
+    -f deploy/supabase-selfhost/worker.override.yml \
+    -f deploy/supabase-selfhost/worker.image.yml \
+    up -d --no-build --scale worker=1
 ```
 
 **流水线先测连通，再发布。** `scripts/pipeline-deploy.py` 的默认 `tcp-check` 只检查 DevOps

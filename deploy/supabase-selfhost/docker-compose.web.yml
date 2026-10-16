@@ -1,11 +1,10 @@
-# Browser SPA container for company Linux.
-#
-# Run with CRP_WEB_IMAGE=<immutable image digest> docker compose -f this-file up -d.
-# The only Docker network is the existing Supabase network, so this Compose
-# project cannot create an auto-selected 172.x bridge range.
+# Browser SPA service from the same immutable release image as the Worker.
+# This Compose project joins only the existing fixed 10.255.0.0/24 Supabase
+# network, so it cannot create another auto-selected 172.x bridge network.
 services:
   web:
-    image: ${CRP_WEB_IMAGE:?set CRP_WEB_IMAGE to the CI-built frontend image digest}
+    image: ${CRP_APP_IMAGE:?set CRP_APP_IMAGE to the CI-built application image digest}
+    command: ["node", "web-server.mjs"]
     restart: unless-stopped
     ports:
       - "127.0.0.1:4180:8080"
@@ -18,6 +17,14 @@ services:
       - /tmp
     volumes:
       - ${CRP_WEB_RUNTIME_CONFIG:?set CRP_WEB_RUNTIME_CONFIG to the Linux runtime-config.js path}:/app/dist/runtime-config.js:ro
+    # A Dockerfile health check would also apply to the Worker role, where port
+    # 8080 is intentionally absent.  Keep the HTTP health check service-local.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/__health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
 
 networks:
   supabase:
