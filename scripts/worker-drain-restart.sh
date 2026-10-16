@@ -22,6 +22,8 @@
 #   scripts/worker-drain-restart.sh --lift-only          # 只解除 drain
 #   scripts/worker-drain-restart.sh --skip-drain         # 跳过排空直接重建（见下）
 #   scripts/worker-drain-restart.sh --timeout 5400       # 等待上限（秒），默认 3600
+#   scripts/worker-drain-restart.sh --compose-file docker-compose.worker.yml \
+#     --compose-file deploy/supabase-selfhost/worker.override.yml  # 可重复叠加 Compose
 #
 # `--skip-drain` 只有一个正当用途：**首次**部署带 drain 能力的镜像。在那之前池子里跑的是
 # 不认识 DRAIN sentinel 的旧镜像，它们永远不会写出 DRAINED 标记，脚本只会白等到超时。
@@ -32,7 +34,7 @@ set -euo pipefail
 
 PROJECT="codereviewplatform"
 ENV_FILE=".docker/worker.env"
-COMPOSE_FILE="docker-compose.worker.yml"
+COMPOSE_FILES=()
 SCALE=""
 BUILD_FLAG="--no-build"
 TIMEOUT=3600
@@ -43,7 +45,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --project) PROJECT="$2"; shift 2 ;;
     --env-file) ENV_FILE="$2"; shift 2 ;;
-    --compose-file) COMPOSE_FILE="$2"; shift 2 ;;
+    --compose-file) COMPOSE_FILES+=("$2"); shift 2 ;;
     --scale) SCALE="$2"; shift 2 ;;
     --build) BUILD_FLAG="--build"; shift ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
@@ -55,6 +57,20 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+# 默认仍使用原来的单 Compose 文件；Linux 自部署可重复传 --compose-file
+# 叠加固定网络与统一镜像覆盖层。
+if [[ ${#COMPOSE_FILES[@]} -eq 0 ]]; then
+  COMPOSE_FILES=("docker-compose.worker.yml")
+fi
+COMPOSE_ARGS=()
+for compose_file in "${COMPOSE_FILES[@]}"; do
+  COMPOSE_ARGS+=( -f "$compose_file" )
+done
+
+compose() {
+  docker compose -p "$PROJECT" "${COMPOSE_ARGS[@]}" "$@"
+}
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
 
@@ -104,7 +120,7 @@ MAIN_CONTAINER="$(any_container || true)"
 if [[ -z "${MAIN_CONTAINER:-}" ]]; then
   log "项目 ${PROJECT} 下没有运行中的 worker 容器：没有在途任务需要保护，直接启动即可。"
   if [[ "$MODE" == "restart" ]]; then
-    WORKER_ENV_FILE="$ENV_FILE" docker compose -p "$PROJECT" -f "$COMPOSE_FILE" \
+    WORKER_ENV_FILE="$ENV_FILE" compose \
       up -d $BUILD_FLAG ${SCALE:+--scale worker=$SCALE}
   fi
   exit 0
@@ -137,7 +153,7 @@ purge_stale_markers "$EXPECTED_IDS"
 if [[ "$MODE" == "skip-drain" ]]; then
   log "⚠️  --skip-drain：跳过排空，直接重建 ${EXPECTED_COUNT} 个副本。"
   log "⚠️  只有在你已经确认「没有在途任务」时这才是安全的（首次部署 drain 能力时的唯一通道）。"
-  WORKER_ENV_FILE="$ENV_FILE" docker compose -p "$PROJECT" -f "$COMPOSE_FILE" \
+  WORKER_ENV_FILE="$ENV_FILE" compose \
     up -d $BUILD_FLAG --force-recreate ${SCALE:+--scale worker=$SCALE}
   sleep 5
   lift_drain
@@ -203,7 +219,7 @@ fi
 
 # 3) 现在重建是安全的：没有任何 attempt 在跑，也没有任何 claim 被持有。
 log "重建容器…"
-WORKER_ENV_FILE="$ENV_FILE" docker compose -p "$PROJECT" -f "$COMPOSE_FILE" \
+WORKER_ENV_FILE="$ENV_FILE" compose \
   up -d $BUILD_FLAG --force-recreate ${SCALE:+--scale worker=$SCALE}
 
 # 4) 新容器起来后删掉 sentinel，否则它们会继承 drain 状态、永远不领任务。
@@ -217,5 +233,5 @@ if [[ -n "${MAIN_CONTAINER:-}" ]]; then
 fi
 
 log "完成。校验："
-log "  docker compose -p ${PROJECT} -f ${COMPOSE_FILE} ps"
+log "  docker compose -p ${PROJECT} ${COMPOSE_ARGS[*]} ps"
 log "  docker logs --tail 20 \$(docker ps -q --filter label=com.docker.compose.project=${PROJECT} | head -1)"
