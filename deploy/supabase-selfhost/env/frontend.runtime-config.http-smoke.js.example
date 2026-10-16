@@ -1,0 +1,9 @@
+// 临时内网 HTTP 冒烟配置：复制到 Linux 的
+// /home/kduser/crp/web/runtime-config.js，并填写实际 ANON_KEY。
+// 仅用于证书下发前验证访问链路；不要在 HTTP 上登录、上传文件或进行正式使用。
+window.__CRP_RUNTIME_CONFIG__ = Object.freeze({
+  supabaseUrl: 'http://crp-supabase.kingdee.com',
+  supabaseAnonKey: '',
+  wechatLoginEnabled: false,
+  linkyApiBaseUrl: '',
+})

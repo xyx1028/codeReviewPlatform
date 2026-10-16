@@ -24,7 +24,8 @@ deploy/supabase-selfhost/
     mcp.env.selfhost.example         # 远程 MCP（mcp/code-review-mcp/.env.selfhost.local）
   nginx/
     review.conf                 # 前端 SPA + HTTPS（含深链接回退）
-    supabase.conf               # Supabase API 对外入口（Studio 不对外）
+    supabase.conf               # Supabase API 的 HTTPS 入口（Studio 不对外）
+    http-smoke.conf             # 证书下发前临时 HTTP 冒烟，不能与上述两个 HTTPS 配置并存
     mcp.conf                    # MCP /mcp 转发（关缓冲、保留鉴权与会话头）
   systemd/
     crp-mcp.service             # MCP 常驻（EnvironmentFile，不依赖 node --env-file）
@@ -176,3 +177,26 @@ bash deploy/supabase-selfhost/scripts/restore-verify.sh /srv/crp/backups/<时间
 不写进脚本：它需要先确认目标，手滑一次不可回头。
 
 两个脚本都不执行 `docker compose down -v`、不 drop 业务库、不 `db reset`。
+
+## 证书下发前的 HTTP 冒烟
+
+DNS 已分配 `crp-review.kingdee.com` 与 `crp-supabase.kingdee.com`。证书未到位时，可临时在公司内网通过 HTTP 验证链路，不能用于登录、上传或正式使用。
+
+1. Linux 先确认公司网络允许访问 80 端口；DNS 记录中显示 443 不代表 80 一定已开放。
+2. 只安装 `http-smoke.conf`，不要同时安装 `review.conf`、`supabase.conf`：
+
+```bash
+sudo install -D -m 644 deploy/supabase-selfhost/nginx/snippets/crp-supabase-proxy.conf \
+  /etc/nginx/snippets/crp-supabase-proxy.conf
+sudo install -m 644 deploy/supabase-selfhost/nginx/http-smoke.conf \
+  /etc/nginx/conf.d/crp-http-smoke.conf
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+3. 把 `env/frontend.runtime-config.http-smoke.js.example` 复制为 Linux 的 `/home/kduser/crp/web/runtime-config.js`，仅填写 Supabase `.env` 的 `ANON_KEY`，然后重启 Web 容器。访问：
+
+```text
+http://crp-review.kingdee.com
+```
+
+4. 证书下发后，删除 `/etc/nginx/conf.d/crp-http-smoke.conf`，恢复 `review.conf` 与 `supabase.conf`，并把 `runtime-config.js` 的 API 地址改回 `https://crp-supabase.kingdee.com`。
