@@ -90,6 +90,10 @@ bash deploy/supabase-selfhost/scripts/release.sh --apply \
 非交互调用必须显式传 `--image`。自动模式只比较 CI 使用的 `release_数字时间戳` 标签，不按 Nexus 页面
 更新时间排序。
 
+迁移和总发布脚本会将自身的锁文件描述符从 Git 子进程中关闭；Git 的内存凭据缓存守护进程因此不会在
+脚本结束后继续占用发布锁。若曾运行旧版本脚本且提示“另一轮迁移正在运行”，可以执行
+`git credential-cache exit` 清掉仅内存中的 Git 登录缓存，然后重试；下一次 Git 操作会重新要求登录。
+
 真实发布顺序固定为：同步 `release` → 增量 SQL → Edge Functions → 拉统一镜像 → Worker
 排空并更新 → Web 更新 → 本机健康检查。Worker 有在途任务时会停止领取新任务并等待其自行结束，
 不会强制中断；默认最多等 3600 秒，可传 `--worker-timeout <秒>` 调整。成功后，脚本将当前和上一次

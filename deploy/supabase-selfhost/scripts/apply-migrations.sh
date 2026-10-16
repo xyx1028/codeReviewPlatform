@@ -52,7 +52,9 @@ trap cleanup EXIT
 
 # 只在内存中缓存本用户凭据 30 分钟；clone 和稀疏检出的二次 fetch 共用。
 # 清空其他 credential.helper，避免误用明文落盘的 store helper。
-git_cached() { git -c credential.helper= -c 'credential.helper=cache --timeout=1800' "$@"; }
+# 关闭本脚本的锁 FD 再启动 Git：credential-cache 守护进程会常驻，不能让它继承迁移锁并
+# 在脚本退出后继续占用 30 分钟。
+git_cached() { git -c credential.helper= -c 'credential.helper=cache --timeout=1800' "$@" 9>&-; }
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/crp-release.XXXXXXXX")"
 source_dir="$work_dir/repo"

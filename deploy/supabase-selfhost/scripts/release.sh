@@ -123,8 +123,8 @@ exec 9>"$repo_dir/../.crp-platform-release.lock"
 flock -n 9 || { echo '另一轮平台发布正在运行。' >&2; exit 1; }
 
 # clone、fetch 与 apply-migrations.sh 共用进程外的 30 分钟内存 credential cache，
-# 不把 GitLab 密码或 Token 写入磁盘。
-git_cached() { git -c credential.helper= -c 'credential.helper=cache --timeout=1800' "$@"; }
+# 不把 GitLab 密码或 Token 写入磁盘。关闭平台发布锁 FD，避免凭据缓存守护进程继承它。
+git_cached() { git -c credential.helper= -c 'credential.helper=cache --timeout=1800' "$@" 9>&-; }
 
 web_compose() {
   CRP_APP_IMAGE="$image" CRP_WEB_RUNTIME_CONFIG="$web_runtime_config" \
