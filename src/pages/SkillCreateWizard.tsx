@@ -60,7 +60,7 @@ function previewIssueHint(preview: SkillBundlePreview): string | null {
             : '归档目录解析到一半失败：常见原因是文件被截断，或文件名不是 UTF-8（中文 Windows 的「发送到压缩文件夹」会这样）。见下面的技术详情。'
       }
     case 'entry-nested':
-      return `SKILL.md 在子目录 ${preview.nestedEntryPath} 里。平台要求它在 ZIP 根目录：请进入技能目录内部打包（zip -r ../<name>.zip .），不要压缩外层文件夹。`
+      return `SKILL.md 位于 ${preview.nestedEntryPath}。请只打包一个技能文件夹，确保 SKILL.md 位于根目录或唯一一层文件夹内，不要混装多个技能或再嵌套多层目录。`
     case 'entry-missing':
       return `ZIP 根目录没有 SKILL.md。${MANUAL_FALLBACK}`
     case 'entry-unreadable':
@@ -292,7 +292,7 @@ export function SkillCreateWizard({
                     </p>
                     <p className="skill-upload-dragger__title">点击或拖拽上传</p>
                     <p className="ant-upload-hint skill-upload-dragger__hint">
-                      支持 .zip 格式，根目录需直接包含 <Text code>SKILL.md</Text>
+                      支持 .zip 格式，根目录或唯一一层技能文件夹内需包含 <Text code>SKILL.md</Text>；自动忽略 Mac / Windows 打包附加文件
                     </p>
                   </>
                 ) : (

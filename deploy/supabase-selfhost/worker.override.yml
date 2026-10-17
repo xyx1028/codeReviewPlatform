@@ -5,6 +5,9 @@
 # overlapped with company routing.
 services:
   worker:
+    # Company capacity policy: override legacy env_file values without rewriting secrets.
+    environment:
+      WORKER_STORY_CONCURRENCY: "2"
     networks:
       - supabase
 

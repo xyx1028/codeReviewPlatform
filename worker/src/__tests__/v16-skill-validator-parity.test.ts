@@ -17,6 +17,7 @@ import { describe, expect, it } from 'vitest'
 import { validateSkillArchive as workerValidate } from '../ai/skills/bundle-validator.js'
 import {
   validateSkillArchive as edgeValidate,
+  readArchiveTextEntries,
   LIMITS as EDGE_LIMITS,
 } from '../../../supabase/functions/skill-bundle-admin/bundle.js'
 import { SKILL_BUNDLE_LIMITS } from '../ai/skills/skill-limits.js'
@@ -56,12 +57,74 @@ describe('worker and edge-function bundle validators agree', () => {
     expect(JSON.stringify(edge.manifest)).toBe(JSON.stringify(worker.manifest))
   })
 
+
+  const metadata: ZipEntrySpec[] = [
+    { name: '__MACOSX/', content: '' },
+    { name: '__MACOSX/bundle/._SKILL.md', content: Buffer.from([0, 255, 1]) },
+    { name: 'bundle/.DS_Store', content: Buffer.from([0, 255]) },
+    { name: 'bundle/references/._domain-model.md', content: Buffer.from([0]) },
+    { name: 'Thumbs.db', content: Buffer.from([255]) },
+    { name: 'desktop.ini', content: 'windows metadata' },
+  ]
+
+  it.each(['Mac Finder', 'Windows Explorer', 'root layout'])('normalizes %s packaging with identical effective contents', async (style) => {
+    const root = workerValidate({ archive: buildZip(validBundleEntries()), expectedSkillName: SKILL_NAME })
+    const wrapped = style !== 'root layout'
+    const entries = validBundleEntries().map((e) => ({
+      ...e, name: (wrapped ? 'bundle/' : '') + e.name,
+      ...(style === 'Windows Explorer' ? { unixMode: 0 } : {}),
+    }))
+    if (wrapped) entries.unshift({ name: 'bundle/', content: '' })
+    const archive = buildZip([...entries, ...metadata])
+    const worker = workerValidate({ archive, expectedSkillName: SKILL_NAME })
+    const edge = await edgeValidate(new Uint8Array(archive), SKILL_NAME)
+    expect(edge.manifest).toEqual(worker.manifest)
+    expect(edge.bundleHash).toBe(root.bundleHash)
+    expect(worker.manifest.files).toEqual(root.manifest.files)
+    expect(worker.archiveSha256).not.toBe(root.archiveSha256)
+    expect(worker.files.map((file) => file.path)).toEqual(root.files.map((file) => file.path))
+    expect(worker.containsScripts).toBe(true)
+    const diff = await readArchiveTextEntries(new Uint8Array(archive), ['SKILL.md', 'references/domain-model.md', 'assets/flow.png'])
+    expect(diff.texts.get('SKILL.md')).toBe(validEntryMarkdown())
+    expect(diff.texts.get('references/domain-model.md')).toBe('# domain\n')
+    expect([...diff.binary]).toEqual(['assets/flow.png'])
+  })
+
+  it('does not count metadata against effective entry limits, with a bounded raw directory', async () => {
+    const entries = [{ name: 'SKILL.md', content: validEntryMarkdown() }]
+    for (let i = 0; i < 110; i++) {
+      entries.push({ name: `references/f${i}.md`, content: `reference ${i}` })
+      entries.push({ name: `__MACOSX/references/._f${i}.md`, content: 'metadata' })
+    }
+    const archive = buildZip(entries)
+    const worker = workerValidate({ archive, expectedSkillName: SKILL_NAME })
+    const edge = await edgeValidate(new Uint8Array(archive), SKILL_NAME)
+    expect(edge.manifest).toEqual(worker.manifest)
+    expect(worker.fileCount).toBe(111)
+    const excessive = buildZip([
+      { name: 'SKILL.md', content: validEntryMarkdown() },
+      ...Array.from({ length: SKILL_BUNDLE_LIMITS.entryCount * 4 }, (_, i) => ({ name: `__MACOSX/._f${i}`, content: '' })),
+    ])
+    expect(() => workerValidate({ archive: excessive, expectedSkillName: SKILL_NAME })).toThrow()
+    await expect(edgeValidate(new Uint8Array(excessive), SKILL_NAME)).rejects.toThrow()
+  })
+
   const hostile: Array<[string, ZipEntrySpec[]]> = [
+    ['metadata traversal', [{ name: 'SKILL.md', content: validEntryMarkdown() }, { name: '__MACOSX/../pwn', content: 'x' }]],
+    ['absolute metadata', [{ name: 'SKILL.md', content: validEntryMarkdown() }, { name: '/__MACOSX/._file', content: 'x' }]],
+    ['metadata symlink', [{ name: 'SKILL.md', content: validEntryMarkdown() }, { name: '__MACOSX/._file', content: '../x', unixMode: UNIX_MODE.symlink }]],
+    ['encrypted metadata', [{ name: 'SKILL.md', content: validEntryMarkdown() }, { name: '.DS_Store', content: 'x', flags: 1 }]],
+    ['metadata backslash', [{ name: 'SKILL.md', content: validEntryMarkdown() }, { name: '__MACOSX\\._file', content: 'x' }]],
+    ['nested fake metadata directory', [{ name: 'SKILL.md', content: validEntryMarkdown() }, { name: 'references/../.DS_Store', content: 'x' }]],
+    ['wrapped duplicate', [{ name: 'bundle/SKILL.md', content: validEntryMarkdown() }, { name: 'bundle/SKILL.md', content: validEntryMarkdown() }]],
+    ['wrapped case collision', [{ name: 'bundle/SKILL.md', content: validEntryMarkdown() }, { name: 'bundle/references/A.md', content: 'x' }, { name: 'bundle/references/a.md', content: 'y' }]],
+    ['wrapped illegal path', [{ name: 'bundle/SKILL.md', content: validEntryMarkdown() }, { name: 'bundle/references/bad name.md', content: 'x' }]],
+    ['wrapped sibling file', [{ name: 'bundle/SKILL.md', content: validEntryMarkdown() }, { name: 'other.md', content: 'x' }]],
     ['zip slip', [{ name: 'SKILL.md', content: validEntryMarkdown() }, { name: '../../pwn', content: 'x' }]],
     ['absolute path', [{ name: 'SKILL.md', content: validEntryMarkdown() }, { name: '/etc/passwd', content: 'x' }]],
     ['backslash path', [{ name: 'SKILL.md', content: validEntryMarkdown() }, { name: 'references\\a.md', content: 'x' }]],
-    ['no root SKILL.md', [{ name: 'x/SKILL.md', content: validEntryMarkdown() }]],
-    ['nested outer directory', [{ name: `${SKILL_NAME}/SKILL.md`, content: validEntryMarkdown() }]],
+    ['multiple wrapper folders', [{ name: 'x/SKILL.md', content: validEntryMarkdown() }, { name: 'y/SKILL.md', content: validEntryMarkdown() }]],
+    ['two outer directories', [{ name: `outer/${SKILL_NAME}/SKILL.md`, content: validEntryMarkdown() }]],
     [
       'symlink',
       [

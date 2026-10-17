@@ -1,5 +1,5 @@
 /**
- * 浏览器端 Bundle 预览：从 ZIP 根目录的 `SKILL.md` 里取出 frontmatter 的
+ * 浏览器端 Bundle 预览：从 ZIP 规范根目录（含单层外部目录）的 `SKILL.md` 里取出 frontmatter 的
  * `name` / `description` / `whenToUse`，用来预填「新增技能」表单。
  *
  * ## 这里**不是**校验器
@@ -30,7 +30,7 @@
  * ## `issue` 存在的理由
  *
  * 读不出来时仍然只是"留空让人手敲"，但**必须说清是哪一种读不出来**：不是 ZIP、SKILL.md
- * 被多包了一层目录、还是入口解压失败。原来四种情况共用一句话，远程排查时无法区分。
+ * 被多包了多层目录、还是入口解压失败。一层唯一外部目录自动兼容。原来四种情况共用一句话，远程排查时无法区分。
  */
 
 import { inflateSync } from 'fflate'
@@ -41,19 +41,19 @@ export type SkillBundlePreviewIssue =
   | 'archive-unreadable'
   /** 是 ZIP，但根目录和任何子目录里都没有 SKILL.md。 */
   | 'entry-missing'
-  /** SKILL.md 在子目录里 —— 通常是"压缩了外层文件夹"这个经典错误。 */
+  /** SKILL.md 的目录结构不满足根目录或唯一一层外部目录要求。 */
   | 'entry-nested'
   /** 根部有 SKILL.md，但解压或 UTF-8 解码失败。 */
   | 'entry-unreadable'
 
 export interface SkillBundlePreview {
-  /** ZIP 根部 SKILL.md 的 frontmatter `name`，取不到则为 null。 */
+  /** ZIP 规范根部 SKILL.md 的 frontmatter `name`，取不到则为 null。 */
   name: string | null
   description: string | null
   whenToUse: string | null
   /** 归档里是否存在 `scripts/` 下的文件。仅用于提前提示，权威判定在服务端。 */
   containsScripts: boolean
-  /** 根部是否存在 SKILL.md。false 时上面几项必然为空。 */
+  /** 规范根部是否存在 SKILL.md。false 时上面几项必然为空。 */
   hasEntry: boolean
   /** null 表示 frontmatter 读取正常（字段仍可能为空）。 */
   issue: SkillBundlePreviewIssue | null
@@ -138,6 +138,26 @@ const EMPTY: Omit<SkillBundlePreview, 'diagnostics'> = {
   nestedEntryPath: null,
 }
 
+/** Packaging metadata is never materialized. Unsafe paths cannot be hidden by this filter. */
+function isPackagingMetadataPath(rawName: string): boolean {
+  if (rawName.includes('\\') || rawName.includes('\0') || rawName.normalize('NFC') !== rawName) return false
+  const parts = rawName.replace(/\/$/, '').split('/')
+  if (parts.some((part) => part === '.' || part === '..' || !/^[A-Za-z0-9._-]+$/.test(part))) return false
+  return parts.some((part) =>
+    part === '__MACOSX' || part === '.DS_Store' || part.startsWith('._') ||
+    /^(Thumbs\.db|desktop\.ini)$/i.test(part),
+  )
+}
+
+/** Strip exactly one common folder, never search recursively for an arbitrary SKILL.md. */
+function skillArchiveRootPrefix(paths: readonly string[]): string {
+  if (paths.includes('SKILL.md')) return ''
+  const candidate = paths.find((path) => /^[^/]+\/SKILL\.md$/.test(path))
+  if (candidate === undefined) return ''
+  const prefix = candidate.slice(0, -'SKILL.md'.length)
+  return paths.every((path) => path === prefix || path.startsWith(prefix)) ? prefix : ''
+}
+
 const ENTRY_PATH = 'SKILL.md'
 const EOCD_SIGNATURE = 0x06054b50
 const CENTRAL_SIGNATURE = 0x02014b50
@@ -209,12 +229,14 @@ export async function readSkillBundlePreview(file: Blob): Promise<SkillBundlePre
     const entries = readCentralDirectory(view, diagnostics)
     if (entries === null) return { ...EMPTY, issue: 'archive-unreadable', diagnostics }
 
-    containsScripts = entries.some(
-      (entry) => entry.path.startsWith('scripts/') && !entry.path.endsWith('/'),
+    const effective = entries.filter((entry) => !isPackagingMetadataPath(entry.path))
+    const prefix = skillArchiveRootPrefix(effective.map((entry) => entry.path))
+    containsScripts = effective.some(
+      (entry) => entry.path.slice(prefix.length).startsWith('scripts/') && !entry.path.endsWith('/'),
     )
-    const entry = entries.find((candidate) => candidate.path === ENTRY_PATH)
+    const entry = effective.find((candidate) => candidate.path === prefix + ENTRY_PATH)
     if (entry === undefined) {
-      const nested = entries.find((candidate) => candidate.path.endsWith(`/${ENTRY_PATH}`))
+      const nested = effective.find((candidate) => candidate.path.endsWith(`/${ENTRY_PATH}`))
       diagnostics.failureStage = 'entry-not-found'
       diagnostics.failureDetail =
         nested === undefined ? 'no SKILL.md in archive' : `SKILL.md nested at ${nested.path}`

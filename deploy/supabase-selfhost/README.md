@@ -95,7 +95,10 @@ bash deploy/supabase-selfhost/scripts/release.sh --apply \
 `git credential-cache exit` 清掉仅内存中的 Git 登录缓存，然后重试；下一次 Git 操作会重新要求登录。
 
 真实发布顺序固定为：同步 `release` → 增量 SQL → Edge Functions → 拉统一镜像 → Worker
-排空并更新 → Web 更新 → 本机健康检查。Worker 有在途任务时会停止领取新任务并等待其自行结束，
+排空并更新 → Web 更新 → 本机健康检查。默认启动 **4 个 Worker，每个并发处理 2 条需求任务**（最多 8 条，仍受模型并发限额约束）。
+公司 `worker.override.yml` 明确设置 `WORKER_STORY_CONCURRENCY=2`，覆盖旧 env 文件中的 1；
+不需要手改密钥文件。发布检查要求全部 4 个副本均启动且并发为 2 才通过。
+Worker 有在途任务时会停止领取新任务并等待其自行结束，
 不会强制中断；默认最多等 3600 秒，可传 `--worker-timeout <秒>` 调整。成功后，脚本将当前和上一次
 应用镜像写入 `/home/kduser/crp/last-release.env`，文件不包含任何密钥。
 

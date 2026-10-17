@@ -3,7 +3,7 @@
  *
  * 覆盖方案 §19 的验收标准，按"哪一条被证明了"组织：
  *
- *   §19.2  根 SKILL.md 缺失、嵌套外层目录一律拒绝
+ *   §19.2  根 SKILL.md 缺失或歧义入口拒绝；V1.51 兼容唯一一层外层目录
  *   §19.3  Zip Slip、绝对路径、`..`、重复规范路径、symlink、特殊文件、Zip Bomb
  *   §19.7  cache miss 下载一次；cache hit 不重复下载且复核 manifest
  *   §19.8  完整文件树物化到 DSH_HOME/skills/<name>，不写代码 Workspace
@@ -171,14 +171,12 @@ describe('skill archive validation', () => {
     ).toThrow(SkillBundleInvalidError)
   })
 
-  it('rejects an extra outer directory (§19.2)', () => {
-    // 平台物化时已经创建 `<DSH_HOME>/skills/<name>/`，归档再带一层 DSH 就找不到入口。
-    expect(() =>
-      validate([
-        { name: `${SKILL_NAME}/`, content: '' },
-        { name: `${SKILL_NAME}/SKILL.md`, content: validEntryMarkdown() },
-      ]),
-    ).toThrow(/archive root must contain SKILL\.md/)
+  it('accepts a single outer directory and materializes root-relative paths (V1.51)', () => {
+    const result = validate([
+      { name: `${SKILL_NAME}/`, content: '' },
+      { name: `${SKILL_NAME}/SKILL.md`, content: validEntryMarkdown() },
+    ])
+    expect(result.files.map((file) => file.path)).toEqual(['SKILL.md'])
   })
 
   it('rejects an empty SKILL.md', () => {
@@ -413,9 +411,9 @@ describe('three-layer hash identity', () => {
 // §10 共享 cache
 // ---------------------------------------------------------------------------
 
-function publishFixture(cacheRoot: string) {
+function publishFixture(cacheRoot: string, entries = validBundleEntries()) {
   const cache = new SkillCache({ cacheRoot })
-  const archive = buildZip(validBundleEntries())
+  const archive = buildZip(entries)
   const validated = validateSkillArchive({ archive, expectedSkillName: SKILL_NAME })
   const entry = cache.publish({
     bundleHash: validated.bundleHash,
@@ -526,10 +524,15 @@ describe('per-attempt materialization', () => {
     }
   }
 
-  it('copies the whole tree into DSH_HOME/skills/<name> (§19.8)', () => {
+  it.each(['root', 'Mac', 'Windows'])('copies the %s bundle tree into DSH_HOME/skills/<name> (§19.8)', (style) => {
     const cacheRoot = tempRoot('crp-skill-mat-cache-')
     const dshHome = tempRoot('crp-skill-mat-home-')
-    const { validated, entry } = publishFixture(cacheRoot)
+    const entries = style === 'root' ? validBundleEntries() : [
+      { name: 'bundle/', content: '' },
+      ...validBundleEntries().map((e) => ({ ...e, name: 'bundle/' + e.name, ...(style === 'Windows' ? { unixMode: 0 } : {}) })),
+      { name: style === 'Mac' ? '__MACOSX/bundle/._SKILL.md' : 'bundle/desktop.ini', content: 'metadata' },
+    ]
+    const { validated, entry } = publishFixture(cacheRoot, entries)
     const tree = materializeSkillTree({
       dshHome,
       bundles: [{ bundle: frozen(validated), cache: entry }],
@@ -548,6 +551,9 @@ describe('per-attempt materialization', () => {
       expect(existsSync(join(skillDir, relative))).toBe(true)
     }
     expect(tree.fileCount).toBe(6)
+    expect(existsSync(join(skillDir, 'bundle'))).toBe(false)
+    expect(existsSync(join(skillDir, '__MACOSX'))).toBe(false)
+    expect(existsSync(join(skillDir, 'desktop.ini'))).toBe(false)
     relaxSkillTree(dshHome)
   })
 

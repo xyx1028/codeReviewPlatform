@@ -104,9 +104,8 @@ export class SkillBundleLimitError extends Error {
 /**
  * 校验归档并生成规范 manifest。
  *
- * `expectedSkillName` 是必需的：归档根**必须**直接放 `SKILL.md`，而技能名来自平台
- * （目录名由 `<DSH_HOME>/skills/<name>/` 决定）。归档自带一层同名外层目录会让 DSH
- * 找不到入口 —— 这是 §6.2 明确不接受的形态，在这里被 "根没有 SKILL.md" 一条拒掉。
+ * `expectedSkillName` 必需；ZIP 读入器将唯一一层外部目录映射为规范根。
+ * 技能名仍由平台和入口 frontmatter 一致性检查决定。
  */
 export function validateSkillArchive(input: {
   archive: Buffer
@@ -129,7 +128,7 @@ export function validateSkillArchive(input: {
   const entry = read.files.find((file) => isEntryPath(file.path))
   if (entry === undefined) {
     throw new SkillBundleInvalidError(
-      `the archive root must contain ${SKILL_ENTRY_FILE}; an extra outer directory is not accepted`,
+      `the archive must contain ${SKILL_ENTRY_FILE} at the root or inside a single common outer directory`,
     )
   }
   if (entry.bytes.length === 0) {

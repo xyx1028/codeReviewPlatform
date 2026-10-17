@@ -12,6 +12,7 @@ set +x
 mode='--dry-run'
 image=''
 worker_timeout=3600
+worker_replicas=4
 
 usage() {
   cat <<'USAGE'
@@ -25,7 +26,7 @@ usage() {
 
 参数：
   --dry-run                 仅预览数据库迁移并校验配置（默认）
-  --apply                   同步 release、执行迁移/Functions、更新 Worker 和 Web
+  --apply                   同步 release、执行迁移/Functions、更新 4 个 Worker（每个并发 2）和 Web
   --image <镜像>            指定本次 CI 产物；省略时自动选 Nexus 中最新 release_ 时间戳标签
   --worker-timeout <秒>     Worker 排空最大等待时间，默认 3600
   -h, --help                显示帮助
@@ -145,6 +146,7 @@ validate_compose() {
   docker network inspect crp-selfhost-net >/dev/null || { echo '找不到 crp-selfhost-net。先启动 Supabase。' >&2; exit 1; }
   web_compose config --quiet
   worker_compose config --quiet
+  echo "Worker 目标配置：${worker_replicas} 个副本，每个并发处理 2 条需求任务。"
 }
 
 sync_release() {
@@ -184,20 +186,29 @@ wait_for_web() {
 }
 
 verify_worker() {
-  local worker_id
-  worker_id="$(docker ps -q \
-    --filter label=com.docker.compose.project=crp-selfhost-worker \
-    --filter label=com.docker.compose.service=worker | head -n 1)"
-  [[ -n "$worker_id" ]] || { echo 'Worker 容器未运行。' >&2; return 1; }
-  docker inspect --format '{{.State.Status}}' "$worker_id" | grep -qx running || {
-    echo 'Worker 容器不是 running 状态。' >&2; return 1;
-  }
-  if ! docker logs --tail 100 "$worker_id" 2>&1 | grep -q '"event":"worker_started"'; then
-    echo 'Worker 未观察到 worker_started 日志。' >&2
-    docker logs --tail 100 "$worker_id" >&2 || true
-    return 1
-  fi
-  echo 'Worker 启动检查通过。'
+  local worker_ids worker_id attempt ready total concurrency
+  for attempt in {1..30}; do
+    worker_ids="$(docker ps -q \
+      --filter label=com.docker.compose.project=crp-selfhost-worker \
+      --filter label=com.docker.compose.service=worker)"
+    ready=0
+    total=0
+    for worker_id in $worker_ids; do
+      total=$((total + 1))
+      concurrency="$(docker exec "$worker_id" node -e 'console.log(process.env.WORKER_STORY_CONCURRENCY || "")' 2>/dev/null || true)"
+      if [[ "$concurrency" == 2 ]] && \
+         docker logs --tail 100 "$worker_id" 2>&1 | grep -q '"event":"worker_started"'; then
+        ready=$((ready + 1))
+      fi
+    done
+    if [[ "$total" -eq "$worker_replicas" && "$ready" -eq "$worker_replicas" ]]; then
+      echo "Worker 启动检查通过：${worker_replicas} 个副本，每个并发 2 条需求任务。"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Worker 检查失败：目标 ${worker_replicas} 个副本；运行 ${total} 个，启动且并发为 2 的 ${ready} 个。" >&2
+  return 1
 }
 
 write_state() {
@@ -237,13 +248,13 @@ worker_compose pull worker
 web_compose pull web
 
 echo '第 3/4 步：排空在途任务后更新 Worker…'
-bash scripts/worker-drain-restart.sh \
+CRP_APP_IMAGE="$image" bash scripts/worker-drain-restart.sh \
   --project crp-selfhost-worker \
   --env-file "$worker_env_file" \
   --compose-file docker-compose.worker.yml \
   --compose-file deploy/supabase-selfhost/worker.override.yml \
   --compose-file deploy/supabase-selfhost/worker.image.yml \
-  --scale 1 \
+  --scale "$worker_replicas" \
   --timeout "$worker_timeout"
 verify_worker
 

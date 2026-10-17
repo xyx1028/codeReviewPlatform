@@ -13,7 +13,7 @@
  */
 
 import { crc32, inflateRawSync } from 'node:zlib'
-import { canonicalizeEntryPath, assertNoPathConflicts, type PathRuleLimits } from './skill-paths.js'
+import { canonicalizeEntryPath, assertNoPathConflicts, isPackagingMetadataPath, skillArchiveRootPrefix, type PathRuleLimits } from './skill-paths.js'
 
 const SIG_LOCAL_FILE = 0x04034b50
 const SIG_CENTRAL_FILE = 0x02014b50
@@ -119,8 +119,8 @@ function readCentralDirectory(buffer: Buffer, limits: ZipReadLimits): CentralEnt
   if (entryCount === 0xffff) {
     invalid('ZIP64 archives are not accepted')
   }
-  if (entryCount > limits.entryCount) {
-    limit(`the archive declares more than ${limits.entryCount} entries`)
+  if (entryCount > limits.entryCount * 4) {
+    limit(`the archive declares more than ${limits.entryCount * 4} raw entries`)
   }
   const centralSize = buffer.readUInt32LE(eocd + 12)
   const centralOffset = buffer.readUInt32LE(eocd + 16)
@@ -213,22 +213,28 @@ export function readSkillArchive(archive: Buffer, limits: ZipReadLimits): ZipRea
   const central = readCentralDirectory(archive, limits)
   if (central.length === 0) invalid('the archive contains no entries')
 
+  // Validate raw safety before ignoring metadata; do not extract any ignored bytes.
+  const kept = central.filter((entry) => {
+    deadline()
+    if ((entry.gpFlags & 0x1) !== 0) invalid('encrypted archives are not accepted')
+    if (entry.method !== METHOD_STORE && entry.method !== METHOD_DEFLATE) invalid('only stored and deflated entries are accepted')
+    assertRegularFileOrDirectory(entry, entry.rawName.endsWith('/'))
+    if (isPackagingMetadataPath(entry.rawName)) return false
+    canonicalizeEntryPathOrReject(entry.rawName, limits)
+    return true
+  })
+  if (kept.length > limits.entryCount) limit(`the archive declares more than ${limits.entryCount} entries`)
+  const prefix = skillArchiveRootPrefix(kept.map((entry) => entry.rawName))
+
   const files: ZipFileEntry[] = []
   const paths: string[] = []
   let expanded = 0
   let compressedTotal = 0
 
-  for (const entry of central) {
+  for (const entry of kept) {
     deadline()
-    if ((entry.gpFlags & 0x1) !== 0) {
-      invalid('encrypted archives are not accepted')
-    }
-    if (entry.method !== METHOD_STORE && entry.method !== METHOD_DEFLATE) {
-      invalid('only stored and deflated entries are accepted')
-    }
-
-    const canonical = canonicalizeEntryPathOrReject(entry.rawName, limits)
-    assertRegularFileOrDirectory(entry, canonical.isDirectory)
+    if (prefix !== '' && entry.rawName === prefix) continue
+    const canonical = canonicalizeEntryPathOrReject(entry.rawName.slice(prefix.length), limits)
     if (canonical.isDirectory) {
       // 目录 entry 不携带内容，也不参与 manifest：目录由文件路径隐含创建。
       continue

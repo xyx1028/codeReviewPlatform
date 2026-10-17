@@ -148,3 +148,23 @@ export function assertContained(root: string, relativePath: string): string {
   }
   return resolved
 }
+
+/** Packaging metadata is never materialized. Unsafe paths cannot be hidden by this filter. */
+export function isPackagingMetadataPath(rawName: string): boolean {
+  if (rawName.includes('\\') || rawName.includes('\0') || rawName.normalize('NFC') !== rawName) return false
+  const parts = rawName.replace(/\/$/, '').split('/')
+  if (parts.some((part) => part === '.' || part === '..' || !/^[A-Za-z0-9._-]+$/.test(part))) return false
+  return parts.some((part) =>
+    part === '__MACOSX' || part === '.DS_Store' || part.startsWith('._') ||
+    /^(Thumbs\.db|desktop\.ini)$/i.test(part),
+  )
+}
+
+/** Strip exactly one common folder, never search recursively for an arbitrary SKILL.md. */
+export function skillArchiveRootPrefix(paths: readonly string[]): string {
+  if (paths.includes('SKILL.md')) return ''
+  const candidate = paths.find((path) => /^[^/]+\/SKILL\.md$/.test(path))
+  if (candidate === undefined) return ''
+  const prefix = candidate.slice(0, -'SKILL.md'.length)
+  return paths.every((path) => path === prefix || path.startsWith(prefix)) ? prefix : ''
+}

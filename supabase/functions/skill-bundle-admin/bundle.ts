@@ -119,6 +119,26 @@ export function canonicalizeEntryPath(rawName: string): { path: string; isDirect
   return { path, isDirectory }
 }
 
+/** Packaging metadata is never materialized. Unsafe paths cannot be hidden by this filter. */
+export function isPackagingMetadataPath(rawName: string): boolean {
+  if (rawName.includes('\\') || rawName.includes('\0') || rawName.normalize('NFC') !== rawName) return false
+  const parts = rawName.replace(/\/$/, '').split('/')
+  if (parts.some((part) => part === '.' || part === '..' || !/^[A-Za-z0-9._-]+$/.test(part))) return false
+  return parts.some((part) =>
+    part === '__MACOSX' || part === '.DS_Store' || part.startsWith('._') ||
+    /^(Thumbs\.db|desktop\.ini)$/i.test(part),
+  )
+}
+
+/** Strip exactly one common folder, never search recursively for an arbitrary SKILL.md. */
+export function skillArchiveRootPrefix(paths: readonly string[]): string {
+  if (paths.includes('SKILL.md')) return ''
+  const candidate = paths.find((path) => /^[^/]+\/SKILL\.md$/.test(path))
+  if (candidate === undefined) return ''
+  const prefix = candidate.slice(0, -'SKILL.md'.length)
+  return paths.every((path) => path === prefix || path.startsWith(prefix)) ? prefix : ''
+}
+
 // ---------------------------------------------------------------------------
 // 类型与角色（§7.3）
 // ---------------------------------------------------------------------------
@@ -292,8 +312,8 @@ function readCentralDirectory(view: DataView, bytes: Uint8Array): CentralEntry[]
   const totalEntries = view.getUint16(eocd + 10, true)
   if (entriesOnDisk !== totalEntries) invalid('central directory entry counts disagree')
   if (totalEntries === 0xffff) invalid('ZIP64 archives are not accepted')
-  if (totalEntries > LIMITS.entryCount) {
-    overLimit(`the archive declares more than ${LIMITS.entryCount} entries`)
+  if (totalEntries > LIMITS.entryCount * 4) {
+    overLimit(`the archive declares more than ${LIMITS.entryCount * 4} raw entries`)
   }
   const centralSize = view.getUint32(eocd + 12, true)
   const centralOffset = view.getUint32(eocd + 16, true)
@@ -505,12 +525,37 @@ export function parseSkillEntryFrontmatter(
 // 入口
 // ---------------------------------------------------------------------------
 
+/** Resolve original ZIP entries to the same paths used by validation, diff and Worker. */
+function normalizedArchiveEntries(central: CentralEntry[]): Array<{ entry: CentralEntry; path: string; isDirectory: boolean }> {
+  const kept: Array<{ entry: CentralEntry; path: string; isDirectory: boolean }> = []
+  for (const entry of central) {
+    if ((entry.flags & 0x1) !== 0) invalid('encrypted archives are not accepted')
+    if (entry.method !== 0 && entry.method !== 8) invalid('only stored and deflated entries are accepted')
+    const isDirectory = entry.rawName.endsWith('/')
+    if (entry.unixMode !== 0 && (entry.unixMode & S_IFMT) !== 0) {
+      const fileType = entry.unixMode & S_IFMT
+      if (isDirectory ? fileType !== S_IFDIR : fileType !== S_IFREG) {
+        invalid('the archive contains a symlink, device, FIFO or socket entry')
+      }
+    }
+    if (isPackagingMetadataPath(entry.rawName)) continue
+    const canonical = canonicalizeEntryPath(entry.rawName)
+    kept.push({ entry, ...canonical })
+  }
+  if (kept.length > LIMITS.entryCount) overLimit(`the archive declares more than ${LIMITS.entryCount} entries`)
+  const prefix = skillArchiveRootPrefix(kept.map(({ path, isDirectory }) => path + (isDirectory ? '/' : '')))
+  return kept.flatMap((item) => {
+    if (prefix === '') return [item]
+    if (item.isDirectory && item.path + '/' === prefix) return []
+    return [{ ...item, ...canonicalizeEntryPath(item.path.slice(prefix.length) + (item.isDirectory ? '/' : '')) }]
+  })
+}
+
 /**
  * 校验归档并生成规范 manifest。
  *
- * `expectedSkillName` 必需：归档根必须直接放 `SKILL.md`，技能名由平台决定（它是
- * `<DSH_HOME>/skills/<name>/` 的目录名）。归档自带一层同名外层目录会让 DSH 找不到入口，
- * 这里由"根没有 SKILL.md"一条拒掉。
+ * `expectedSkillName` 必需；根结构或唯一一层外部目录都映射为规范根路径。
+ * 原始 ZIP 字节不改写，manifest 与 Worker 物化路径使用相同规范映射。
  */
 export async function validateSkillArchive(
   archive: Uint8Array,
@@ -541,23 +586,8 @@ export async function validateSkillArchive(
   let entryBytes = -1
   let entryText = ''
 
-  for (const entry of central) {
+  for (const { entry, ...canonical } of normalizedArchiveEntries(central)) {
     deadline()
-    if ((entry.flags & 0x1) !== 0) invalid('encrypted archives are not accepted')
-    if (entry.method !== 0 && entry.method !== 8) {
-      invalid('only stored and deflated entries are accepted')
-    }
-    const canonical = canonicalizeEntryPath(entry.rawName)
-    // 文件类型位：symlink / 设备 / FIFO / socket 一律拒绝。没有 mode 位（Windows 打的包）
-    // 按普通文件处理 —— 那种归档表达不了 symlink，所以不构成风险。
-    if (entry.unixMode !== 0 && (entry.unixMode & S_IFMT) !== 0) {
-      const fileType = entry.unixMode & S_IFMT
-      if (canonical.isDirectory) {
-        if (fileType !== S_IFDIR) invalid('a directory entry declares a non-directory file type')
-      } else if (fileType !== S_IFREG) {
-        invalid('the archive contains a symlink, device, FIFO or socket entry')
-      }
-    }
     if (canonical.isDirectory) continue
 
     if (seenExact.has(canonical.path)) invalid('archive contains a duplicate entry path')
@@ -620,7 +650,7 @@ export async function validateSkillArchive(
     overLimit(`the archive contains more than ${LIMITS.entryCount} files`)
   }
   if (entryBytes < 0) {
-    invalid(`the archive root must contain ${SKILL_ENTRY_FILE}; an extra outer directory is not accepted`)
+    invalid(`the archive must contain ${SKILL_ENTRY_FILE} at the root or inside a single common outer directory`)
   }
   if (entryBytes === 0) invalid(`${SKILL_ENTRY_FILE} is empty`)
   if (entryBytes > LIMITS.entryFileBytes) {
@@ -689,12 +719,7 @@ export async function readArchiveTextEntries(
   const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength)
   const central = readCentralDirectory(view, archive)
 
-  for (const entry of central) {
-    if ((entry.flags & 0x1) !== 0) invalid('encrypted archives are not accepted')
-    if (entry.method !== 0 && entry.method !== 8) {
-      invalid('only stored and deflated entries are accepted')
-    }
-    const canonical = canonicalizeEntryPath(entry.rawName)
+  for (const { entry, ...canonical } of normalizedArchiveEntries(central)) {
     if (canonical.isDirectory) continue
     if (!wanted.has(canonical.path)) continue
     if (roleForPath(canonical.path) === 'ASSET') {

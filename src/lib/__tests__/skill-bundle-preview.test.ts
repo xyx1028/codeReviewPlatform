@@ -137,14 +137,31 @@ describe('readSkillBundlePreview', () => {
     expect(preview.containsScripts).toBe(true)
   })
 
-  it('does not treat a nested SKILL.md as the entry: the platform requires it at the root', async () => {
-    const zip = await buildZip([{ path: 'bundle/SKILL.md', content: VALID_ENTRY }])
+  it.each(['root', 'bundle'])('previews %s layout with OS metadata', async (folder) => {
+    const prefix = folder === 'root' ? '' : `${folder}/`
+    const zip = await buildZip([
+      { path: `${prefix}SKILL.md`, content: VALID_ENTRY },
+      { path: `${prefix}scripts/run.sh`, content: 'echo ok' },
+      { path: '__MACOSX/._SKILL.md', content: 'metadata' },
+      { path: `${prefix}.DS_Store`, content: 'metadata' },
+      { path: 'desktop.ini', content: 'metadata' },
+    ])
+    const preview = await readSkillBundlePreview(zip)
+    expect(preview.issue).toBeNull()
+    expect(preview.hasEntry).toBe(true)
+    expect(preview.name).toBe('bos-bill-review')
+    expect(preview.containsScripts).toBe(true)
+  })
+
+  it.each([
+    ['nested/bundle/SKILL.md'],
+    ['bundle/SKILL.md', 'other/SKILL.md'],
+    ['bundle/SKILL.md', 'extra.md'],
+  ])('reports an ambiguous or too deeply nested entry: %j', async (...paths) => {
+    const zip = await buildZip(paths.map((path) => ({ path, content: VALID_ENTRY })))
     const preview = await readSkillBundlePreview(zip)
     expect(preview.hasEntry).toBe(false)
-    expect(preview.name).toBeNull()
-    // 「压缩了外层文件夹」是最常见的一次性错误，提示里要能指出它在哪。
     expect(preview.issue).toBe('entry-nested')
-    expect(preview.nestedEntryPath).toBe('bundle/SKILL.md')
   })
 
   /*

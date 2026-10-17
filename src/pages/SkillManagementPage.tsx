@@ -1121,7 +1121,7 @@ export function SkillManagementPage({ isAdmin }: { isAdmin: boolean }) {
                       <p className="ant-upload-drag-icon" aria-hidden="true">⬆</p>
                       <p className="skill-upload-dragger__title">点击或拖拽上传 ZIP 更新包</p>
                       <p className="ant-upload-hint skill-upload-dragger__hint">
-                        根目录需直接包含 <Text code>SKILL.md</Text>
+                        根目录或唯一一层技能文件夹内需包含 <Text code>SKILL.md</Text>；自动忽略 Mac / Windows 打包附加文件
                       </p>
                     </>
                   ) : (
