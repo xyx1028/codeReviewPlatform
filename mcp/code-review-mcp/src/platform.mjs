@@ -77,9 +77,10 @@ export class PlatformClient {
     return this.#config.timeoutMs ?? DEFAULT_TIMEOUT_MS
   }
 
-  #signal() {
+  #signal(timeoutMs) {
     // AbortSignal.timeout 从 Node 17.3 起可用；超时表现为 fetch reject，归入"结果不明"。
-    return typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(this.#timeoutMs) : undefined
+    const budget = timeoutMs ?? this.#timeoutMs
+    return typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(budget) : undefined
   }
 
   async #authRequest(grant, body) {
@@ -158,13 +159,13 @@ export class PlatformClient {
     return this.#signInPromise
   }
 
-  async #request(path, init, { retryOn401 = true } = {}) {
+  async #request(path, init, { retryOn401 = true, timeoutMs } = {}) {
     const session = await this.#ensureSession()
     let response
     try {
       response = await this.#fetch(`${this.#config.url}${path}`, {
         ...init,
-        signal: this.#signal(),
+        signal: this.#signal(timeoutMs),
         headers: {
           apikey: this.#config.anonKey,
           Authorization: `Bearer ${session.accessToken}`,
@@ -183,7 +184,7 @@ export class PlatformClient {
 
     if (response.status === 401 && retryOn401) {
       this.#session = null
-      return this.#request(path, init, { retryOn401: false })
+      return this.#request(path, init, { retryOn401: false, timeoutMs })
     }
 
     const text = await response.text()
@@ -221,13 +222,22 @@ export class PlatformClient {
     return payload
   }
 
-  /** 调一个 RPC。参数名与前端保持一致（p_ 前缀），便于和 src/lib/api.ts 对照。 */
-  async rpc(name, args = {}) {
-    return this.#request(`/rest/v1/rpc/${name}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(args),
-    })
+  /**
+   * 调一个 RPC。参数名与前端保持一致（p_ 前缀），便于和 src/lib/api.ts 对照。
+   *
+   * `timeoutMs` 用于把"结果不明"之后的核对探针压在更短的预算里：那几次探针发生在
+   * 调用方客户端已经等了一次超时之后，再按默认超时等三轮就会撞上客户端自己的上限。
+   */
+  async rpc(name, args = {}, { timeoutMs } = {}) {
+    return this.#request(
+      `/rest/v1/rpc/${name}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(args),
+      },
+      { timeoutMs },
+    )
   }
 
   /** PostgREST 表查询。query 的键值直接拼进查询串（`eq.`、`order` 等语法照 PostgREST 写）。 */

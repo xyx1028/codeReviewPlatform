@@ -11,6 +11,7 @@
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ConfigError, loadConfig } from './config.mjs'
+import { EnvFileError, loadEnvFileIfPresent } from './env.mjs'
 import { PlatformClient } from './platform.mjs'
 import { createToolRegistry } from './tools.mjs'
 import { createMcpServer } from './server.mjs'
@@ -27,6 +28,16 @@ function createLogger() {
 
 async function main() {
   const logger = createLogger()
+  try {
+    const file = loadEnvFileIfPresent()
+    if (file !== null) logger('env_file_loaded', { file })
+  } catch (error) {
+    if (error instanceof EnvFileError) {
+      process.stderr.write(`[配置错误] ${error.message}\n`)
+      process.exit(2)
+    }
+    throw error
+  }
 
   let config
   try {
@@ -40,7 +51,7 @@ async function main() {
   }
 
   const client = new PlatformClient(config.platform)
-  const registry = createToolRegistry({ client, config, logger })
+  const registry = createToolRegistry({ client, config, logger, settle: config.settle })
 
   if (config.transport === 'stdio') {
     const server = createMcpServer(registry)
@@ -50,7 +61,33 @@ async function main() {
   }
 
   const app = createHttpApp({ config, registry, logger })
-  const address = await app.listen()
+  let address
+  try {
+    address = await app.listen()
+  } catch (error) {
+    if (error?.code === 'EADDRINUSE') {
+      process.stderr.write(
+        `[启动失败] 端口 ${config.http.port} 已被占用。先停掉占用它的进程` +
+          `（macOS/Linux：lsof -nP -iTCP:${config.http.port} -sTCP:LISTEN），` +
+          '或改 CRP_MCP_PORT 换一个端口。\n',
+      )
+      process.exit(2)
+    }
+    if (error?.code === 'EACCES') {
+      process.stderr.write(
+        `[启动失败] 没有权限监听端口 ${config.http.port}（1024 以下的端口需要特权）。` +
+          '请改 CRP_MCP_PORT，或由反向代理把 443 转发到这个端口。\n',
+      )
+      process.exit(2)
+    }
+    if (error?.code === 'EADDRNOTAVAIL') {
+      process.stderr.write(
+        `[启动失败] 本机没有地址 ${config.http.host}，无法监听。请检查 CRP_MCP_HOST。\n`,
+      )
+      process.exit(2)
+    }
+    throw error
+  }
   logger('http_started', {
     url: `http://${config.http.host}:${config.http.port}${config.http.path}`,
     bound: typeof address === 'object' ? `${address.address}:${address.port}` : String(address),
@@ -58,6 +95,9 @@ async function main() {
     platform_account: config.platform.email,
     tokens: config.http.tokens.map((entry) => entry.name),
     anonymous_allowed: config.http.allowAnonymous,
+    session_ttl_ms: config.http.sessionTtlMs,
+    max_sessions: config.http.maxSessions,
+    allowed_origins: config.http.allowedOrigins,
   })
   if (config.http.allowAnonymous) {
     process.stderr.write(

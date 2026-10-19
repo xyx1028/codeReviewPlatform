@@ -1,0 +1,4 @@
+interface:
+  display_name: "代码评审平台 Linux 发布"
+  short_description: "查找公司 Linux 部署配置，指导统一发布、四副本更新和故障排查"
+  default_prompt: "使用 $crp-linux-release，先核对项目部署配置，再告诉我 Linux 上预览和正式发布的步骤。"

@@ -65,6 +65,35 @@ export function parseAccessTokens(raw) {
   return entries
 }
 
+/**
+ * 端点路径归一化。
+ *
+ * 必须有：同事在客户端里粘 `https://host/mcp/` 和 `https://host/mcp` 的概率各一半，
+ * 反向代理也常把两者互相改写。两种写法指向同一个端点，差一个斜杠就 404 是纯粹的坑。
+ */
+export function normalizePath(raw) {
+  const value = String(raw ?? '').trim()
+  if (value === '' || value === '/') return '/'
+  const withLeading = value.startsWith('/') ? value : `/${value}`
+  return withLeading.replace(/\/+$/, '') === '' ? '/' : withLeading.replace(/\/+$/, '')
+}
+
+/**
+ * 解析允许的浏览器来源。
+ *
+ * 只影响 CORS 响应头，不替代鉴权：这台服务的鉴权靠 `Authorization` 头而不是 cookie，
+ * 所以放开 CORS 不会让别的站点"带着你的身份"调用它 —— 它拿不到凭证。默认 `*` 是为了
+ * 让 IDE 内嵌的 WebView 客户端能完成预检；需要收紧时显式列出来源。
+ */
+export function parseAllowedOrigins(raw) {
+  const chunks = String(raw ?? '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item !== '')
+  if (chunks.length === 0) return ['*']
+  return chunks.includes('*') ? ['*'] : chunks
+}
+
 export function loadConfig(env = process.env) {
   const transport = (optional(env, 'CRP_MCP_TRANSPORT', 'http') ?? 'http').toLowerCase()
   if (transport !== 'http' && transport !== 'stdio') {
@@ -82,14 +111,55 @@ export function loadConfig(env = process.env) {
 
   const platformWebUrl = required(env, 'CRP_PLATFORM_WEB_URL').replace(/\/+$/, '')
 
+  /**
+   * 单次平台请求超时与"结果不明"核对预算，必须一起看。
+   *
+   * 远程 MCP 的调用方是别人的客户端，它有自己的超时（多数实现默认 60 秒）。一旦工具调用
+   * 超过那个上限，使用者看到的是一句 "tool call failed" —— 连批次编号都没有，而平台可能
+   * 已经受理了。所以最坏路径的总耗时必须压在 60 秒以内：
+   *
+   *   平台写操作超时 20s ＋ 核对 3 次 × 8s ＋ 间隔 2 × 2s ＝ 48s
+   *
+   * 下调写操作超时不会让"可能已受理"的任务被误删：超时一律归入"结果不明"，批次原样保留。
+   */
+  const platformTimeoutMs = integer(env, 'CRP_PLATFORM_TIMEOUT_MS', 20_000)
+  const settleProbeTimeoutMs = integer(env, 'CRP_SETTLE_PROBE_TIMEOUT_MS', 8_000)
+  const settleProbes = integer(env, 'CRP_SETTLE_PROBES', 3)
+  const settleDelayMs = integer(env, 'CRP_SETTLE_DELAY_MS', 2_000)
+  for (const [key, value] of [
+    ['CRP_PLATFORM_TIMEOUT_MS', platformTimeoutMs],
+    ['CRP_SETTLE_PROBE_TIMEOUT_MS', settleProbeTimeoutMs],
+    ['CRP_SETTLE_DELAY_MS', settleDelayMs],
+  ]) {
+    if (value <= 0) throw new ConfigError(`${key} 必须大于 0，当前是 ${value}`)
+  }
+  if (settleProbes < 1) throw new ConfigError(`CRP_SETTLE_PROBES 至少为 1，当前是 ${settleProbes}`)
+
+  const sessionTtlMs = integer(env, 'CRP_MCP_SESSION_TTL_MS', 30 * 60_000)
+  if (sessionTtlMs < 60_000) {
+    throw new ConfigError(`CRP_MCP_SESSION_TTL_MS 至少 60000（1 分钟），当前是 ${sessionTtlMs}`)
+  }
+  const maxSessions = integer(env, 'CRP_MCP_MAX_SESSIONS', 256)
+  if (maxSessions < 1) throw new ConfigError(`CRP_MCP_MAX_SESSIONS 至少为 1，当前是 ${maxSessions}`)
+
   return {
     transport,
     http: {
       host: optional(env, 'CRP_MCP_HOST', '0.0.0.0'),
       port: integer(env, 'CRP_MCP_PORT', 8848),
-      path: optional(env, 'CRP_MCP_PATH', '/mcp'),
+      path: normalizePath(optional(env, 'CRP_MCP_PATH', '/mcp')),
       tokens,
       allowAnonymous,
+      allowedOrigins: parseAllowedOrigins(optional(env, 'CRP_MCP_ALLOWED_ORIGINS')),
+      /**
+       * 空闲会话回收。
+       *
+       * 必须有：Streamable HTTP 的会话只在客户端显式发 `DELETE` 时才关闭，而 Codex /
+       * Claude Code / Qoder 这类客户端进程退出时通常直接走掉。不回收的话，一个常驻服务
+       * 会按"客户端启动次数"无上限地堆积 transport 与 Server 实例。
+       */
+      sessionTtlMs,
+      maxSessions,
     },
     platform: {
       url: required(env, 'CRP_SUPABASE_URL').replace(/\/+$/, ''),
@@ -103,7 +173,12 @@ export function loadConfig(env = process.env) {
        * 必须有上限：一次挂住的连接会让工具调用永远不返回，客户端那边表现为"卡住"。
        * 超时按"结果不明"处理（见 platform.mjs），不会误删可能已受理的批次。
        */
-      timeoutMs: integer(env, 'CRP_PLATFORM_TIMEOUT_MS', 30_000),
+      timeoutMs: platformTimeoutMs,
+    },
+    settle: {
+      settleProbes,
+      settleDelayMs,
+      probeTimeoutMs: settleProbeTimeoutMs,
     },
     defaults: {
       /** 服务端配置好的默认模型（展示名或 id）。留空时平台只有一个可用模型才能自动确定。 */

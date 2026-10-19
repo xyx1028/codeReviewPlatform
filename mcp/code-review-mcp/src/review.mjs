@@ -18,6 +18,7 @@
  *    拿着查不到的编号去平台里找。
  */
 
+import { randomBytes } from 'node:crypto'
 import { PlatformError } from './platform.mjs'
 import { SUPPORTED_BRANCHES, SUPPORTED_COMMIT_WINDOWS } from './config.mjs'
 
@@ -33,12 +34,23 @@ function pad2(value) {
  *
  * `review_batch.week_code` 全库唯一，而前端用的是 `YYYYMMDD`（一天一个批次）。
  * MCP 一天可能提交很多次，所以加时分秒后缀；前缀保持 `YYYYMMDD`，这样它在批次列表里
- * 仍按日期排得上。毫秒后缀是并发兜底：同一秒两次提交不该因为唯一键相撞而失败。
+ * 仍按日期排得上。后缀是并发兜底：同一秒两次提交不该因为唯一键相撞而失败。
  */
 export function buildWeekCode(date = new Date(), { suffix = null } = {}) {
   const ymd = `${date.getFullYear()}${pad2(date.getMonth() + 1)}${pad2(date.getDate())}`
   const hms = `${pad2(date.getHours())}${pad2(date.getMinutes())}${pad2(date.getSeconds())}`
   return `${ymd}-MCP${hms}${suffix === null ? '' : suffix}`
+}
+
+/**
+ * 同秒并发的区分后缀。
+ *
+ * 用随机串而不是毫秒：毫秒只是把碰撞窗口从"同一秒"缩到"同一毫秒"，而两个客户端
+ * 同时提交落在同一毫秒是会发生的，代价是整次提交以一个唯一键冲突失败。随机 3 字节
+ * 把碰撞概率压到 1/16M，且不依赖两台机器的时钟精度。
+ */
+export function randomWeekCodeSuffix(bytes = randomBytes) {
+  return `-${bytes(3).toString('hex')}`
 }
 
 export function normalizeStoryCode(input) {
@@ -197,7 +209,7 @@ export async function resolveSubmissionOutcome(
   client,
   batchId,
   cause,
-  { settleProbes = 3, settleDelayMs = 2000, sleep = defaultSleep } = {},
+  { settleProbes = 3, settleDelayMs = 2000, probeTimeoutMs = 8000, sleep = defaultSleep } = {},
 ) {
   if (cause instanceof PlatformError && cause.indeterminate !== true) {
     // 服务端明确拒绝（4xx 业务错误）＝ 事务已回滚，不可能再冒出导入单。
@@ -207,7 +219,11 @@ export async function resolveSubmissionOutcome(
   let lastProbeError = null
   for (let attempt = 1; attempt <= Math.max(settleProbes, 1); attempt += 1) {
     try {
-      const request = await client.rpc('get_latest_linky_batch_import', { p_batch_id: batchId })
+      const request = await client.rpc(
+        'get_latest_linky_batch_import',
+        { p_batch_id: batchId },
+        { timeoutMs: probeTimeoutMs },
+      )
       const importRequestId = typeof request?.id === 'string' ? request.id : null
       if (importRequestId !== null) return { kind: 'ACCEPTED', importRequestId, request }
       lastProbeError = null
@@ -249,9 +265,22 @@ export async function submitRequirementReview(client, config, input, { settle } 
 
   const model = resolveConfiguredModel(await listModels(client), config.defaults.modelLabel)
 
+  /**
+   * 必须有已登录用户 id：`review_batch` 的插入策略要求 `created_by = auth.uid()`。
+   * 不先检查的话，`created_by: null` 会被 RLS 拒绝，而那条报错长得像"账号角色不够"——
+   * 维护者会去给账号升权限，真正的原因（登录响应里没有 user）却一直在那里。
+   */
+  if (typeof client.userId !== 'string' || client.userId === '') {
+    throw new PlatformError(
+      'MCP 服务端已登录平台账号，但没有拿到用户 id，无法创建批次（批次必须归属到一个真实账号）。' +
+        '请让 MCP 维护者检查 CRP_SUPABASE_URL / CRP_SUPABASE_ANON_KEY 与账号登录是否正常。',
+      { code: 'PLATFORM_SIGN_IN_FAILED' },
+    )
+  }
+
   const batch = await client.insert('review_batch', {
     name: `${config.defaults.batchNamePrefix}：${storyCode}`.slice(0, 120),
-    week_code: buildWeekCode(new Date(), { suffix: `-${String(Date.now() % 1000).padStart(3, '0')}` }),
+    week_code: buildWeekCode(new Date(), { suffix: randomWeekCodeSuffix() }),
     default_branch: branch,
     ai_model_config_id: model.id,
     remark: `由远程 MCP 提交（调用方 ${input.caller ?? '未命名'}，平台账号 ${client.email}）`,

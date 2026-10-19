@@ -293,7 +293,7 @@ AI 客户端 ──Streamable HTTP + Bearer 凭证──► mcp/code-review-mcp�
 ```bash
 npm run mcp:install
 # 填好 mcp/code-review-mcp/.env（见该目录 README 的环境变量表）
-npm run mcp:start
+npm run mcp:start                                                          # 启动时自动加载该 .env
 npm run mcp:live-check -- --url http://127.0.0.1:8848/mcp --token <凭证>   # 只读自检
 ```
 
@@ -308,6 +308,11 @@ npm run mcp:live-check -- --url http://127.0.0.1:8848/mcp --token <凭证>   # �
 - **不绕过平台权限，也不交出任何密钥。** 只用 anon key + 平台账号 JWT，service-role key、
   模型 API Key、Linky 凭证都不在这条链路上；账号角色不够时提交会被 RLS 如实拒绝。
   凭证等于能消耗模型额度，按人发放，暴露到局域网外必须套 HTTPS。
+
+运行期还有两件事会直接影响"同事能不能用"：**空闲会话按最后一次活动回收**
+（客户端退出时多数不发 `DELETE`，不回收会无上限堆积），以及**工具调用的超时预算必须小于
+调用方客户端的超时**（默认 20s + 3×8s + 2×2s = 48s，客户端通常是 60s）。两者都可配，
+算式见 MCP 目录 README。
 
 不需要数据库迁移、不需要 Edge Function、不需要重建 Worker 镜像：这一版没有新表、新 RPC，
 Worker 与能力契约都没动。完整配置、客户端配置片段与安全模型见

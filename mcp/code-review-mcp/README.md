@@ -31,12 +31,18 @@
 cd mcp/code-review-mcp
 npm install
 cp .env.example .env     # 然后按下表填写
-set -a && . ./.env && set +a
-npm start
+npm start                # 或在仓库根目录 npm run mcp:start
 ```
+
+启动时会自动加载**本目录的 `.env`**，不需要再 `set -a && . ./.env`。真实环境变量优先：
+容器用 `--env-file`、systemd 用 `EnvironmentFile` 注入时，不会被仓库里这份文件盖掉；
+已经用 `node --env-file=...` 指过文件时也不会再叠加 `.env`（两份配置混在一起比报错更难查）。
+要换路径用 `CRP_MCP_ENV_FILE=/etc/codereview-mcp/.env`，指了但文件不存在会直接启动失败。
 
 需要一个常驻进程（pm2 / launchd / systemd / Docker 均可）。同事要能从网络上访问到
 `CRP_MCP_HOST:CRP_MCP_PORT`：局域网直连、VPN，或由反向代理（建议 Nginx/Caddy + HTTPS）转发。
+
+需要 Node ≥ 20.12（用到 `process.loadEnvFile`）。
 
 ### 环境变量
 
@@ -48,9 +54,15 @@ npm start
 | `CRP_PLATFORM_WEB_URL` | ✅ | 平台前端地址，用来拼批次详情链接 |
 | `CRP_MCP_TOKENS` | ✅（HTTP 模式） | 访问凭证清单：`张三:至少16位随机串,李四:另一串`。名字只写进日志 |
 | `CRP_DEFAULT_MODEL` | 平台有多个可用模型时必填 | 评审模型展示名或 id。调用方不能指定模型 |
-| `CRP_MCP_HOST` / `CRP_MCP_PORT` / `CRP_MCP_PATH` | ❌ | 默认 `0.0.0.0` / `8848` / `/mcp` |
+| `CRP_MCP_HOST` / `CRP_MCP_PORT` / `CRP_MCP_PATH` | ❌ | 默认 `0.0.0.0` / `8848` / `/mcp`。路径会归一化，写成 `/mcp/` 也行 |
 | `CRP_MCP_TRANSPORT` | ❌ | `http`（默认）或 `stdio`（本机自测用） |
 | `CRP_MCP_ALLOW_NO_AUTH` | ❌ | `true` 时放弃鉴权校验。只用于内网自测，启动会打警告 |
+| `CRP_MCP_ENV_FILE` | ❌ | 显式指定 `.env` 路径；相对路径按启动时的工作目录解析 |
+| `CRP_MCP_ALLOWED_ORIGINS` | ❌ | 浏览器来源白名单，逗号分隔，默认 `*`。只影响 CORS 头，不替代鉴权 |
+| `CRP_MCP_SESSION_TTL_MS` | ❌ | 空闲会话回收时间，默认 `1800000`（30 分钟），最小 60000 |
+| `CRP_MCP_MAX_SESSIONS` | ❌ | 并发会话上限，默认 `256`。到上限时挤掉最久没活动的那个 |
+| `CRP_PLATFORM_TIMEOUT_MS` | ❌ | 单次平台请求超时，默认 `20000` |
+| `CRP_SETTLE_PROBES` / `CRP_SETTLE_PROBE_TIMEOUT_MS` / `CRP_SETTLE_DELAY_MS` | ❌ | 「结果不明」后的核对预算，默认 `3` / `8000` / `2000` |
 | `CRP_BATCH_NAME_PREFIX` | ❌ | 批次名前缀，默认 `MCP 评审` |
 
 生成一串凭证：
@@ -58,6 +70,27 @@ npm start
 ```bash
 node -e "console.log(require('node:crypto').randomBytes(24).toString('base64url'))"
 ```
+
+### 两个运行期约束
+
+**会话会被回收。** Streamable HTTP 的会话只在客户端显式发 `DELETE` 时才关闭，而 Codex /
+Claude Code / Qoder 这类客户端进程退出时通常直接走掉。所以这里按"最后一次活动"计时，
+超过 `CRP_MCP_SESSION_TTL_MS` 就回收（日志 `session_evicted`，`reason=IDLE_TIMEOUT`），
+到 `CRP_MCP_MAX_SESSIONS` 时挤掉最久没活动的那个（`reason=MAX_SESSIONS`）。被回收的会话
+再用会收到 400「缺少有效的 Mcp-Session-Id」，客户端重新 `initialize` 即可。
+不回收的话，一个常驻服务会按"客户端启动次数"无上限地堆积会话。
+
+**超时预算必须小于调用方客户端的超时**（多数 MCP 客户端默认 60 秒）。最坏路径是：
+
+```text
+CRP_PLATFORM_TIMEOUT_MS
+  + CRP_SETTLE_PROBES × CRP_SETTLE_PROBE_TIMEOUT_MS
+  + (CRP_SETTLE_PROBES - 1) × CRP_SETTLE_DELAY_MS
+= 20s + 3×8s + 2×2s = 48s
+```
+
+超出客户端上限的后果不是慢，而是使用者看到一句 `tool call failed` ——
+连批次编号都没有，而平台可能已经受理了。调大任何一项之前先算这笔账。
 
 ### 自检
 
@@ -171,6 +204,11 @@ http_headers = { Authorization = "Bearer 你的凭证" }
 - **平台权限照常生效。** 账号角色不够时提交会被 RLS 拒绝（实测 VIEWER 账号报
   `review_batch` 的 row-level security 违例），MCP 如实回错，不会绕过。
 - **凭证在 HTTP 层先校验**，没过连 `initialize` 都不处理，回 401 + `WWW-Authenticate`。
+  例外只有两处且都不涉及身份：`/healthz`，以及 `OPTIONS` 预检 —— 浏览器不会给预检请求带
+  `Authorization`，按业务流程先鉴权会把它打成 401，客户端那边只显示"连不上"。
+- **CORS 放开不等于鉴权放开**：凭证走 `Authorization` 头而不是 cookie，跨站脚本拿不到它，
+  所以 `Access-Control-Allow-Origin` 不会把身份借给别的站点；这里也刻意不回
+  `Access-Control-Allow-Credentials`。需要收紧时用 `CRP_MCP_ALLOWED_ORIGINS` 列白名单。
 - **会话与凭证绑定**：拿到 `Mcp-Session-Id` 换一个凭证继续用会被 403，否则 session id 就等于
   绕过了鉴权。
 - **调用方身份不由模型提供**：它取自校验通过的凭证名，写进 stderr 日志和批次备注。
@@ -185,4 +223,7 @@ npm test     # node --test：配置/鉴权/参数校验/受理回执/失败补�
 ```
 
 协议测试用 MCP 官方客户端连一个真的 HTTP 端点，覆盖 401、403（会话串用）、400（缺会话 id）、
-404、tools/list 只有一个工具、tools/call 的调用方身份传递。
+404、tools/list 只有一个工具、tools/call 的调用方身份传递；加固测试覆盖尾斜杠路径、
+`OPTIONS` 预检与 CORS 头、匿名模式、空闲会话回收、会话上限挤出、端口占用时 `listen()` 必须
+reject、`.env` 加载与优先级、`.env.example` 与实际读取的变量不漂移、同毫秒并发的
+`week_code` 不相撞、核对探针的独立超时。

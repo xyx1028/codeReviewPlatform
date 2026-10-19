@@ -53,6 +53,18 @@ for (const tool of tools.tools) {
   console.log(`  - ${tool.name}：必填参数 ${JSON.stringify(tool.inputSchema?.required ?? [])}`)
 }
 
+/**
+ * 收尾。
+ *
+ * 必须显式 `terminateSession()`（协议上就是一个 `DELETE`）：只 `close()` 不发 DELETE 的话，
+ * 服务端那个会话会一直留到空闲超时。自检本身不该在服务端堆东西。
+ */
+async function finish() {
+  await transport.terminateSession().catch(() => undefined)
+  await transport.close().catch(() => undefined)
+  await client.close().catch(() => undefined)
+}
+
 if (args.submit) {
   if (!args.workspace || !args.story || !args.branch || !args.window) {
     console.error('--submit 需要同时给出 --workspace --story --branch --window')
@@ -73,11 +85,9 @@ if (args.submit) {
     if (item.type === 'text') console.log(item.text)
   }
   if (result.isError) {
-    await transport.close()
-    await client.close()
+    await finish()
     process.exit(1)
   }
 }
 
-await transport.close()
-await client.close()
+await finish()

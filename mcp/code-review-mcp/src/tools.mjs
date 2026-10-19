@@ -62,6 +62,17 @@ export const TOOL_DEFINITION = {
     required: ['workspace_name', 'story_code', 'branch', 'commit_window_days'],
     additionalProperties: false,
   },
+  /**
+   * 标准提示位。多数客户端用它决定"要不要先问用户一句"：没有这些字段时，工具默认
+   * 被当成可以自动放行的只读调用 —— 而这一个会真的建批次、排评审、花模型额度。
+   */
+  annotations: {
+    title: '提交指定需求的代码评审',
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: true,
+  },
 }
 
 function textResult(text, { isError = false } = {}) {
