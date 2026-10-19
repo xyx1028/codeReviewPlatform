@@ -27,6 +27,13 @@
 
 ## 部署
 
+公司 Linux 现在由统一应用镜像运行 MCP：`Dockerfile.workercompany` 在 CI 构建期打包本目录源码与锁定依赖，
+`deploy/supabase-selfhost/docker-compose.mcp.yml` 用该镜像启动独立容器，
+`deploy/supabase-selfhost/scripts/release.sh --apply` 会随 Worker/Web 一起更新并检查 MCP。
+首次需先在 Linux 创建 `.docker/mcp.selfhost.env`，具体步骤见
+[`deploy/supabase-selfhost/README.md`](../../deploy/supabase-selfhost/README.md)。
+下面的 `npm start` 用于源码直接运行或本地调试；旧的 systemd 示例是另一种部署方式，不应和容器同时占用 8848。
+
 ```bash
 cd mcp/code-review-mcp
 npm install

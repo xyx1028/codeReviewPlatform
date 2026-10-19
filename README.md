@@ -290,10 +290,15 @@ AI 客户端 ──Streamable HTTP + Bearer 凭证──► mcp/code-review-mcp�
 目标分支（`feature_dev`/`feature_sit`/`release`）、提交时间窗口（7/14/21/28 天）。模型由服务端配置，
 调用方不能指定。
 
+公司 Linux 的日常发布现在从同一 CI 镜像启动独立 MCP 容器；首次需要在 Linux 填写
+`.docker/mcp.selfhost.env`，此后统一 `release.sh --apply` 会同时更新 Worker、Web 和 MCP。
+步骤见 [`deploy/supabase-selfhost/README.md`](deploy/supabase-selfhost/README.md)。
+本地源码调试仍可使用：
+
 ```bash
 npm run mcp:install
 # 填好 mcp/code-review-mcp/.env（见该目录 README 的环境变量表）
-npm run mcp:start                                                          # 启动时自动加载该 .env
+npm run mcp:start
 npm run mcp:live-check -- --url http://127.0.0.1:8848/mcp --token <凭证>   # 只读自检
 ```
 
@@ -314,8 +319,8 @@ npm run mcp:live-check -- --url http://127.0.0.1:8848/mcp --token <凭证>   # �
 调用方客户端的超时**（默认 20s + 3×8s + 2×2s = 48s，客户端通常是 60s）。两者都可配，
 算式见 MCP 目录 README。
 
-不需要数据库迁移、不需要 Edge Function、不需要重建 Worker 镜像：这一版没有新表、新 RPC，
-Worker 与能力契约都没动。完整配置、客户端配置片段与安全模型见
+MCP 接口沿用现有表和 RPC，Worker 与能力契约没有变化。公司部署将 MCP 放进统一应用镜像，
+所以 MCP 代码更新仍需 CI 重建该镜像，再执行统一发布脚本。完整配置、客户端配置片段与安全模型见
 [`mcp/code-review-mcp/README.md`](mcp/code-review-mcp/README.md)，方案与验证记录见
 `需求开发评审一致性平台/V1.47-远程MCP提交需求评审/`。
 

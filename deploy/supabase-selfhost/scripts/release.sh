@@ -2,9 +2,9 @@
 # 公司 Linux 的统一发布入口。
 #
 # 它协调已有的迁移/Functions 发布脚本、Worker drain 与统一应用镜像：
-#   release 同步 -> 迁移/Functions -> 拉镜像 -> Worker 排空更新 -> Web 更新 -> 健康检查。
+#   release 同步 -> 迁移/Functions -> 拉镜像 -> Worker 排空更新 -> Web/MCP 更新 -> 健康检查。
 # 默认 --dry-run 只预览迁移并校验 Compose，不修改数据库、Function、容器或镜像。
-# 真实发布必须显式传 --apply 和 CI 产物镜像引用。
+# 真实发布必须显式传 --apply；镜像可指定 CI 产物或自动查询 Nexus。
 
 set -euo pipefail
 set +x
@@ -26,7 +26,7 @@ usage() {
 
 参数：
   --dry-run                 仅预览数据库迁移并校验配置（默认）
-  --apply                   同步 release、执行迁移/Functions、更新 4 个 Worker（每个并发 2）和 Web
+  --apply                   同步 release、执行迁移/Functions、更新 4 个 Worker（每个并发 2）、Web 和 MCP
   --image <镜像>            指定本次 CI 产物；省略时自动选 Nexus 中最新 release_ 时间戳标签
   --worker-timeout <秒>     Worker 排空最大等待时间，默认 3600
   -h, --help                显示帮助
@@ -52,6 +52,10 @@ script_path="$script_dir/$(basename -- "${BASH_SOURCE[0]}")"
 supabase_dir="${CRP_SUPABASE_DIR:-/home/kduser/crp/supabase}"
 web_runtime_config="${CRP_WEB_RUNTIME_CONFIG:-/home/kduser/crp/web/runtime-config.js}"
 worker_env_file="${CRP_WORKER_ENV_FILE:-.docker/worker.selfhost.env}"
+mcp_config_file="${CRP_MCP_CONFIG_FILE:-$repo_dir/.docker/mcp.selfhost.env}"
+if [[ "$mcp_config_file" != /* ]]; then
+  mcp_config_file="$repo_dir/$mcp_config_file"
+fi
 state_file="${CRP_RELEASE_STATE_FILE:-/home/kduser/crp/last-release.env}"
 expected_origin='https://git.kingdee.com/kwork-code-review/kwork-code-review.git'
 nexus_api="${CRP_NEXUS_API:-https://mirrors.kingdee.com/service/rest/v1/search}"
@@ -141,8 +145,37 @@ worker_compose() {
       -f deploy/supabase-selfhost/worker.image.yml "$@"
 }
 
+mcp_compose() {
+  CRP_APP_IMAGE="$image" CRP_MCP_CONFIG_FILE="$mcp_config_file" \
+    docker compose -p crp-selfhost-mcp \
+      -f deploy/supabase-selfhost/docker-compose.mcp.yml "$@"
+}
+
 validate_compose() {
   [[ -f "$worker_env_file" ]] || { echo "找不到 Worker 环境文件：$worker_env_file" >&2; exit 1; }
+  [[ -r "$mcp_config_file" ]] || {
+    echo "找不到 MCP 配置文件：$mcp_config_file" >&2
+    echo '首次部署请从 deploy/supabase-selfhost/env/mcp.container.env.example 复制并填写。' >&2
+    exit 1
+  }
+  # Use Compose's own env-file parser (quotes/interpolation included), and pipe
+  # directly to the validator so credential values are never printed.
+  mcp_compose config --format json | python3 -c '
+import json
+import sys
+
+values = json.load(sys.stdin)["services"]["mcp"]["environment"]
+required = ("CRP_SUPABASE_ANON_KEY", "CRP_EMAIL", "CRP_PASSWORD",
+            "CRP_PLATFORM_WEB_URL", "CRP_MCP_TOKENS")
+missing = [key for key in required if not values.get(key)]
+if missing:
+    sys.exit("MCP 配置缺少必填项：" + ", ".join(missing))
+if not values["CRP_PLATFORM_WEB_URL"].startswith(("http://", "https://")):
+    sys.exit("MCP 的 CRP_PLATFORM_WEB_URL 必须是可访问的 http(s) 地址")
+tokens = [entry.strip() for entry in values["CRP_MCP_TOKENS"].split(",") if entry.strip()]
+if not tokens or any(len(entry.split(":", 1)[-1].strip()) < 16 for entry in tokens):
+    sys.exit("MCP 的 CRP_MCP_TOKENS 至少需要一条长度不少于 16 的访问凭证")
+'
   docker network inspect crp-selfhost-net >/dev/null || { echo '找不到 crp-selfhost-net。先启动 Supabase。' >&2; exit 1; }
   web_compose config --quiet
   worker_compose config --quiet
@@ -182,6 +215,23 @@ wait_for_web() {
     sleep 1
   done
   echo 'Web 健康检查失败：127.0.0.1:4180/__health 未返回 ok。' >&2
+  return 1
+}
+
+wait_for_mcp() {
+  local attempt body container_id
+  for attempt in {1..30}; do
+    container_id="$(mcp_compose ps -q mcp)"
+    if [[ -n "$container_id" && "$(docker inspect --format '{{.State.Health.Status}}' "$container_id" 2>/dev/null || true)" == healthy ]]; then
+      body="$(curl -fsS --max-time 3 http://127.0.0.1:8848/healthz 2>/dev/null || true)"
+      if printf '%s' "$body" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("status") == "ok" and d.get("server") == "codereview-mcp" else 1)' 2>/dev/null; then
+        echo 'MCP 健康检查通过。'
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  echo 'MCP 健康检查失败：容器未健康或 127.0.0.1:8848/healthz 未返回预期结果。' >&2
   return 1
 }
 
@@ -240,14 +290,15 @@ sync_release
 validate_compose
 
 echo "开始发布应用镜像：$image"
-echo '第 1/4 步：数据库增量迁移与 Edge Functions…'
+echo '第 1/5 步：数据库增量迁移与 Edge Functions…'
 bash deploy/supabase-selfhost/scripts/apply-migrations.sh --apply
 
-echo '第 2/4 步：拉取同一应用镜像供 Worker 与 Web 使用…'
+echo '第 2/5 步：拉取同一应用镜像供 Worker、Web 与 MCP 使用…'
 worker_compose pull worker
 web_compose pull web
+mcp_compose pull mcp
 
-echo '第 3/4 步：排空在途任务后更新 Worker…'
+echo '第 3/5 步：排空在途任务后更新 Worker…'
 CRP_APP_IMAGE="$image" bash scripts/worker-drain-restart.sh \
   --project crp-selfhost-worker \
   --env-file "$worker_env_file" \
@@ -258,9 +309,12 @@ CRP_APP_IMAGE="$image" bash scripts/worker-drain-restart.sh \
   --timeout "$worker_timeout"
 verify_worker
 
-echo '第 4/4 步：更新 Web…'
+echo '第 4/5 步：更新 Web…'
 web_compose up -d --no-build --force-recreate web
 wait_for_web
+echo '第 5/5 步：更新 MCP…'
+mcp_compose up -d --no-build --force-recreate mcp
+wait_for_mcp
 write_state
 
 echo "发布完成：代码 $(git rev-parse --short HEAD)，镜像 $image"

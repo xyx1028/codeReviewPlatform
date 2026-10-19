@@ -16,6 +16,7 @@
 | 正式迁移/Functions 子脚本 | 应用工作树内 `deploy/supabase-selfhost/scripts/apply-migrations.sh` |
 | 浏览器运行时配置 | `/home/kduser/crp/web/runtime-config.js`，只允许客户端公开配置 |
 | Worker 秘密配置 | `/home/kduser/crp/app/.docker/worker.selfhost.env` |
+| MCP 秘密配置 | `/home/kduser/crp/app/.docker/mcp.selfhost.env`；首次部署才创建 |
 | Supabase 秘密配置 | `/home/kduser/crp/supabase/.env` |
 | Supabase CLI | `/home/kduser/.local/bin/supabase`；曾安装 v2.117.0，当前版本需查询 |
 | 最近成功发布记录 | `/home/kduser/crp/last-release.env`（只有镜像/代码/时间等非秘密项） |
@@ -33,14 +34,16 @@
 | Supabase | `crp-selfhost` / `supabase-db`、`supabase-envoy`、`supabase-edge-functions` 等 | 宿主机 API `127.0.0.1:54341` → 网关容器 `8000` |
 | Worker | `crp-selfhost-worker` / `crp-selfhost-worker-worker-1` 到 `-4` | 无入站端口，访问 `http://crp-supabase-api:8000` |
 | Web | `crp-selfhost-web` / `crp-selfhost-web-web-1` | `127.0.0.1:4180` → 容器 `8080` |
+| MCP | `crp-selfhost-mcp` / `crp-selfhost-mcp-mcp-1` | `127.0.0.1:8848` → 容器 `8848`；首次发布后才存在 |
 | Session pooler | Supabase `supavisor` / `supabase-pooler` | `127.0.0.1:54342` → `5432` |
 | Transaction pooler | 同上 | `127.0.0.1:54343` → `6543` |
 
-- 共享网络 `crp-selfhost-net`，Linux 已确认 subnet `10.255.0.0/24`；Worker / Web 只加入这一现有 external 网络。
+- 共享网络 `crp-selfhost-net`，Linux 已确认 subnet `10.255.0.0/24`；Worker / Web / MCP 只加入这一现有 external 网络。
 - 禁止在普通重发时另建自动分配的 default bridge：172.x 曾与公司路由冲突导致跳板机断连。增加 network 要先确认公司批准的地址段，而不是自动再分一个 172.x。
 - Linux 实际 `docker-compose.crp.yml` 手工补过 ipam 和公司镜像映射。仓库同名模板没有完整复刻这些机器配置，不能整份复制覆盖。模板或注释不能当成当前运行证据。
 - `worker.override.yml` 的 `environment.WORKER_STORY_CONCURRENCY="2"` 优先于旧 env 文件中的 1；发布脚本 `worker_replicas=4`。
 - Worker 使用三个 Compose：根 `docker-compose.worker.yml`、`deploy/supabase-selfhost/worker.override.yml`、`deploy/supabase-selfhost/worker.image.yml`。后者通过 `CRP_APP_IMAGE` 禁用 build，重启时不能忘记网络覆盖层。
+- MCP 使用 `deploy/supabase-selfhost/docker-compose.mcp.yml`。凭证文件由 Linux 本地维护；镜像只携带代码和依赖。脚本默认检查该文件，不自动生成密码。历史 systemd 示例的 `/srv/crp/app` 路径不是当前实际目录，也不应与容器同时监听 8848。
 - Supabase env 已配置 `COMPOSE_PROJECT_NAME=crp-selfhost` 和 `COMPOSE_FILE=docker-compose.yml:docker-compose.crp.yml`，在 Supabase 目录执行 `docker compose`。
 
 ## 域名与 Nginx
@@ -51,7 +54,7 @@ Nginx 在宿主机按 Host 分流，同一监听端口可以服务两个域名�
 
 ## 镜像与凭据配置
 
-- 应用统一镜像仓库：`mirrors.kingdee.com/kingdee/lingee/patch/kwork-code-review`；Web 和 Worker 使用同一镜像，以不同启动命令运行。
+- 应用统一镜像仓库：`mirrors.kingdee.com/kingdee/lingee/patch/kwork-code-review`；新构建的 Web、Worker 和 MCP 使用同一镜像，以不同启动命令运行。旧标签在构建时未包含 MCP，首次发布必须选含 MCP 的新产物。
 - 当前自动选择实现：Nexus `/service/rest/v1/search`，repository=`docker-hosted`，name 精确匹配 `kingdee/lingee/patch/kwork-code-review`，从返回结果中过滤 `release_` 加 15 位数字并取最大值；不选 `/cache` 和凭空假设的 `release-current`。
 - 当前脚本没有遍历 Nexus continuationToken；标签增长、返回分页或多流水线时，应核对产物并显式指定 `--image`，不能保证“最新标签”一定对应刚提交的代码。
 - Functions 基础镜像：`kcr.kingdee.com/ai-2030/supabase:edge-runtime-v1.76.2-crp-r3`，含离线 Deno/npm 依赖缓存。只改 Function 代码无需重建基础镜像；新增/变更未缓存外部依赖时才需要重新构建预热镜像。

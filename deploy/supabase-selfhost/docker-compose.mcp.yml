@@ -1,0 +1,39 @@
+# Remote MCP role from the same company release image as Web and Worker.
+# Join only the existing Supabase network; never create an automatic 172.x
+# bridge on the company host. The host listener is loopback only for Nginx.
+services:
+  mcp:
+    image: ${CRP_APP_IMAGE:?set CRP_APP_IMAGE to the CI-built application image}
+    command: ["node", "/app/mcp/code-review-mcp/src/index.mjs"]
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file:
+      - ${CRP_MCP_CONFIG_FILE:?set CRP_MCP_CONFIG_FILE to the absolute Linux MCP env path}
+    environment:
+      CRP_SUPABASE_URL: http://crp-supabase-api:8000
+      CRP_MCP_TRANSPORT: http
+      CRP_MCP_HOST: 0.0.0.0
+      CRP_MCP_PORT: "8848"
+      CRP_MCP_PATH: /mcp
+      CRP_MCP_ALLOW_NO_AUTH: "false"
+    ports:
+      - "127.0.0.1:8848:8848"
+    networks:
+      - supabase
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8848/healthz').then(async r => { const b = await r.json(); process.exit(r.ok && b.status === 'ok' && b.server === 'codereview-mcp' ? 0 : 1) }).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+networks:
+  supabase:
+    external: true
+    name: crp-selfhost-net

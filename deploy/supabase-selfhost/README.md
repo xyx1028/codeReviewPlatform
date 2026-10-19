@@ -1,11 +1,11 @@
-# 内网自部署（V1.48 + V1.49 + V1.50）模板与脚本
+# 内网自部署模板与脚本
 
 执行方案在
 [`需求开发评审一致性平台/V1.48-内网自部署Supabase/需求开发评审一致性平台-V1.48内网自部署Supabase-最终执行方案.md`](../../需求开发评审一致性平台/V1.48-内网自部署Supabase/需求开发评审一致性平台-V1.48内网自部署Supabase-最终执行方案.md)。
 这个目录是方案 §9「可提交的模板和脚本」那一项的落地，**只含占位值，不含任何密钥**。
 
 真正的部署动作（连服务器、生成密钥、推迁移、起容器）由部署同事在公司 Linux 上执行；
-这里的东西都没有在公司服务器上跑过，验证状态见方案 §10。
+历史方案的验证状态见对应 §10；当前 Linux 的已执行状态以实际发布日志为准。
 
 ## 目录
 
@@ -16,12 +16,14 @@ deploy/supabase-selfhost/
   worker.override.yml           # Worker 仅接入固定的 Supabase 网络
   worker.image.yml              # Worker 指向统一应用镜像，关闭本机构建
   docker-compose.web.yml        # 同一应用镜像以 Web 入口运行，仅回环暴露 4180
+  docker-compose.mcp.yml        # 同一应用镜像以 MCP 入口运行，仅回环暴露 8848
   web-server.mjs                # SPA 深链接回退与静态缓存，无额外运行时镜像
   env/
     supabase.env.nonsecret.example   # 自部署 Supabase .env 的非秘密部分
     frontend.env.selfhost.example    # 前端构建（.env.selfhost.local）
     worker.selfhost.env.example      # Worker（.docker/worker.selfhost.env）
     mcp.env.selfhost.example         # 远程 MCP（mcp/code-review-mcp/.env.selfhost.local）
+    mcp.container.env.example        # 容器版 MCP（.docker/mcp.selfhost.env）
   nginx/
     review.conf                 # 前端 SPA + HTTPS（含深链接回退）
     supabase.conf               # Supabase API 的 HTTPS 入口（Studio 不对外）
@@ -32,7 +34,7 @@ deploy/supabase-selfhost/
   scripts/
     preflight.sh                # 目标服务器环境自检（只读）
     apply-migrations.sh         # release 临时检出 + 数据库增量迁移 + Edge Functions
-    release.sh                  # 日常总发布：迁移/Functions + Worker drain + Web
+    release.sh                  # 日常总发布：迁移/Functions + Worker drain + Web + MCP
     build-edge-runtime-cache.sh # 构建并推送预热 Functions 依赖的 linux/amd64 镜像
     backup.sh                   # 数据库 + Storage + 配置 + Session 卷备份（只读）
     restore-verify.sh           # 恢复到**临时库**做验证，不碰在服务的库
@@ -47,25 +49,41 @@ deploy/supabase-selfhost/
 3. 配置 Functions 运行时变量 → 方案 §7.4
 4. scripts/apply-migrations.sh --dry-run，确认后 --apply → 迁移 + Functions
 5. 建管理员 / MCP 专用 REVIEWER / 普通账号；配模型、Git 身份、Skill
-6. CI 每个 release 只构建一个统一应用镜像；Linux 用同一 digest 分别启动 Worker 与 Web → Nginx 反向代理到 4180
-7. Worker：worker.selfhost.env + worker.override.yml + worker.image.yml，1 副本
-8. MCP：mcp.env.selfhost.local + systemd + nginx（mcp.conf）
+6. CI 每个 release 只构建一个统一应用镜像；Linux 用同一镜像分别启动 Worker、Web 和 MCP
+7. Worker：worker.selfhost.env + worker.override.yml + worker.image.yml，默认 4 副本
+8. MCP：.docker/mcp.selfhost.env + docker-compose.mcp.yml；对外 Nginx /mcp 入口另行配置
 9. backup.sh → restore-verify.sh → 服务器重启验收
 ```
 
-## 日常发布（V1.50）
+## 日常发布
 
 CI 成功后会给出一个统一应用镜像。日常发布只需要在公司 Linux 的
 `/home/kduser/crp/app` 执行总脚本；它不会构建镜像，使用的就是 CI 已推送的镜像。
 
-首次拿到 V1.50 时，先把包含脚本的 release 同步一次：
+首次拿到新发布脚本时，先把包含脚本的 release 同步一次：
 
 ```bash
 cd /home/kduser/crp/app
 git pull --ff-only origin release
 ```
 
-随后先预览，再确认真实发布。`--dry-run` 不改数据库、Functions、Web 或 Worker；`--apply`
+首次启用 MCP 前，先创建它的独立配置。只需做一次；以后日常发布不必重复填写。模板中
+`CRP_SUPABASE_ANON_KEY` 是公开 anon key，`CRP_EMAIL`/`CRP_PASSWORD` 是专用平台账号，
+`CRP_MCP_TOKENS` 是发给 MCP 客户端的随机访问凭证。值由运维在 Linux 填写，不放进 Git 或聊天。
+`CRP_PLATFORM_WEB_URL` 填同事当前实际能打开的地址；若仍用 HTTP，不要填模板里的 HTTPS 示例。
+
+```bash
+cd /home/kduser/crp/app
+install -m 600 deploy/supabase-selfhost/env/mcp.container.env.example .docker/mcp.selfhost.env
+${EDITOR:-vi} .docker/mcp.selfhost.env
+```
+
+MCP 服务只使用现有 `crp-selfhost-net`；容器内固定访问 `http://crp-supabase-api:8000`，
+宿主机只绑定 `127.0.0.1:8848`。若此前安装过 `crp-mcp.service`，先检查并停用旧服务以避免
+8848 端口冲突；本机历史记录中尚无该服务已安装的证据。对外访问还需单独配置 Nginx 转发
+`/mcp`，本脚本不会修改 Nginx 或申请证书。
+
+随后先预览，再确认真实发布。`--dry-run` 不改数据库、Functions、Web、Worker 或 MCP；`--apply`
 会先同步 release，脚本本身有更新时自动以新版本重新执行。首次可能要求输入一次 GitLab 凭据，
 迁移阶段仍由 Supabase CLI 交互确认。未传 `--image` 时，脚本会查询 Nexus 的精确应用组件，自动选择
 最大的 `release_时间戳` 标签；不会选择同仓库的 `/cache` 镜像。
@@ -95,14 +113,15 @@ bash deploy/supabase-selfhost/scripts/release.sh --apply \
 `git credential-cache exit` 清掉仅内存中的 Git 登录缓存，然后重试；下一次 Git 操作会重新要求登录。
 
 真实发布顺序固定为：同步 `release` → 增量 SQL → Edge Functions → 拉统一镜像 → Worker
-排空并更新 → Web 更新 → 本机健康检查。默认启动 **4 个 Worker，每个并发处理 2 条需求任务**（最多 8 条，仍受模型并发限额约束）。
+排空并更新 → Web 更新 → MCP 更新 → 本机健康检查。默认启动 **4 个 Worker，每个并发处理 2 条需求任务**（最多 8 条，仍受模型并发限额约束）。
 公司 `worker.override.yml` 明确设置 `WORKER_STORY_CONCURRENCY=2`，覆盖旧 env 文件中的 1；
 不需要手改密钥文件。发布检查要求全部 4 个副本均启动且并发为 2 才通过。
 Worker 有在途任务时会停止领取新任务并等待其自行结束，
 不会强制中断；默认最多等 3600 秒，可传 `--worker-timeout <秒>` 调整。成功后，脚本将当前和上一次
-应用镜像写入 `/home/kduser/crp/last-release.env`，文件不包含任何密钥。
+应用镜像写入 `/home/kduser/crp/last-release.env`，文件不包含任何密钥。MCP 容器健康检查和
+宿主机 `127.0.0.1:8848/healthz` 都通过后，才写成功记录。
 
-总脚本不会改 Nginx、TLS 证书、浏览器运行时配置或 Worker 环境文件；这些是机器配置，不能被一次
+总脚本不会改 Nginx、TLS 证书、浏览器运行时配置、Worker 或 MCP 环境文件；这些是机器配置，不能被一次
 应用发布覆盖。数据库迁移仅前滚，应用镜像回退也不会自动回滚已执行的 SQL 或 Functions。
 
 迁移与 Function 子步骤由仓库内的 `deploy/supabase-selfhost/scripts/apply-migrations.sh` 提供，
@@ -167,9 +186,9 @@ docker compose ps functions
 重新构建镜像。它会发送给浏览器，所以只能写公开的 anon key，绝不能放 service-role key、数据库密码、GitLab
 Token 或模型 API key。
 
-**统一应用镜像运行。** Worker 与前端共用同一个 release 镜像摘要：Worker 保持默认启动命令，
-Web 服务通过 Compose 把命令改成 `node web-server.mjs`。两者仍是两个独立容器，因此可以分别查看日志、
-重启和扩容；只是只需要一条流水线产出和一次镜像拉取。两个服务都只加入既有的
+**统一应用镜像运行。** Worker、前端和 MCP 共用同一个 release 镜像摘要：Worker 保持默认启动命令，
+Web 运行 `node web-server.mjs`，MCP 运行 `node /app/mcp/code-review-mcp/src/index.mjs`。三个服务是独立容器，
+可分别查看日志和重启；只需要一条流水线产出。三个服务都只加入既有的
 `crp-selfhost-net`，不会创建自动分配的 Docker 默认网络。Web 只绑定 `127.0.0.1:4180`；公司浏览器
 经宿主机 Nginx 的 HTTPS 域名访问。首次创建浏览器配置后，用同一个 `CRP_APP_IMAGE` 部署：
 

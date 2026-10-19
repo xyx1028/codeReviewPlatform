@@ -1,7 +1,7 @@
 # Unified company release image for the AI review platform. (Plan §17.1, §17.2)
 # The default command is the outbound-only Worker. The same immutable image also
-# contains the browser SPA; docker-compose.web.yml overrides only CMD to run
-# `node web-server.mjs`, so one CI artifact yields two independent containers.
+# contains the browser SPA and remote MCP. Compose selects distinct commands,
+# so one CI artifact yields independent Worker, Web, and MCP containers.
 FROM kcr.kingdee.com/ai-2030/node:24-bookworm-slim-amd64
 
 # git + ripgrep are required by the read-only code tools; ca-certificates for TLS.
@@ -33,6 +33,13 @@ WORKDIR /app
 # Install exact, locked dependencies.
 COPY package.json package-lock.json ./
 RUN npm ci
+
+# The remote MCP is a third role of this immutable release image. Install its
+# own locked dependencies during CI so the Linux host never downloads npm
+# packages when starting the container.
+COPY mcp/code-review-mcp/package.json mcp/code-review-mcp/package-lock.json ./mcp/code-review-mcp/
+RUN npm --prefix mcp/code-review-mcp ci --omit=dev
+COPY mcp/code-review-mcp/src ./mcp/code-review-mcp/src
 
 # Build the worker. `worker/harness` carries the checked-in Harness profile
 # template and the frozen V4 capability contract
