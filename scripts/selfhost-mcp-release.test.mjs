@@ -16,12 +16,16 @@ function checkPreflight(config) {
     writeFileSync(envFile, config)
     return spawnSync('bash', ['-c', `set -euo pipefail
 image=example.invalid/crp:release-test
+mode=--apply
+script_dir=/test/scripts
+supabase_dir=/test/supabase
 mcp_config_file="$MCP_TEST_FILE"
 worker_env_file="$MCP_TEST_FILE"
 worker_replicas=4
 docker() { if [[ "$1" == network ]]; then return 0; fi; command docker "$@"; }
 web_compose() { :; }
 worker_compose() { :; }
+python3() { if [[ "$1" == */bootstrap-mcp.py ]]; then return 0; fi; command python3 "$@"; }
 ${preflight}
 validate_compose
 `], {

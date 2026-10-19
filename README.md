@@ -290,8 +290,8 @@ AI 客户端 ──Streamable HTTP + Bearer 凭证──► mcp/code-review-mcp�
 目标分支（`feature_dev`/`feature_sit`/`release`）、提交时间窗口（7/14/21/28 天）。模型由服务端配置，
 调用方不能指定。
 
-公司 Linux 的日常发布现在从同一 CI 镜像启动独立 MCP 容器；首次需要在 Linux 填写
-`.docker/mcp.selfhost.env`，此后统一 `release.sh --apply` 会同时更新 Worker、Web 和 MCP。
+公司 Linux 的日常发布从同一 CI 镜像启动独立 MCP 容器；统一 `release.sh --apply` 会自动初始化
+MCP 专用 REVIEWER 系统账号、随机凭证和默认 `glm5.3-flash` 模型配置，再同时更新 Worker、Web 和 MCP。
 步骤见 [`deploy/supabase-selfhost/README.md`](deploy/supabase-selfhost/README.md)。
 本地源码调试仍可使用：
 

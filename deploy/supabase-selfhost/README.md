@@ -35,6 +35,7 @@ deploy/supabase-selfhost/
     preflight.sh                # 目标服务器环境自检（只读）
     apply-migrations.sh         # release 临时检出 + 数据库增量迁移 + Edge Functions
     release.sh                  # 日常总发布：迁移/Functions + Worker drain + Web + MCP
+    bootstrap-mcp.py            # 本机 Auth API 初始化 MCP 系统账号、凭证和默认模型
     build-edge-runtime-cache.sh # 构建并推送预热 Functions 依赖的 linux/amd64 镜像
     backup.sh                   # 数据库 + Storage + 配置 + Session 卷备份（只读）
     restore-verify.sh           # 恢复到**临时库**做验证，不碰在服务的库
@@ -67,16 +68,16 @@ cd /home/kduser/crp/app
 git pull --ff-only origin release
 ```
 
-首次启用 MCP 前，先创建它的独立配置。只需做一次；以后日常发布不必重复填写。模板中
-`CRP_SUPABASE_ANON_KEY` 是公开 anon key，`CRP_EMAIL`/`CRP_PASSWORD` 是专用平台账号，
-`CRP_MCP_TOKENS` 是发给 MCP 客户端的随机访问凭证。值由运维在 Linux 填写，不放进 Git 或聊天。
-`CRP_PLATFORM_WEB_URL` 填同事当前实际能打开的地址；若仍用 HTTP，不要填模板里的 HTTPS 示例。
+正式发布会调用 `bootstrap-mcp.py`，首次自动准备 `.docker/mcp.selfhost.env`，不再要求手填账号：
 
-```bash
-cd /home/kduser/crp/app
-install -m 600 deploy/supabase-selfhost/env/mcp.container.env.example .docker/mcp.selfhost.env
-${EDITOR:-vi} .docker/mcp.selfhost.env
-```
+- 从本机 Supabase `.env` 读取 anon key，用 Auth Admin API 创建已确认邮箱的 `crp-mcp-system@internal.invalid`；显示名为“MCP 系统账号”，沿用现有 REVIEWER 权限，仅管理自己创建的批次。
+- 随机生成账号密码和 MCP 调用凭证，先写入权限 0600 的本地文件，再创建账号；重复发布复用原身份、密码和调用凭证。已有自定义账号不覆盖；同名非托管账号、管理员修改的角色或本地密码遗失时停止，不强行接管或重置。
+- 默认选择 `glm5.3-flash`，按模型 id、展示名或唯一 Model 值解析，校验已启用且有密钥，再把准确配置 id 写入 env。模型不存在或匹配多个配置时停止。
+- service-role key 仅用于宿主机初始化进程，不保存到 MCP 配置或镜像；MCP 使用普通账号登录。无需新增 SQL 迁移，不直接写 `auth.users`。
+
+`--dry-run` 只预览初始化计划，不创建账号、不写配置、不生成登录会话。`--apply` 先初始化并通过普通账号校验登录、权限和模型，然后才继续迁移/镜像更新。初始化依赖现有平台基础迁移已应用；不是全新 Supabase 空库的安装器。
+
+需要自定义时仍可从 `env/mcp.container.env.example` 创建文件；`CRP_PLATFORM_WEB_URL` 填当前能访问的地址。已填的账号、密码、调用凭证、默认模型和 URL 会保留。不要把配置内容提交或贴到聊天。
 
 MCP 服务只使用现有 `crp-selfhost-net`；容器内固定访问 `http://crp-supabase-api:8000`，
 宿主机只绑定 `127.0.0.1:8848`。若此前安装过 `crp-mcp.service`，先检查并停用旧服务以避免
@@ -121,8 +122,7 @@ Worker 有在途任务时会停止领取新任务并等待其自行结束，
 应用镜像写入 `/home/kduser/crp/last-release.env`，文件不包含任何密钥。MCP 容器健康检查和
 宿主机 `127.0.0.1:8848/healthz` 都通过后，才写成功记录。
 
-总脚本不会改 Nginx、TLS 证书、浏览器运行时配置、Worker 或 MCP 环境文件；这些是机器配置，不能被一次
-应用发布覆盖。数据库迁移仅前滚，应用镜像回退也不会自动回滚已执行的 SQL 或 Functions。
+总脚本不会改 Nginx、TLS 证书、浏览器运行时配置或 Worker 环境文件；MCP 初始化仅补齐缺失默认项并锁定模型 id，保留已有身份和凭证。数据库迁移仅前滚，应用镜像回退也不会自动回滚已执行的 SQL 或 Functions。
 
 迁移与 Function 子步骤由仓库内的 `deploy/supabase-selfhost/scripts/apply-migrations.sh` 提供，
 `release.sh --apply` 会在发布过程中自动调用它。之前单独放在公司 Linux

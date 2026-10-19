@@ -153,11 +153,16 @@ mcp_compose() {
 
 validate_compose() {
   [[ -f "$worker_env_file" ]] || { echo "找不到 Worker 环境文件：$worker_env_file" >&2; exit 1; }
-  [[ -r "$mcp_config_file" ]] || {
-    echo "找不到 MCP 配置文件：$mcp_config_file" >&2
-    echo '首次部署请从 deploy/supabase-selfhost/env/mcp.container.env.example 复制并填写。' >&2
-    exit 1
-  }
+  docker network inspect crp-selfhost-net >/dev/null || { echo '找不到 crp-selfhost-net。先启动 Supabase。' >&2; exit 1; }
+  web_compose config --quiet
+  worker_compose config --quiet
+  python3 "$script_dir/bootstrap-mcp.py" "$mode" \
+    --supabase-dir "$supabase_dir" --config-file "$mcp_config_file"
+  echo "Worker 目标配置：${worker_replicas} 个副本，每个并发处理 2 条需求任务。"
+  if [[ "$mode" == '--dry-run' ]]; then
+    echo 'MCP 初始化仅预览；正式发布会保存凭证、创建或复用账号，并校验模型与 Compose。'
+    return 0
+  fi
   # Use Compose's own env-file parser (quotes/interpolation included), and pipe
   # directly to the validator so credential values are never printed.
   mcp_compose config --format json | python3 -c '
@@ -176,10 +181,6 @@ tokens = [entry.strip() for entry in values["CRP_MCP_TOKENS"].split(",") if entr
 if not tokens or any(len(entry.split(":", 1)[-1].strip()) < 16 for entry in tokens):
     sys.exit("MCP 的 CRP_MCP_TOKENS 至少需要一条长度不少于 16 的访问凭证")
 '
-  docker network inspect crp-selfhost-net >/dev/null || { echo '找不到 crp-selfhost-net。先启动 Supabase。' >&2; exit 1; }
-  web_compose config --quiet
-  worker_compose config --quiet
-  echo "Worker 目标配置：${worker_replicas} 个副本，每个并发处理 2 条需求任务。"
 }
 
 sync_release() {

@@ -42,7 +42,7 @@ bash deploy/supabase-selfhost/scripts/release.sh --apply
 按当前实现解释：
 
 1. 省略 `--image` 时查询 Nexus；正式发布再同步 GitLab release，脚本变化时用新脚本继续执行。
-2. 确认 `.docker/mcp.selfhost.env` 存在且必填项已填；校验三个角色的 Compose。首次部署需先从 `deploy/supabase-selfhost/env/mcp.container.env.example` 创建此文件并由用户在 Linux 填入真实凭证，不索取或输出凭证。
+2. 先校验 Worker/Web 配置，再运行 `bootstrap-mcp.py`。dry-run 只预览；apply 通过本机 Auth API 创建或复用 MCP 专用 REVIEWER 系统账号、生成并保留本地随机凭证，默认 `glm5.3-flash` 解析成准确模型 id，最后校验 MCP Compose。账号和密码不用手填；不把 service-role key 写进 MCP 配置，不索取或输出凭证。同名非托管账号、托管账号密码遗失或角色被管理员修改时停止，不强行重置。
 3. 调用仓库内 `apply-migrations.sh`，临时检出 release 的 `supabase/`，先预览再增量执行迁移，使用本机自部署数据库；复制有变化的 Function 目录，重启并做加载检查，退出时删除临时检出。
 4. 拉取同一应用镜像供 Worker / Web / MCP 使用。
 5. drain 全部旧 Worker，等待在途任务自然结束（默认最多 3600 秒，可用 `--worker-timeout` 调整），重建 **4 个副本、每副本同时处理 2 条需求任务**；最大任务容量 8 仍受模型并发上限和任务条件限制，不能称为固定 8 个系统线程。
@@ -50,7 +50,7 @@ bash deploy/supabase-selfhost/scripts/release.sh --apply
 
 `--dry-run` 不同步应用工作树、不改数据库/Functions/容器/镜像，但仍联网查询、临时拉取代码并可能请求 Git 登录。此前的 `git pull` 会更新工作树。首次 MCP 对外访问还需 Nginx 正确转发 `/mcp`；本机健康检查不证明客户端已能从公司网络访问。
 
-脚本不是数据搬迁或备份工具：不复制云端业务记录、Storage 实际文件、Vault 密钥；不改 Nginx/TLS/运行时配置或含秘密的 env 文件。SQL 迁移不会因后续失败自动回滚，Function 部署失败仅恢复本轮 Function 文件。不要承诺平台发布失败会整体回滚。
+脚本不是数据搬迁或备份工具：不复制云端业务记录、Storage 实际文件、Vault 密钥；不改 Nginx/TLS、浏览器配置或 Worker env。MCP env 的缺失默认项由初始化补齐，已有身份及凭证保留。SQL 迁移不会因后续失败自动回滚，Function 部署失败仅恢复本轮 Function 文件。不要承诺平台发布失败会整体回滚。
 
 ## 成功后该怎么说
 

@@ -16,7 +16,7 @@
 | 正式迁移/Functions 子脚本 | 应用工作树内 `deploy/supabase-selfhost/scripts/apply-migrations.sh` |
 | 浏览器运行时配置 | `/home/kduser/crp/web/runtime-config.js`，只允许客户端公开配置 |
 | Worker 秘密配置 | `/home/kduser/crp/app/.docker/worker.selfhost.env` |
-| MCP 秘密配置 | `/home/kduser/crp/app/.docker/mcp.selfhost.env`；首次部署才创建 |
+| MCP 秘密配置 | `/home/kduser/crp/app/.docker/mcp.selfhost.env`；正式发布自动初始化并保留凭证 |
 | Supabase 秘密配置 | `/home/kduser/crp/supabase/.env` |
 | Supabase CLI | `/home/kduser/.local/bin/supabase`；曾安装 v2.117.0，当前版本需查询 |
 | 最近成功发布记录 | `/home/kduser/crp/last-release.env`（只有镜像/代码/时间等非秘密项） |
@@ -43,7 +43,7 @@
 - Linux 实际 `docker-compose.crp.yml` 手工补过 ipam 和公司镜像映射。仓库同名模板没有完整复刻这些机器配置，不能整份复制覆盖。模板或注释不能当成当前运行证据。
 - `worker.override.yml` 的 `environment.WORKER_STORY_CONCURRENCY="2"` 优先于旧 env 文件中的 1；发布脚本 `worker_replicas=4`。
 - Worker 使用三个 Compose：根 `docker-compose.worker.yml`、`deploy/supabase-selfhost/worker.override.yml`、`deploy/supabase-selfhost/worker.image.yml`。后者通过 `CRP_APP_IMAGE` 禁用 build，重启时不能忘记网络覆盖层。
-- MCP 使用 `deploy/supabase-selfhost/docker-compose.mcp.yml`。凭证文件由 Linux 本地维护；镜像只携带代码和依赖。脚本默认检查该文件，不自动生成密码。历史 systemd 示例的 `/srv/crp/app` 路径不是当前实际目录，也不应与容器同时监听 8848。
+- MCP 使用 `deploy/supabase-selfhost/docker-compose.mcp.yml`。`scripts/bootstrap-mcp.py` 通过本机 Auth API 创建或复用 `crp-mcp-system@internal.invalid`（REVIEWER，显示名“MCP 系统账号”），自动生成密码和调用凭证，默认 `glm5.3-flash` 解析为配置 id；原凭证不轮换、不输出。无新 SQL 迁移，service-role key 不进入 MCP 容器。历史 systemd 示例的 `/srv/crp/app` 路径不是当前实际目录，也不应与容器同时监听 8848。
 - Supabase env 已配置 `COMPOSE_PROJECT_NAME=crp-selfhost` 和 `COMPOSE_FILE=docker-compose.yml:docker-compose.crp.yml`，在 Supabase 目录执行 `docker compose`。
 
 ## 域名与 Nginx
