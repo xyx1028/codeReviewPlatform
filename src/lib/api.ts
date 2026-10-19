@@ -2096,6 +2096,17 @@ export function describeLinkyError(error: unknown): string {
   if (raw.includes('LINKY_IMPORT_STORY_NOT_REQUESTED')) return '导入单与提交的需求不匹配，请重新发起导入。'
   if (raw.includes('LINKY_IMPORT_LEASE_LOST')) return '这张导入单已被另一个 Worker 接管，请刷新查看进度。'
   if (raw.includes('LINKY_IMPORT_NOT_FOUND')) return '找不到这张导入单。'
+  if (raw.includes('LINKY_WORKSPACE_NOT_FOUND')) {
+    // 上游按名称精确匹配，且"工作区不存在"返回的是空列表而不是报错 —— 所以这条
+    // 以前会伪装成网络错误，让人去查代理和 VPN（那两样都是好的）。
+    return '项目组在 Linky 里没有任何需求：它要么不存在，要么名称不完全一致（上游按名称精确匹配）。请在「用户故事」看板上复制项目组名后重新提交。'
+  }
+  if (raw.includes('LINKY_UPSTREAM_AUTH_FAILED')) {
+    return 'Linky 取数接口拒绝了平台侧凭据（token 失效或过期）。这不是你的网络问题，重试和连 VPN 都没用，需要质量执行平台的维护者在「配置 › Linky 工作区」更新 token。'
+  }
+  if (raw.includes('LINKY_PROXY_PORT_BLOCKED')) {
+    return '宿主机代理拒绝了到 Linky 的隧道：代理需要放开 Linky 的端口（2055/90）。'
+  }
   if (raw.includes('LINKY_PROXY_UNREACHABLE')) return '无法连接宿主机代理。请确认代理服务已恢复后，点击“重试准备”。'
   if (raw.includes('LINKY_IMPORT_RETRY_NOT_FAILED')) return '当前需求准备不是失败状态，请刷新后再操作。'
   if (raw.includes('LINKY_IMPORT_RETRY_NOT_AUTOMATIC')) return '这不是可重试的自动需求准备单，请重新选择需求后开始分析。'

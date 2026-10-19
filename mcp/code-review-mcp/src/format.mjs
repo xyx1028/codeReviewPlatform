@@ -13,6 +13,109 @@
 export const SUBMITTED_NOTICE =
   '评审任务已提交，执行需要较长时间，请前往代码评审平台查看进度和结果。'
 
+function labelOrDash(value) {
+  return value === null || value === undefined || value === '' ? '（空）' : String(value)
+}
+
+function peopleOrDash(names) {
+  return Array.isArray(names) && names.length > 0 ? names.join('、') : '（未填写）'
+}
+
+/**
+ * 提交前的确认卡片。
+ *
+ * 三条硬规矩：
+ *
+ * 1. **开头必须说清"还没提交"。** 这是整段文本里最容易被误读的一点 —— 使用者看到一大片
+ *    需求信息，很容易以为已经在跑了。
+ * 2. **纠正过的字段必须逐条写出"你给的"和"实际是"。** 不沉默纠正：他可能本来就想评审
+ *    另一个组的需求，沉默改掉等于替他做了决定。
+ * 3. **没核对成就不许写得像核对过。** `UNVERIFIED` 的卡片要明说哪一项没核对、为什么。
+ */
+export function formatConfirmationCard({ status, story, corrections, reason, request, token }) {
+  const lines = []
+
+  if (status === 'VERIFIED') {
+    lines.push('🔎 **还没有提交。** 以下是平台从 Linky 查到的需求，请让用户确认后再提交。')
+  } else {
+    lines.push('⚠️ **还没有提交，而且这次没能核对成功。** 请把下面的情况告诉用户，由他决定是否继续。')
+  }
+  lines.push('')
+
+  if (reason !== null && reason !== undefined) {
+    lines.push(`未能核对的原因（${reason.code}）：${reason.message}`)
+    lines.push('')
+  }
+
+  if (story !== null && story !== undefined) {
+    lines.push('将要评审的需求：')
+    lines.push(`  需求编号：${labelOrDash(story.story_code)}`)
+    lines.push(`  需求名称：${labelOrDash(story.title)}`)
+    lines.push(`  所属项目组：${labelOrDash(story.workspace_name)}`)
+    lines.push(`  当前状态：${labelOrDash(story.status_label)}`)
+    lines.push(`  迭代：${labelOrDash(story.iteration)}`)
+    lines.push(`  发布窗口：${labelOrDash(story.release_window)}`)
+    lines.push(`  关联特性：${labelOrDash(story.subject_name)}`)
+    lines.push(`  需求负责人：${peopleOrDash(story.req_owners)}`)
+    lines.push(`  开发负责人：${peopleOrDash(story.dev_owners)}`)
+    lines.push(`  测试负责人：${peopleOrDash(story.test_owners)}`)
+    lines.push(
+      `  需求正文：${story.body_chars > 0 ? `${story.body_chars} 字` : '空'}` +
+        `；附件：${story.attachment_count} 个`,
+    )
+    if (story.team_resolve_error !== null && story.team_resolve_error !== undefined) {
+      lines.push(`  ⚠️ 负责人解析降级：${story.team_resolve_error}（上面的人名可能不全）`)
+    }
+    lines.push('')
+  }
+
+  lines.push('本次评审参数：')
+  lines.push(`  目标分支：${labelOrDash(request.branch)}`)
+  lines.push(`  提交时间窗口：${labelOrDash(request.commit_window_days)} 天`)
+  lines.push(`  项目组（提交时实际使用）：${labelOrDash(request.workspace_name)}`)
+  lines.push('')
+
+  if (Array.isArray(corrections) && corrections.length > 0) {
+    lines.push('⚠️ 平台更正/提醒了以下内容，请一并告诉用户：')
+    for (const item of corrections) {
+      if (item.field === 'requirement_content') {
+        lines.push(`  · ${item.resolved}。${item.note}`)
+        continue
+      }
+      lines.push(
+        `  · ${item.field}：你给的是「${item.given ?? '（未填）'}」，实际是「${item.resolved}」。` +
+          `${item.note}`,
+      )
+    }
+    lines.push('')
+  }
+
+  lines.push('确认无误后，用下面这个令牌再调用一次 start_requirement_review 即可提交')
+  lines.push(`（其余参数保持不变，令牌 ${Math.round((token.ttlMs ?? 0) / 60000)} 分钟内有效）：`)
+  lines.push('')
+  lines.push(`confirmation_token: ${token.value}`)
+  lines.push('')
+  lines.push('提交会真实消耗模型额度。用户没有明确同意之前，不要自行带上令牌提交。')
+
+  return lines.join('\n')
+}
+
+/** 校验明确判定参数是错的 —— 拒绝提交，平台上不会留下任何批次。 */
+export function formatPreflightRejection({ reason, request }) {
+  return [
+    '❌ 没有提交，平台上没有创建任何评审。',
+    '',
+    `原因（${reason.code}）：${reason.message}`,
+    '',
+    `你给的参数：需求编号 ${labelOrDash(request.story_code)}` +
+      `，项目组 ${labelOrDash(request.workspace_name)}` +
+      `，分支 ${labelOrDash(request.branch)}` +
+      `，窗口 ${labelOrDash(request.commit_window_days)} 天`,
+    '',
+    '请和用户核对需求编号后重试。只给需求编号也可以 —— 项目组可以由平台反查，不必自己填。',
+  ].join('\n')
+}
+
 /** 错误码 → 处置建议。缺席的码原样透出，绝不吞掉。 */
 const ERROR_HINTS = {
   STORY_CODE_REQUIRED: '需要需求编号（story_code）。',
@@ -62,6 +165,10 @@ export function formatSubmissionReceipt(receipt) {
     receipt.recovered
       ? '（提交过程中出现过一次网络异常，已向平台核对：这一条确实已经受理，没有重复提交。）'
       : null,
+    receipt.verification === 'UNVERIFIED'
+      ? '⚠️ 注意：这次**没有**在提交前核对需求（原因见上一步的提示）。如果需求编号或项目组不对，' +
+        '平台侧取需求会失败，批次会停在"需求准备失败"。'
+      : null,
     '',
     `批次编号（review_batch.id）：${receipt.batch_id}`,
     `批次名称：${receipt.batch_name}`,
@@ -69,6 +176,7 @@ export function formatSubmissionReceipt(receipt) {
     `任务受理编号（需求导入单 linky_batch_import_request.id）：${receipt.import_request_id}`,
     '',
     `需求编号：${receipt.story_code}`,
+    receipt.story_title ? `需求名称：${receipt.story_title}` : null,
     `项目组：${receipt.workspace_name}`,
     `目标分支：${receipt.branch}`,
     `提交时间窗口：${receipt.commit_window_days} 天`,

@@ -290,6 +290,14 @@ AI 客户端 ──Streamable HTTP + Bearer 凭证──► mcp/code-review-mcp�
 目标分支（`feature_dev`/`feature_sit`/`release`）、提交时间窗口（7/14/21/28 天）。模型由服务端配置，
 调用方不能指定。
 
+**V1.56 起提交是两步的，而且项目组不用自己填。** 第一次调用只核对、不建批次：平台按需求编号
+从 Linky 反查出它真正属于哪个项目组，连同名称、状态、迭代、发布窗口、三类负责人、正文与附件
+有无一起返回，由使用者确认后，带着确认令牌再调一次才真正提交。这修的是一次真实事故 ——
+使用者把项目组说成「工具组」（真名「工具开发组」），而上游对不存在的工作区**返回空列表
+而不是报错**，于是批次建好了、回执说"已成功受理"，几十秒后平台侧才以
+`LINKY_NETWORK_ERROR 全部导入失败` 收场；那句话既不是网络问题，也没有真的受理成功。
+另新增只读工具 `lookup_requirement`，单独查需求、不花额度。
+
 公司 Linux 的日常发布从同一 CI 镜像启动独立 MCP 容器；统一 `release.sh --apply` 会自动初始化
 MCP 专用 REVIEWER 系统账号、随机凭证和默认 `glm5.3-flash` 模型配置，再同时更新 Worker、Web 和 MCP。
 步骤见 [`deploy/supabase-selfhost/README.md`](deploy/supabase-selfhost/README.md)。

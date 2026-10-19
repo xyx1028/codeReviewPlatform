@@ -12,6 +12,8 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ConfigError, loadConfig } from './config.mjs'
 import { EnvFileError, loadEnvFileIfPresent } from './env.mjs'
+import { ConfirmationSigner } from './confirm.mjs'
+import { LinkyReadOnlyClient } from './linky.mjs'
 import { PlatformClient } from './platform.mjs'
 import { createToolRegistry } from './tools.mjs'
 import { createMcpServer } from './server.mjs'
@@ -51,7 +53,38 @@ async function main() {
   }
 
   const client = new PlatformClient(config.platform)
-  const registry = createToolRegistry({ client, config, logger, settle: config.settle })
+  const linky =
+    config.linky.baseUrl === null
+      ? null
+      : new LinkyReadOnlyClient({
+          baseUrl: config.linky.baseUrl,
+          timeoutMs: config.linky.timeoutMs,
+        })
+  const confirmations = new ConfirmationSigner({
+    secret: config.confirm.secret,
+    ttlMs: config.confirm.ttlMs,
+  })
+  const registry = createToolRegistry({
+    client,
+    config,
+    logger,
+    settle: config.settle,
+    linky,
+    confirmations,
+  })
+
+  if (config.linky.baseUrl === null) {
+    process.stderr.write(
+      '[警告] CRP_LINKY_API_BASE_URL 为空：提交前不会核对需求编号与项目组，' +
+        '参数写错时要等平台侧导入失败才会发现。\n',
+    )
+  }
+  if (config.confirm.secret === null) {
+    process.stderr.write(
+      '[提示] 未配置 CRP_CONFIRM_SECRET，确认令牌密钥为本次启动随机生成：' +
+        '重启后未使用的令牌失效；多实例部署请显式配置，否则令牌只在签发它的实例上有效。\n',
+    )
+  }
 
   if (config.transport === 'stdio') {
     const server = createMcpServer(registry)
@@ -98,6 +131,8 @@ async function main() {
     session_ttl_ms: config.http.sessionTtlMs,
     max_sessions: config.http.maxSessions,
     allowed_origins: config.http.allowedOrigins,
+    preflight: config.linky.baseUrl === null ? 'DISABLED' : config.linky.baseUrl,
+    confirm_ttl_ms: config.confirm.ttlMs,
   })
   if (config.http.allowAnonymous) {
     process.stderr.write(

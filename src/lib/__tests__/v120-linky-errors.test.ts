@@ -9,6 +9,28 @@ import { describeLinkyError } from '../api'
 import { LinkyLiveError, describeLinkyLiveError, linkyApiBase } from '../linky-live'
 
 describe('describeLinkyError', () => {
+  it('V1.56：项目组解析不到时说清是项目组的事，不说成网络问题', () => {
+    const text = describeLinkyError(
+      new Error('LINKY_WORKSPACE_NOT_FOUND 项目组「工具组」在 Linky 里没有任何需求'),
+    )
+    expect(text).toContain('精确匹配')
+    expect(text).toContain('用户故事')
+    expect(text).not.toContain('网络')
+  })
+
+  it('V1.56：上游 token 失效要说明重试无用、该找谁', () => {
+    const text = describeLinkyError(new Error('LINKY_UPSTREAM_AUTH_FAILED invalid token'))
+    expect(text).toContain('不是你的网络问题')
+    expect(text).toContain('Linky 工作区')
+  })
+
+  it('V1.56：代理端口没放开与代理不可用是两回事', () => {
+    expect(describeLinkyError(new Error('LINKY_PROXY_PORT_BLOCKED'))).toContain('2055')
+    expect(describeLinkyError(new Error('LINKY_PROXY_UNREACHABLE'))).toContain('代理服务')
+  })
+})
+
+describe('describeLinkyError', () => {
   it('没选项目组时点明它定义了需求来源', () => {
     expect(describeLinkyError(new Error('rpc failed: LINKY_IMPORT_WORKSPACE_REQUIRED'))).toContain(
       '项目组',

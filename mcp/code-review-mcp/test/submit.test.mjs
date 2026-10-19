@@ -19,6 +19,7 @@ import {
   formatSubmissionReceipt,
 } from '../src/format.mjs'
 import { TOOL_DEFINITION, TOOL_NAME, createToolRegistry } from '../src/tools.mjs'
+import { ConfirmationSigner } from '../src/confirm.mjs'
 
 const CONFIG = {
   platform: { webUrl: 'https://review.example.com' },
@@ -30,6 +31,23 @@ const VALID_ARGS = {
   story_code: 'F-123456',
   branch: 'feature_dev',
   commit_window_days: 21,
+}
+
+/**
+ * 签一张对应 VALID_ARGS 的确认令牌。
+ *
+ * 测试里 `linky` 为 null（校验关闭），所以结论是 UNVERIFIED —— 这正是"MCP 不在内网"
+ * 的真实形态：仍然要求确认，只是卡片上写明没核对过。
+ */
+function confirmedToken(confirmations, overrides = {}) {
+  return confirmations.issue({
+    story_code: VALID_ARGS.story_code,
+    workspace_name: VALID_ARGS.workspace_name,
+    branch: VALID_ARGS.branch,
+    commit_window_days: VALID_ARGS.commit_window_days,
+    verification: 'UNVERIFIED',
+    ...overrides,
+  })
 }
 
 /** 最小假客户端：记录调用序列，便于断言"失败时有没有把空批次删掉"。 */
@@ -234,14 +252,17 @@ test('权限不足时给出可照着做的提示', () => {
   )
 })
 
-test('工具定义：四个必填参数 + 枚举约束 + 不开放模型参数', () => {
+test('工具定义：三个必填参数 + 枚举约束 + 不开放模型参数', () => {
   assert.equal(TOOL_NAME, 'start_requirement_review')
+  // V1.56：workspace_name 从必填改为可选 —— 它可以由需求编号反查，
+  // 要求使用者自己拼对项目组名正是上一次事故的起点。
   assert.deepEqual(TOOL_DEFINITION.inputSchema.required, [
-    'workspace_name',
     'story_code',
     'branch',
     'commit_window_days',
   ])
+  assert.ok('workspace_name' in TOOL_DEFINITION.inputSchema.properties)
+  assert.ok('confirmation_token' in TOOL_DEFINITION.inputSchema.properties)
   assert.deepEqual(TOOL_DEFINITION.inputSchema.properties.branch.enum, [
     'feature_dev',
     'feature_sit',
@@ -251,12 +272,15 @@ test('工具定义：四个必填参数 + 枚举约束 + 不开放模型参数',
   assert.equal(TOOL_DEFINITION.inputSchema.additionalProperties, false)
   assert.ok(!('model' in TOOL_DEFINITION.inputSchema.properties))
   assert.match(TOOL_DEFINITION.description, /不提供进度查询/)
+  // 分支与窗口会直接改变评审结论，必须留在必填里。
+  assert.match(TOOL_DEFINITION.inputSchema.properties.branch.description, /必填/)
 })
 
 test('registry 对未知工具与失败调用都回 isError，不回成功文案', async () => {
   const client = createFakeClient()
-  const registry = createToolRegistry({ client, config: CONFIG })
-  assert.equal(registry.definitions.length, 1)
+  const confirmations = new ConfirmationSigner()
+  const registry = createToolRegistry({ client, config: CONFIG, confirmations })
+  assert.equal(registry.definitions.length, 2, '查询工具 + 提交工具')
 
   const unknown = await registry.call('get_requirement_review', {})
   assert.equal(unknown.isError, true)
@@ -265,7 +289,11 @@ test('registry 对未知工具与失败调用都回 isError，不回成功文案
   assert.equal(bad.isError, true)
   assert.ok(!bad.content[0].text.includes('已提交'))
 
-  const ok = await registry.call(TOOL_NAME, VALID_ARGS, { caller: 'alice' })
+  const ok = await registry.call(
+    TOOL_NAME,
+    { ...VALID_ARGS, confirmation_token: confirmedToken(confirmations) },
+    { caller: 'alice' },
+  )
   assert.equal(ok.isError, false)
   assert.ok(ok.content[0].text.includes(SUBMITTED_NOTICE))
   const insertCall = client.calls.find((call) => call.kind === 'insert')

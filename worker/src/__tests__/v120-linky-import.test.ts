@@ -246,7 +246,10 @@ describe('runLinkyBatchImport', () => {
     expect(calls.committed[0]?.storyCode).toBe('US-2026-012147')
   })
 
-  it('勾选的编号不在上游列表里时记失败，不去猜', async () => {
+  it('项目组在上游解析不到时，报的是项目组问题而不是网络错误', async () => {
+    // 上游契约：指定的工作区不存在时返回空列表（total=0），而**不是**报错。
+    // 所以"列表整个是空的"这件事只有一个含义 —— 项目组名没对上。此前这里会退化成
+    // 逐条 LINKY_NOT_FOUND，最后整单以 LINKY_NETWORK_ERROR 收场，让人去查代理和 VPN。
     const { db, calls } = fakeDb()
     const client = fakeClient({
       listAllStories: vi.fn(async () => ({ items: [], total: 0, scopes: 1, pages: 1 })),
@@ -261,8 +264,58 @@ describe('runLinkyBatchImport', () => {
         limits,
         logger: silentLogger,
       }),
-    ).rejects.toThrow('全部导入失败')
+    ).rejects.toMatchObject({ code: 'LINKY_WORKSPACE_NOT_FOUND' })
+    // 提前整单失败，不逐条试 —— 每条都注定找不到，试一遍只是把同一句话说 N 遍。
+    expect(calls.failures).toHaveLength(0)
+  })
+
+  it('项目组对但勾选的编号不在列表里时，报编号找不到并带上项目组名', async () => {
+    const { db, calls } = fakeDb()
+    const client = fakeClient({
+      // 列表有别的需求，说明项目组是解析到了的 —— 那就是这个编号的问题。
+      listAllStories: vi.fn(async () => ({
+        items: [listItem({ code: 'US-2026-099999', id: ISSUE })],
+        total: 1,
+        scopes: 1,
+        pages: 1,
+      })),
+    })
+    await expect(
+      runLinkyBatchImport({
+        claim,
+        workerId: 'w1',
+        client,
+        db,
+        storage: fakeStorage(),
+        limits,
+        logger: silentLogger,
+      }),
+    ).rejects.toMatchObject({ code: 'LINKY_NOT_FOUND' })
     expect(calls.failures[0]?.errorCode).toBe('LINKY_NOT_FOUND')
+  })
+
+  it('整单失败时上报主导原因码，不再一律 LINKY_NETWORK_ERROR', async () => {
+    const { db } = fakeDb()
+    const client = fakeClient({
+      getStory: vi.fn(async () => {
+        throw new LinkyApiError(
+          'LINKY_UPSTREAM_AUTH_FAILED',
+          'Linky 取数接口拒绝了平台侧凭据（HTTP 400：invalid token）',
+          400,
+        )
+      }),
+    })
+    await expect(
+      runLinkyBatchImport({
+        claim,
+        workerId: 'w1',
+        client,
+        db,
+        storage: fakeStorage(),
+        limits,
+        logger: silentLogger,
+      }),
+    ).rejects.toMatchObject({ code: 'LINKY_UPSTREAM_AUTH_FAILED' })
   })
 
   it('附件按允许列表与配额筛，超限跳过而不是中断', async () => {
@@ -379,6 +432,8 @@ describe('runLinkyBatchImport', () => {
         limits,
         logger: silentLogger,
       }),
-    ).rejects.toThrow('全部导入失败')
+      // 整单失败仍然要抛，但文案按主导原因给：这里全是"找不到编号"，就说清是编号的事，
+      // 而不是笼统的"全部导入失败"（更不是网络错误）。
+    ).rejects.toMatchObject({ code: 'LINKY_NOT_FOUND' })
   })
 })

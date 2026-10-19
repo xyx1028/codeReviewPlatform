@@ -8,21 +8,30 @@
  *
  * 用法：
  *   node scripts/live-check.mjs --url http://127.0.0.1:8848/mcp --token <凭证>
+ *
+ *   # 只跑"提交前核对"这一步，看那张确认卡片；不会创建评审
  *   node scripts/live-check.mjs --url ... --token ... --submit \
- *     --workspace "灵基Foundation" --story F-123456 --branch feature_dev --window 21
+ *     --story US-2026-017341 --branch feature_dev --window 7
+ *
+ *   # 看过卡片、确认无误之后，再加 --confirm 才真的提交
+ *   node scripts/live-check.mjs --url ... --token ... --submit --confirm \
+ *     --story US-2026-017341 --branch feature_dev --window 7
+ *
+ * --workspace 是可选的：项目组由平台按需求编号反查。
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 
 function parseArgs(argv) {
-  const args = { submit: false }
+  const args = { submit: false, confirm: false }
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index]
     const next = () => argv[(index += 1)]
     if (key === '--url') args.url = next()
     else if (key === '--token') args.token = next()
     else if (key === '--submit') args.submit = true
+    else if (key === '--confirm') args.confirm = true
     else if (key === '--workspace') args.workspace = next()
     else if (key === '--story') args.story = next()
     else if (key === '--branch') args.branch = next()
@@ -66,18 +75,60 @@ async function finish() {
 }
 
 if (args.submit) {
-  if (!args.workspace || !args.story || !args.branch || !args.window) {
-    console.error('--submit 需要同时给出 --workspace --story --branch --window')
+  if (!args.story || !args.branch || !args.window) {
+    console.error('--submit 需要同时给出 --story --branch --window（--workspace 可选）')
     process.exit(2)
   }
-  console.log(`\n→ 真实提交一次评审：${args.story}（${args.workspace}）`)
-  const result = await client.callTool({
+
+  // 第一步：核对。不带 confirmation_token，所以**不会**创建任何评审。
+  console.log(`\n→ 第一步（只核对，不提交）：${args.story}`)
+  const preflight = await client.callTool({
     name: 'start_requirement_review',
     arguments: {
-      workspace_name: args.workspace,
       story_code: args.story,
       branch: args.branch,
       commit_window_days: args.window,
+      ...(args.workspace ? { workspace_name: args.workspace } : {}),
+    },
+  })
+  const preflightText = (preflight.content ?? [])
+    .filter((item) => item.type === 'text')
+    .map((item) => item.text)
+    .join('\n')
+  console.log(preflightText)
+
+  if (preflight.isError) {
+    console.error('\n✘ 核对未通过，已停止（平台上没有创建任何评审）。')
+    await finish()
+    process.exit(1)
+  }
+
+  const token = /confirmation_token:\s*(\S+)/.exec(preflightText)?.[1]
+  if (token === undefined || !token.startsWith('v1.')) {
+    console.error('\n✘ 第一步没有返回可用的 confirmation_token，已停止。')
+    await finish()
+    process.exit(1)
+  }
+
+  if (!args.confirm) {
+    console.log(
+      '\n⏸ 到此为止。上面就是"提交前让用户确认"的那张卡片。' +
+        '确认无误后再加 --confirm 重跑，才会真的提交并消耗模型额度。',
+    )
+    await finish()
+    process.exit(0)
+  }
+
+  // 第二步：带令牌真正提交。
+  console.log('\n→ 第二步（已确认，真实提交并消耗模型额度）')
+  const result = await client.callTool({
+    name: 'start_requirement_review',
+    arguments: {
+      story_code: args.story,
+      branch: args.branch,
+      commit_window_days: args.window,
+      ...(args.workspace ? { workspace_name: args.workspace } : {}),
+      confirmation_token: token,
     },
   })
   console.log(result.isError ? '✘ 提交失败：' : '✔ 提交成功：')

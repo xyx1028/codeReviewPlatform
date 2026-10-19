@@ -5,7 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 
 import { createHttpApp } from '../src/http.mjs'
-import { TOOL_DEFINITION, TOOL_NAME } from '../src/tools.mjs'
+import { LOOKUP_TOOL_DEFINITION, TOOL_DEFINITION, TOOL_NAME } from '../src/tools.mjs'
 
 const TOKEN = 'token-0123456789abcdef'
 const OTHER_TOKEN = 'token-fedcba9876543210'
@@ -31,7 +31,7 @@ function createStubRegistry() {
   const calls = []
   return {
     calls,
-    definitions: [TOOL_DEFINITION],
+    definitions: [LOOKUP_TOOL_DEFINITION, TOOL_DEFINITION],
     async call(name, args, context) {
       calls.push({ name, args, context })
       return { content: [{ type: 'text', text: `ok:${context?.caller ?? 'none'}` }], isError: false }
@@ -107,10 +107,10 @@ test('带凭证可以 initialize、列工具、调用工具', async () => {
     const { client, transport } = await connect(baseUrl, TOKEN)
     try {
       const tools = await client.listTools()
-      assert.equal(tools.tools.length, 1, '首版只暴露一个工具')
-      assert.equal(tools.tools[0].name, TOOL_NAME)
-      assert.deepEqual(tools.tools[0].inputSchema.required, [
-        'workspace_name',
+      assert.equal(tools.tools.length, 2, '只读查询工具 + 提交工具')
+      const submit = tools.tools.find((tool) => tool.name === TOOL_NAME)
+      assert.ok(submit, '提交工具必须在清单里')
+      assert.deepEqual(submit.inputSchema.required, [
         'story_code',
         'branch',
         'commit_window_days',

@@ -16,7 +16,7 @@
 import { createHash } from 'node:crypto'
 import type { Logger } from '../logger.js'
 import type { LinkyClient } from './client.js'
-import { LinkyApiError } from './client.js'
+import { LinkyApiError, type LinkyErrorCode } from './client.js'
 import type { StoryAttachmentStorage } from './attachment-storage.js'
 import {
   type CatalogItemPayload,
@@ -155,6 +155,33 @@ export async function runLinkyBatchImport(input: {
     requested: claim.story_codes.length,
   })
 
+  /**
+   * 项目组压根没解析到。
+   *
+   * 上游的契约是「指定的工作区不存在时返回空列表（total=0）」，而且 `workspace_name`
+   * 是**精确匹配**。所以一个写错的项目组名不会报错，它会安静地回 0 条 —— 接着每条需求
+   * 都「不在该项目组的列表里」，最后整单以 `LINKY_NETWORK_ERROR` 收场。
+   *
+   * 那个结论是假的：网络是好的，代理是好的，VPN 是好的。使用者照着"网络错误"去查，
+   * 查到的全是正常的东西，而真正要改的是那个名字。所以这里提前失败，并把名字还给他。
+   */
+  if (listed.total === 0 && byCode.size === 0) {
+    throw new LinkyApiError(
+      'LINKY_WORKSPACE_NOT_FOUND',
+      `项目组「${claim.workspace_name}」在 Linky 里没有任何需求：它要么不存在，要么名称不完全一致` +
+        '（上游按名称精确匹配，不做模糊）。请在平台的「用户故事」看板上复制项目组名后重新提交。',
+    )
+  }
+
+  /**
+   * 逐条失败的原因分布。
+   *
+   * 整单失败时要报**真实的**主导原因，而不是一个固定的网络错误码。一条都没成功的时候，
+   * 原因几乎总是同一个（项目组不对、凭据失效、代理没放开），把它原样报出来，页面上那句话
+   * 才是可操作的。
+   */
+  const failureCodes = new Map<string, number>()
+
   for (const storyCode of claim.story_codes) {
     if (input.signal?.aborted) break
     await heartbeat()
@@ -257,6 +284,7 @@ export async function runLinkyBatchImport(input: {
       if (error instanceof Error && error.name === 'LinkyImportLeaseLost') throw error
       const info = errorInfo(error)
       outcome.storiesFailed += 1
+      failureCodes.set(info.code, (failureCodes.get(info.code) ?? 0) + 1)
       if (uploadedKeys.length > 0) {
         // 回滚这条故事的字节。删不掉只记一行日志：孤儿对象不影响正确性，
         // 而在这里抛错会把"一条需求没导进来"升级成"整单失败"。
@@ -293,9 +321,17 @@ export async function runLinkyBatchImport(input: {
 
   // 一条都没成功：整单失败。否则页面会显示"导入完成"而批次里一条需求都没有。
   if (outcome.storiesCommitted === 0) {
+    // 报主导原因码，不要一律 LINKY_NETWORK_ERROR：那会把"项目组名写错了"、"平台侧 token
+    // 失效"、"代理没放开端口"统统说成网络问题，而这三件事的处置完全不同。
+    const [dominant] = [...failureCodes.entries()].sort((a, b) => b[1] - a[1])
+    const code = (dominant?.[0] ?? 'LINKY_NETWORK_ERROR') as LinkyErrorCode
+    const total = claim.story_codes.length
     throw new LinkyApiError(
-      'LINKY_NETWORK_ERROR',
-      `勾选的 ${claim.story_codes.length} 条需求全部导入失败`,
+      code,
+      code === 'LINKY_NOT_FOUND'
+        ? `勾选的 ${total} 条需求都不在项目组「${claim.workspace_name}」的列表里：` +
+          '确认项目组是否选对，以及这些需求是否已被移动或删除。'
+        : `勾选的 ${total} 条需求全部导入失败`,
     )
   }
   return outcome

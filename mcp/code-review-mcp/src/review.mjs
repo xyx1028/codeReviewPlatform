@@ -20,13 +20,42 @@
 
 import { randomBytes } from 'node:crypto'
 import { PlatformError } from './platform.mjs'
-import { SUPPORTED_BRANCHES, SUPPORTED_COMMIT_WINDOWS } from './config.mjs'
+import { DEFAULT_TIME_ZONE, SUPPORTED_BRANCHES, SUPPORTED_COMMIT_WINDOWS } from './config.mjs'
 
 /** 核对之间的等待。留出注入点，免得单测真的睡几秒。 */
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-function pad2(value) {
-  return String(value).padStart(2, '0')
+/**
+ * 把一个时刻拆成指定时区的年月日时分秒。
+ *
+ * 用 `Intl` 而不是手工加 8 小时：偏移量不是常数（别的时区有夏令时），而写死 `+8`
+ * 会在换一个部署地点时变成一个没人记得的坑。`en-CA` 的 `formatToParts` 给的是补零后的
+ * 两位数字，直接可用。
+ */
+export function zonedParts(date, timeZone = DEFAULT_TIME_ZONE) {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+  const parts = {}
+  for (const part of formatter.formatToParts(date)) {
+    if (part.type !== 'literal') parts[part.type] = part.value
+  }
+  return {
+    year: parts.year,
+    month: parts.month,
+    day: parts.day,
+    // 某些 ICU 版本在 hour12:false 下把午夜给成 "24"，统一压回 "00"。
+    hour: parts.hour === '24' ? '00' : parts.hour,
+    minute: parts.minute,
+    second: parts.second,
+  }
 }
 
 /**
@@ -35,11 +64,18 @@ function pad2(value) {
  * `review_batch.week_code` 全库唯一，而前端用的是 `YYYYMMDD`（一天一个批次）。
  * MCP 一天可能提交很多次，所以加时分秒后缀；前缀保持 `YYYYMMDD`，这样它在批次列表里
  * 仍按日期排得上。后缀是并发兜底：同一秒两次提交不该因为唯一键相撞而失败。
+ *
+ * **按指定时区格式化，不用运行环境的本地时间。** MCP 容器的 TZ 通常是 UTC，而批次列表里
+ * 的「创建时间」是按使用者所在时区渲染的。用容器本地时间的后果实测如下：16:54 提交，
+ * 编码里写的是 `085407` —— 差 8 小时；更糟的是北京时间每天 08:00 之前提交，UTC 还在前一天，
+ * 日期前缀会整体错一天，于是这个批次在列表里排到昨天去。
  */
-export function buildWeekCode(date = new Date(), { suffix = null } = {}) {
-  const ymd = `${date.getFullYear()}${pad2(date.getMonth() + 1)}${pad2(date.getDate())}`
-  const hms = `${pad2(date.getHours())}${pad2(date.getMinutes())}${pad2(date.getSeconds())}`
-  return `${ymd}-MCP${hms}${suffix === null ? '' : suffix}`
+export function buildWeekCode(
+  date = new Date(),
+  { suffix = null, timeZone = DEFAULT_TIME_ZONE } = {},
+) {
+  const { year, month, day, hour, minute, second } = zonedParts(date, timeZone)
+  return `${year}${month}${day}-MCP${hour}${minute}${second}${suffix === null ? '' : suffix}`
 }
 
 /**
@@ -70,7 +106,9 @@ export function normalizeWorkspaceName(input) {
   const name = String(input ?? '').trim()
   if (name === '') {
     throw new PlatformError(
-      '缺少项目组（workspace_name）。它决定在 Linky 的哪个范围里找这条需求，必须由调用方给出。',
+      '提交时缺少项目组（workspace_name）。它决定在 Linky 的哪个范围里找这条需求。' +
+        '正常流程下它由平台按需求编号反查得到 —— 出现这条报错说明校验环节被跳过了，' +
+        '请先调用 lookup_requirement 查一次。',
       { code: 'WORKSPACE_NAME_REQUIRED' },
     )
   }
@@ -280,7 +318,10 @@ export async function submitRequirementReview(client, config, input, { settle } 
 
   const batch = await client.insert('review_batch', {
     name: `${config.defaults.batchNamePrefix}：${storyCode}`.slice(0, 120),
-    week_code: buildWeekCode(new Date(), { suffix: randomWeekCodeSuffix() }),
+    week_code: buildWeekCode(new Date(), {
+      suffix: randomWeekCodeSuffix(),
+      timeZone: config.defaults.timeZone ?? DEFAULT_TIME_ZONE,
+    }),
     default_branch: branch,
     ai_model_config_id: model.id,
     remark: `由远程 MCP 提交（调用方 ${input.caller ?? '未命名'}，平台账号 ${client.email}）`,
@@ -332,6 +373,7 @@ export async function submitRequirementReview(client, config, input, { settle } 
     week_code: batch.week_code,
     import_request_id: importRequestId,
     story_code: storyCode,
+    story_title: input.story_title ?? null,
     workspace_name: workspaceName,
     branch,
     commit_window_days: commitWindowDays,

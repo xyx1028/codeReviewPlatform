@@ -14,7 +14,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 
 import { createHttpApp, corsHeaders } from '../src/http.mjs'
 import { normalizePath, parseAllowedOrigins } from '../src/config.mjs'
-import { TOOL_DEFINITION, TOOL_NAME } from '../src/tools.mjs'
+import { LOOKUP_TOOL_DEFINITION, TOOL_DEFINITION, TOOL_NAME } from '../src/tools.mjs'
 
 const TOKEN = 'token-0123456789abcdef'
 
@@ -36,7 +36,7 @@ function buildConfig(port, overrides = {}) {
 }
 
 const registry = {
-  definitions: [TOOL_DEFINITION],
+  definitions: [LOOKUP_TOOL_DEFINITION, TOOL_DEFINITION],
   async call(name, args, context) {
     return { content: [{ type: 'text', text: `ok:${context?.caller ?? 'none'}` }], isError: false }
   },
@@ -74,7 +74,7 @@ test('带尾斜杠的地址也能完成 initialize（粘贴 URL 多一个斜杠�
     const { client, transport } = await connect(baseUrl, { path: '/mcp/' })
     try {
       const tools = await client.listTools()
-      assert.equal(tools.tools[0].name, TOOL_NAME)
+      assert.ok(tools.tools.some((tool) => tool.name === TOOL_NAME))
     } finally {
       await transport.close()
       await client.close()
@@ -209,7 +209,7 @@ test('会话数到上限时挤掉最久没活动的那个，而不是拒绝新�
 
       // 新会话照常可用。
       const tools = await second.client.listTools()
-      assert.equal(tools.tools.length, 1)
+      assert.equal(tools.tools.length, 2)
 
       await second.transport.close()
       await second.client.close()

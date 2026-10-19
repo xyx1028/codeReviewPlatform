@@ -11,8 +11,9 @@
                     └─ Worker 内网取 Linky 正文/附件并冻结 → 自动建分析任务 → Agent 评审
 ```
 
-首版**只有一个工具** `start_requirement_review`：提交并返回回执，不提供进度查询、结果查询、
-轮询或自动等待。进度和结论都在平台页面上看。
+两个工具：`lookup_requirement`（只读查需求，不花钱）和 `start_requirement_review`（提交）。
+提交是**两步**的 —— 先核对并让用户确认，再带令牌真正提交，见下面「提交前核对与确认」。
+不提供进度查询、结果查询、轮询或自动等待：进度和结论都在平台页面上看。
 
 ## 它返回什么
 
@@ -71,6 +72,11 @@ npm start                # 或在仓库根目录 npm run mcp:start
 | `CRP_PLATFORM_TIMEOUT_MS` | ❌ | 单次平台请求超时，默认 `20000` |
 | `CRP_SETTLE_PROBES` / `CRP_SETTLE_PROBE_TIMEOUT_MS` / `CRP_SETTLE_DELAY_MS` | ❌ | 「结果不明」后的核对预算，默认 `3` / `8000` / `2000` |
 | `CRP_BATCH_NAME_PREFIX` | ❌ | 批次名前缀，默认 `MCP 评审` |
+| `CRP_TIMEZONE` | ❌ | 发布周期编码所用时区，默认 `Asia/Shanghai`。容器通常是 UTC，用本地时间会让编码比创建时间差 8 小时、早上 8 点前还错一天 |
+| `CRP_LINKY_API_BASE_URL` | ❌ | 提交前核对需求用的 Linky 取数地址。**默认已指向公司地址**；显式设成空字符串才关闭核对 |
+| `CRP_LINKY_TIMEOUT_MS` | ❌ | 单次核对请求超时，默认 `8000` |
+| `CRP_CONFIRM_TTL_MS` | ❌ | 确认令牌有效期，默认 `900000`（15 分钟），最小 60000 |
+| `CRP_CONFIRM_SECRET` | 多实例部署时必填 | 令牌签名密钥。留空则每次启动随机生成（重启后旧令牌失效）；多实例必须配同一个值 |
 
 生成一串凭证：
 
@@ -104,11 +110,17 @@ CRP_PLATFORM_TIMEOUT_MS
 ```bash
 curl -s http://127.0.0.1:8848/healthz
 npm run live-check -- --url http://127.0.0.1:8848/mcp --token <凭证>          # 只读
+
+# 只跑"提交前核对"这一步，看那张确认卡片；不会创建评审、不花额度
 npm run live-check -- --url http://127.0.0.1:8848/mcp --token <凭证> --submit \
-  --workspace "灵基Foundation" --story F-123456 --branch feature_dev --window 21
+  --story US-2026-017341 --branch feature_dev --window 7
+
+# 看过卡片、确认无误之后，再加 --confirm 才真的提交
+npm run live-check -- --url http://127.0.0.1:8848/mcp --token <凭证> --submit --confirm \
+  --story US-2026-017341 --branch feature_dev --window 7
 ```
 
-`--submit` 会真的提交一次评审并消耗模型额度。
+`--workspace` 可选：项目组由平台按需求编号反查。只有 `--confirm` 才会真的提交并消耗模型额度。
 
 ## 客户端怎么配
 
@@ -187,22 +199,72 @@ http_headers = { Authorization = "Bearer 你的凭证" }
 
 配好之后直接说人话即可，例如：
 
-> 帮我把 F-123456 提交评审，项目组是灵基Foundation，分支 feature_dev，看最近 21 天的提交。
+> 帮我把 US-2026-017341 提交评审，分支 feature_dev，看最近 7 天的提交。
+
+项目组不用说 —— 平台会按编号反查，并在你说错时纠正。客户端会先把查到的需求给你确认，
+确认之后才真的提交。
 
 ## 工具契约
 
-`start_requirement_review`
+### `lookup_requirement`（只读，不花钱）
 
 | 参数 | 必填 | 取值 |
 |---|---|---|
-| `workspace_name` | ✅ | 需求所在项目组名称（Linky 的 workspace_name） |
+| `story_code` | ✅ | 需求编号，一次一条 |
+| `workspace_name` | ❌ | 用户说的项目组；填了会和实际值核对并在不一致时指出 |
+| `branch` | ❌ | 与 `commit_window_days` 同时填，才会签出可直接提交的令牌 |
+| `commit_window_days` | ❌ | 同上 |
+
+### `start_requirement_review`
+
+| 参数 | 必填 | 取值 |
+|---|---|---|
 | `story_code` | ✅ | 需求编号，一次一条 |
 | `branch` | ✅ | `feature_dev` / `feature_sit` / `release` |
 | `commit_window_days` | ✅ | `7` / `14` / `21` / `28` |
+| `workspace_name` | ❌ | **可选** —— 平台按编号反查。填错会被纠正并在卡片上指出 |
 | `workspace_id` | ❌ | 项目组 UUID，不确定就不要填 |
+| `confirmation_token` | 第二次调用必填 | 第一次调用返回的令牌。带上它这次才真的提交 |
 
-四个必填参数没有默认值：目标分支和提交窗口会直接改变评审结论，静默替一个默认值比报错更糟。
+分支和提交窗口会直接改变评审结论，所以仍然必填、没有默认值 —— 静默替一个默认值比报错更糟。
 模型不开放给调用方，由服务端 `CRP_DEFAULT_MODEL` 决定。
+
+## 提交前核对与确认（V1.56）
+
+提交是**两步**的，这是强制的：
+
+```text
+第一次调用（不带 confirmation_token）
+  → 按编号从 Linky 查出真实需求：名称/项目组/状态/迭代/发布窗口/三类负责人/正文与附件有无
+  → 纠正给错的项目组名（明确写出"你给的"与"实际是"）
+  → 返回确认卡片 + confirmation_token
+  → **不创建任何批次、不消耗模型额度**
+
+第二次调用（带 confirmation_token）
+  → 校验令牌签的就是这组参数
+  → 建批次 + 下导入单，返回回执
+```
+
+为什么做成服务端门禁而不是写在工具描述里：工具描述约束不了模型的实际行为，而每次误提交
+都是一个真实批次加一份模型额度。令牌用 HMAC 把四个关键参数和核对结论一起签进去，
+改任何一个都失效，默认 15 分钟过期。
+
+这一版修的是一次真实事故：使用者把项目组说成「工具组」（真名「工具开发组」），
+上游对不存在的工作区**返回空列表而不是报错**，于是 MCP 照常受理、建了批次、回了
+"✅ 已成功受理"，几十秒后平台侧以 `LINKY_NETWORK_ERROR 勾选的 1 条需求全部导入失败` 收场
+—— 而那既不是网络问题，也没有真的受理成功。
+
+三种核对结论对应三种行为：
+
+| 结论 | 什么时候 | 行为 |
+|---|---|---|
+| 核对通过 | 查到需求 | 回卡片 + 令牌；项目组按实际值纠正 |
+| **拒绝** | 编号查不到，**且上游自身健康** | 不建批次、不签令牌，如实报编号找不到 |
+| **未核对** | MCP 不在内网 / 上游凭据失效 / 未配 `CRP_LINKY_API_BASE_URL` | 仍回卡片 + 令牌，但明确写"这次没核对成"，回执里也保留这个事实 |
+
+最后一行是刻意的：**核对不可用不该堵死整条链路**，但也绝不许把"没核对"说成"核对过了"。
+另外"编号查不到"只在上游健康时才算坏参数 —— 上游凭据失效时按编号查询可能根本没走完，
+那时候拒绝提交等于拿上游的故障去否认一条真实的需求。
 
 ## 安全模型
 

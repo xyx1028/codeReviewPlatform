@@ -20,6 +20,7 @@ import {
 } from '../src/review.mjs'
 import { formatSubmissionUnknown } from '../src/format.mjs'
 import { TOOL_NAME, createToolRegistry } from '../src/tools.mjs'
+import { ConfirmationSigner } from '../src/confirm.mjs'
 
 const CONFIG = {
   platform: { webUrl: 'https://review.example.com' },
@@ -231,14 +232,27 @@ test('结果不明的文本：说清"可能稍后才受理"，带编号与链接
 test('工具层把"结果不明"作为 isError 文本回出，并保留链接', async () => {
   const client = createClient({ submitError: TIMEOUT, probe: ['throw'] })
   const events = []
+  const confirmations = new ConfirmationSigner()
   const registry = createToolRegistry({
     client,
     config: CONFIG,
     logger: (event, fields) => events.push({ event, fields }),
     // 工具层默认会真的等 2 秒 ×2；测试里换成不等待。
     settle: fastSettle(),
+    confirmations,
   })
-  const result = await registry.call(TOOL_NAME, VALID_ARGS, { caller: 'alice' })
+  const token = confirmations.issue({
+    story_code: VALID_ARGS.story_code,
+    workspace_name: VALID_ARGS.workspace_name,
+    branch: VALID_ARGS.branch,
+    commit_window_days: VALID_ARGS.commit_window_days,
+    verification: 'UNVERIFIED',
+  })
+  const result = await registry.call(
+    TOOL_NAME,
+    { ...VALID_ARGS, confirmation_token: token },
+    { caller: 'alice' },
+  )
   assert.equal(result.isError, true)
   assert.ok(result.content[0].text.includes('无法确认'))
   assert.ok(result.content[0].text.includes('batches/batch-1/ai-result'))

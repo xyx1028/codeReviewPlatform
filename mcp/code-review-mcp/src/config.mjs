@@ -7,6 +7,11 @@
 
 export const SUPPORTED_BRANCHES = ['feature_dev', 'feature_sit', 'release']
 export const SUPPORTED_COMMIT_WINDOWS = [7, 14, 21, 28]
+/** 平台使用者所在时区。发布周期编码按它生成，必须与批次列表里的「创建时间」对得上。 */
+export const DEFAULT_TIME_ZONE = 'Asia/Shanghai'
+/** 公司 Linky 取数接口。与 Worker 的 LINKY_API_BASE_URL 默认值保持一致。 */
+export const DEFAULT_LINKY_BASE_URL =
+  'https://feature.kingdee.com:2055/quality-platform/api/linky'
 
 export class ConfigError extends Error {
   constructor(message) {
@@ -63,6 +68,25 @@ export function parseAccessTokens(raw) {
     entries.push({ name, token })
   }
   return entries
+}
+
+/**
+ * 校验时区名。
+ *
+ * 启动时就拒：一个拼错的时区（`Asia/Shanghia`）在运行时表现为 `Intl` 抛错，而那发生在
+ * 一次真实提交的中途 —— 批次已经建了一半。
+ */
+export function resolveTimeZone(raw) {
+  const value = String(raw ?? '').trim()
+  if (value === '') return DEFAULT_TIME_ZONE
+  try {
+    new Intl.DateTimeFormat('en-CA', { timeZone: value }).format(new Date())
+  } catch {
+    throw new ConfigError(
+      `CRP_TIMEZONE 不是合法的 IANA 时区名：${value}（例如 Asia/Shanghai、UTC）`,
+    )
+  }
+  return value
 }
 
 /**
@@ -142,6 +166,29 @@ export function loadConfig(env = process.env) {
   const maxSessions = integer(env, 'CRP_MCP_MAX_SESSIONS', 256)
   if (maxSessions < 1) throw new ConfigError(`CRP_MCP_MAX_SESSIONS 至少为 1，当前是 ${maxSessions}`)
 
+  /**
+   * 提交前校验用的 Linky 取数地址。
+   *
+   * 未设置时取公司默认地址（与 Worker 的 `LINKY_API_BASE_URL` 同一个），显式设成空字符串
+   * 才关闭校验。默认开启是刻意的：这项校验存在的全部意义就是拦住"参数写错了还照样建批次"，
+   * 而需要它的人恰好最不会去翻文档打开它。
+   */
+  const rawLinkyBase = env.CRP_LINKY_API_BASE_URL
+  const linkyBaseUrl =
+    rawLinkyBase === undefined
+      ? DEFAULT_LINKY_BASE_URL
+      : String(rawLinkyBase).trim() === ''
+        ? null
+        : String(rawLinkyBase).trim().replace(/\/+$/, '')
+  if (linkyBaseUrl !== null && !/^https?:\/\//i.test(linkyBaseUrl)) {
+    throw new ConfigError(`CRP_LINKY_API_BASE_URL 必须是 http(s) 地址，当前是 ${linkyBaseUrl}`)
+  }
+
+  const confirmTtlMs = integer(env, 'CRP_CONFIRM_TTL_MS', 15 * 60_000)
+  if (confirmTtlMs < 60_000) {
+    throw new ConfigError(`CRP_CONFIRM_TTL_MS 至少 60000（1 分钟），当前是 ${confirmTtlMs}`)
+  }
+
   return {
     transport,
     http: {
@@ -180,10 +227,34 @@ export function loadConfig(env = process.env) {
       settleDelayMs,
       probeTimeoutMs: settleProbeTimeoutMs,
     },
+    /**
+     * 提交前校验。
+     *
+     * `CRP_LINKY_API_BASE_URL` 显式设成空字符串即关闭校验（MCP 部署在取不到 Linky 的
+     * 地方时的退路）。关闭后提交仍然要走确认步骤，只是卡片上会写明"没核对过"——
+     * 少一道校验可以接受，静默提交一个注定失败的批次不可以。
+     */
+    linky: {
+      baseUrl: linkyBaseUrl,
+      timeoutMs: integer(env, 'CRP_LINKY_TIMEOUT_MS', 8_000),
+    },
+    confirm: {
+      ttlMs: confirmTtlMs,
+      /** 多实例部署必须显式配置，否则 A 实例签的令牌到 B 实例会被拒。 */
+      secret: optional(env, 'CRP_CONFIRM_SECRET'),
+    },
     defaults: {
       /** 服务端配置好的默认模型（展示名或 id）。留空时平台只有一个可用模型才能自动确定。 */
       modelLabel: optional(env, 'CRP_DEFAULT_MODEL'),
       batchNamePrefix: optional(env, 'CRP_BATCH_NAME_PREFIX', 'MCP 评审'),
+      /**
+       * 生成发布周期编码用的时区。
+       *
+       * 必须显式配置而不是用容器本地时间：MCP 容器通常是 UTC，而批次列表里的「创建时间」
+       * 按使用者时区渲染，两者不一致时发布周期编码会比创建时间差几个小时，
+       * 北京时间 08:00 之前提交还会整体错一天。
+       */
+      timeZone: resolveTimeZone(optional(env, 'CRP_TIMEZONE', DEFAULT_TIME_ZONE)),
     },
   }
 }
