@@ -90,7 +90,6 @@ function WorkspaceSelect(props: {
   workspaces: string[]
   value: string | null
   onChange: (value: string | null) => void
-  loading: boolean
   allowClear?: boolean
   autoFocus?: boolean
   className?: string
@@ -104,8 +103,8 @@ function WorkspaceSelect(props: {
       autoFocus={props.autoFocus}
       className={props.className}
       size={props.size}
-      placeholder="选择或输入完整项目组名称"
-      loading={props.loading}
+      placeholder="搜索并选择项目组"
+      optionFilterProp="label"
       value={props.value ?? undefined}
       options={workspaceOptions(props.workspaces, search, props.value)}
       onSearch={setSearch}
@@ -120,7 +119,7 @@ function WorkspaceSelect(props: {
 
 export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
   const { message } = AntApp.useApp()
-  const [workspaceName, setWorkspaceName] = useState<string | null>(props.initialWorkspaceName ?? null)
+  const [workspaceName, setWorkspaceName] = useState<string | null>(props.initialWorkspaceName?.trim() || null)
   const [releaseWindow, setReleaseWindow] = useState<string | null>(props.initialReleaseWindow ?? null)
   const [statusLabel, setStatusLabel] = useState<string | null>(null)
   const [assigneeName, setAssigneeName] = useState<string | null>(null)
@@ -136,19 +135,9 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
   const [pageSize, setPageSize] = useState(20)
   const serverPaging = props.selectable !== true
 
-  /**
-   * 勾选模式下先选项目组，再出列表。
-   *
-   * 导入单的口径是**单一项目组**，所以"跨全部工作区的 266 条"在这一页里没有任何可操作
-   * 含义 —— 它只会让人先在一张不能勾的大表里翻半天，再回到上面去选组。改成门禁之后，
-   * 「没选组时禁用勾选框」那套解释性 UI（表头占位符 + 下拉的 warning 态）就没有存在的
-   * 理由了，一并删掉：能点的东西不需要解释为什么不能点。
-   *
-   * 看板页（`selectable` 为 false）不设门禁：那里的目的就是跨组浏览。
-   */
-  const workspaceRequired = props.selectable === true
+  // 看板和导入都先选组。目录来自本地预置，不触发上游慢速跨组聚合。
   const workspaceChosen = workspaceName !== null
-  const listVisible = !workspaceRequired || workspaceChosen
+  const listVisible = workspaceChosen
 
   /**
    * 看板每次只取当前页；导入页不改变既有选择集合的完整性。
@@ -164,19 +153,6 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
     staleTime: 30_000,
     // 关掉窗口聚焦重取：这个页面有显式「刷新」按钮，而自动重取会在用户切回标签页时
     // 换掉 dataSource，把翻页、勾选的位置一起冲掉。
-    refetchOnWindowFocus: false,
-    retry: false,
-  })
-
-  /**
-   * 导入门禁仅取一页候选；看板不为候选额外拉全量数据。候选不是全部项目组，
-   * 因此始终保留按完整名称查询入口。选定组后不等待候选查询。
-   */
-  const workspaceCatalogQuery = useQuery({
-    queryKey: ['linky-workspace-candidates'],
-    queryFn: ({ signal }) => fetchLinkyStoryPage({ page: 1, pageSize: 200, signal }),
-    enabled: !listVisible,
-    staleTime: 5 * 60_000,
     refetchOnWindowFocus: false,
     retry: false,
   })
@@ -201,8 +177,8 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
   }, [workspaceName, releaseWindow, props.onScopeChange])
 
   const workspaces = useMemo(
-    () => facet([...(workspaceCatalogQuery.data?.stories ?? []), ...all].map((story) => story.workspaceName)),
-    [workspaceCatalogQuery.data, all],
+    () => facet(all.map((story) => story.workspaceName)),
+    [all],
   )
   const scoped = useMemo(
     () => (workspaceName === null ? all : all.filter((story) => story.workspaceName === workspaceName)),
@@ -328,10 +304,9 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
         filterDropdown: ({ confirm }) => (
           <div className="story-column-filter">
             <WorkspaceSelect
-              allowClear={!workspaceRequired}
+              allowClear={serverPaging}
               autoFocus
               className="story-column-filter__select"
-              loading={workspaceCatalogQuery.isLoading}
               value={workspaceName}
               workspaces={workspaces}
               onChange={(value) => {
@@ -452,25 +427,18 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
       statusLabel,
       statuses,
       serverPaging,
-      workspaceCatalogQuery.isLoading,
       workspaceName,
-      workspaceRequired,
       workspaces,
     ],
   )
 
   const detail = detailQuery.data ?? null
   const attachments = attachmentsQuery.data ?? []
-  /*
-   * 取数失败一律就地报出来，并带上接口地址与「重试」。
-   *
-   * 两条查询都要覆盖：门禁状态下只有项目组清单在跑，列表查询是 disabled 的 —— 只看
-   * `storiesQuery.error` 会让"不在内网"表现成一个空下拉，而不是一条错误。
-   */
-  // 已指定项目组时，全量候选的失败不影响独立的单组结果。
-  const loadError = listVisible ? storiesQuery.error : workspaceCatalogQuery.error
+  // 未选组时只展示本地目录，隐藏上一组遗留的错误；重试始终针对当前选定组。
+  const loadError = listVisible ? storiesQuery.error : null
   const refresh = () => {
-    void (listVisible ? storiesQuery : workspaceCatalogQuery).refetch()
+    if (!listVisible) return
+    void storiesQuery.refetch()
     message.info('正在从 Linky 重新取数')
   }
 
@@ -513,14 +481,15 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
             <div className="story-gate__copy">
               <span className="story-gate__title">先选一个项目组</span>
               <span className="story-gate__hint">
-                一张导入单只能来自一个项目组。选定之后这里会列出该组的全部需求，再勾选要冻结进本批次的条目。
+                {props.selectable
+                  ? '一张导入单只能来自一个项目组。选定之后这里会列出该组的全部需求，再勾选要冻结进本批次的条目。'
+                  : '输入部分名称搜索项目组，选定后按页浏览该组需求。'}
               </span>
             </div>
             <WorkspaceSelect
               className="story-gate__select"
               size="large"
               value={workspaceName}
-              loading={workspaceCatalogQuery.isLoading}
               workspaces={workspaces}
               onChange={(value) => changeWorkspace(value ?? null)}
             />
@@ -545,8 +514,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
                 className="story-filter-bar__workspace"
                 workspaces={workspaces}
                 value={workspaceName}
-                loading={workspaceCatalogQuery.isLoading}
-                allowClear={!workspaceRequired}
+                allowClear={serverPaging}
                 onChange={changeWorkspace}
               />
               {secondaryFilterActive ? (
