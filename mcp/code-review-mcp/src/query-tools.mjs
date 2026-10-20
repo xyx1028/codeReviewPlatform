@@ -9,7 +9,13 @@
  * 三个工具都**只读**：不建批次、不消耗模型额度、不写任何表。
  */
 
-import { SUPPORTED_BRANCHES, SUPPORTED_COMMIT_WINDOWS, DEFAULT_TIME_ZONE } from './config.mjs'
+import {
+  DEFAULT_BRANCH,
+  DEFAULT_COMMIT_WINDOW_DAYS,
+  DEFAULT_TIME_ZONE,
+  SUPPORTED_BRANCHES,
+  SUPPORTED_COMMIT_WINDOWS,
+} from './config.mjs'
 import { LINKY_WORKSPACE_PRESETS, filterWorkspaces } from './workspaces.mjs'
 import { buildWeekCode } from './review.mjs'
 
@@ -201,7 +207,12 @@ export function formatRequirementList({ workspaceName, keyword, assigneeName, ro
 }
 
 /** 提交参数说明。刻意把"模型不开放给调用方"写进来。 */
-export function formatSubmitOptions({ modelLabel, timeZone = DEFAULT_TIME_ZONE }) {
+export function formatSubmitOptions({
+  modelLabel,
+  timeZone = DEFAULT_TIME_ZONE,
+  defaultBranch = DEFAULT_BRANCH,
+  defaultCommitWindowDays = DEFAULT_COMMIT_WINDOW_DAYS,
+}) {
   const today = buildWeekCode(new Date(), { timeZone })
   const year = Number(today.slice(0, 4))
   return [
@@ -212,10 +223,14 @@ export function formatSubmitOptions({ modelLabel, timeZone = DEFAULT_TIME_ZONE }
     '  只给编号就够了 —— 平台会按它反查出所属项目组。',
     '  不知道编号时用 search_requirements 按项目组找。',
     '',
-    'branch（代码基线）必填，没有默认值：',
-    ...SUPPORTED_BRANCHES.map((branch) => `  · ${branch}：${BRANCH_LABELS[branch] ?? ''}`),
+    `branch（代码基线）可选，默认 ${defaultBranch}：`,
+    ...SUPPORTED_BRANCHES.map(
+      (branch) =>
+        `  · ${branch}：${BRANCH_LABELS[branch] ?? ''}${branch === defaultBranch ? '  ← 默认' : ''}`,
+    ),
     '',
-    `commit_window_days（提交时间窗口，天）必填，只能是：${SUPPORTED_COMMIT_WINDOWS.join(' / ')}`,
+    `commit_window_days（提交时间窗口，天）可选，默认 ${defaultCommitWindowDays}；` +
+      `只能是：${SUPPORTED_COMMIT_WINDOWS.join(' / ')}`,
     '  含义：向前追溯多少天的提交，作为这条需求的精准提交范围。',
     '',
     'release_cycle（发布周期）可选',
@@ -228,7 +243,9 @@ export function formatSubmitOptions({ modelLabel, timeZone = DEFAULT_TIME_ZONE }
     `评审模型：由服务端配置为「${modelLabel ?? '（服务端未指定，平台只有一个可用模型时自动选用）'}」，`,
     '  调用方不能指定 —— 它决定成本与结论质量，而远程调用方看不到平台的模型配置。',
     '',
-    '分支与提交窗口没有默认值：它们会直接改变评审结论，静默替一个默认值比报错更糟。',
+    `代码基线与提交时间窗口有默认值（${defaultBranch} + ${defaultCommitWindowDays} 天），`,
+    '  但**不会被静默套用**：第一次调用返回的确认卡片上会标明哪些值用了默认、还能选什么，',
+    '  由用户看过之后才可能提交。用户要改就带上他指定的值重新调一次。',
     '提交分两步：第一次调用只核对并返回确认卡片，用户确认后带 confirmation_token 再调一次。',
   ].join('\n')
 }

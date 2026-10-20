@@ -9,6 +9,21 @@
  *    只说"已受理，去平台看"。
  */
 
+import { SUPPORTED_BRANCHES, SUPPORTED_COMMIT_WINDOWS } from './config.mjs'
+
+/**
+ * 代码基线的人话说明。
+ *
+ * 与 `query-tools.mjs` 的 BRANCH_LABELS 同源同值；此处就近定义而不是跨文件 import，
+ * 是为了避免 format ↔ query-tools 的循环依赖（query-tools 已经依赖 review，review 依赖 config）。
+ * 一致性由测试 `confirmation-defaults.test.mjs` 断言。
+ */
+const BRANCH_LABELS = {
+  feature_dev: '开发分支（最新，可能还没测过）',
+  feature_sit: '集成测试分支',
+  release: '发布分支（最接近线上）',
+}
+
 /** 固定提示语。首版的全部语义都压在这一句上，不允许各处改写。 */
 export const SUBMITTED_NOTICE =
   '评审任务已提交，执行需要较长时间，请前往代码评审平台查看进度和结果。'
@@ -70,10 +85,43 @@ export function formatConfirmationCard({ status, story, corrections, reason, req
   }
 
   lines.push('本次评审参数：')
-  lines.push(`  目标分支：${labelOrDash(request.branch)}`)
-  lines.push(`  提交时间窗口：${labelOrDash(request.commit_window_days)} 天`)
+  lines.push(
+    `  代码基线（目标分支）：${labelOrDash(request.branch)}` +
+      `${BRANCH_LABELS[request.branch] ? ` —— ${BRANCH_LABELS[request.branch]}` : ''}` +
+      `${request.branch_is_default === true ? '  ← 默认值' : ''}`,
+  )
+  lines.push(
+    `  提交时间窗口：${labelOrDash(request.commit_window_days)} 天` +
+      `${request.window_is_default === true ? '  ← 默认值' : ''}`,
+  )
   lines.push(`  项目组（提交时实际使用）：${labelOrDash(request.workspace_name)}`)
   lines.push('')
+
+  /**
+   * 把替代项摊开。
+   *
+   * 这一段是默认值能够成立的前提。此前这两个参数刻意没有默认值，理由是它们直接改变评审
+   * 结论，静默替人选一个比报错更糟 —— 那条理由没有被推翻，只是换了方式满足：**默认值
+   * 不沉默**。使用者在花钱之前就看到"用的是默认值"和"还能选什么"，于是"确认"是一次
+   * 真正的选择，而不是对一个他不知道存在的选项的默认接受。
+   */
+  const otherBranches = SUPPORTED_BRANCHES.filter((item) => item !== request.branch)
+  const otherWindows = SUPPORTED_COMMIT_WINDOWS.filter(
+    (item) => Number(item) !== Number(request.commit_window_days),
+  )
+  if (otherBranches.length > 0 || otherWindows.length > 0) {
+    lines.push('也可以换成其它取值（告诉我就行，不改就按上面的提交）：')
+    if (otherBranches.length > 0) {
+      lines.push('  代码基线还可以选：')
+      for (const branch of otherBranches) {
+        lines.push(`    · ${branch}${BRANCH_LABELS[branch] ? ` —— ${BRANCH_LABELS[branch]}` : ''}`)
+      }
+    }
+    if (otherWindows.length > 0) {
+      lines.push(`  提交时间窗口还可以选：${otherWindows.map((item) => `${item} 天`).join(' / ')}`)
+    }
+    lines.push('')
+  }
 
   if (Array.isArray(corrections) && corrections.length > 0) {
     lines.push('⚠️ 平台更正/提醒了以下内容，请一并告诉用户：')
@@ -82,9 +130,12 @@ export function formatConfirmationCard({ status, story, corrections, reason, req
         lines.push(`  · ${item.resolved}。${item.note}`)
         continue
       }
+      // 「没填」和「填错了」要分开说：前者是正常用法，用"你给的是（未填）"描述它
+      // 会让使用者以为自己做错了什么。
       lines.push(
-        `  · ${item.field}：你给的是「${item.given ?? '（未填）'}」，实际是「${item.resolved}」。` +
-          `${item.note}`,
+        item.given === null || item.given === undefined || item.given === ''
+          ? `  · ${item.field}：已自动填为「${item.resolved}」。${item.note}`
+          : `  · ${item.field}：你给的是「${item.given}」，实际是「${item.resolved}」。${item.note}`,
       )
     }
     lines.push('')
@@ -96,6 +147,10 @@ export function formatConfirmationCard({ status, story, corrections, reason, req
   lines.push(`confirmation_token: ${token.value}`)
   lines.push('')
   lines.push('提交会真实消耗模型额度。用户没有明确同意之前，不要自行带上令牌提交。')
+  lines.push(
+    '用户要改代码基线或时间窗口的话，带上他指定的值重新调用一次（不带令牌）—— ' +
+      '参数变了旧令牌就失效，需要重新确认一遍。',
+  )
 
   return lines.join('\n')
 }

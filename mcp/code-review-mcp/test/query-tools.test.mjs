@@ -31,7 +31,7 @@ import { SUPPORTED_BRANCHES, SUPPORTED_COMMIT_WINDOWS } from '../src/config.mjs'
 
 const CONFIG = {
   platform: { webUrl: 'https://review.example.com' },
-  defaults: { modelLabel: 'glm5.3-flash', batchNamePrefix: 'MCP 评审', timeZone: 'Asia/Shanghai' },
+  defaults: { modelLabel: 'glm5.3-flash', batchNamePrefix: 'MCP 评审', timeZone: 'Asia/Shanghai', branch: 'release', commitWindowDays: 14 },
 }
 
 /** 真实形状的列表项（字段取自 2026-10-20 实测响应）。 */

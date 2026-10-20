@@ -27,7 +27,7 @@ import { ConfirmationSigner } from '../src/confirm.mjs'
 
 const CONFIG = {
   platform: { webUrl: 'https://review.example.com' },
-  defaults: { modelLabel: 'kimi-k3', batchNamePrefix: 'MCP 评审', timeZone: 'Asia/Shanghai' },
+  defaults: { modelLabel: 'kimi-k3', batchNamePrefix: 'MCP 评审', timeZone: 'Asia/Shanghai', branch: 'release', commitWindowDays: 14 },
 }
 
 const STORY_DETAIL = {
@@ -78,12 +78,21 @@ function touchedPlatform(client) {
 // ---------------------------------------------------------------- 校验器本身
 
 test('必填缺失逐条报出，并带上该填什么', () => {
+  // V1.63 起只有 story_code 必填；分支与窗口有默认值。
   const violations = validateAgainstSchema(TOOL_DEFINITION.inputSchema, {})
-  const paths = violations.map((item) => item.path)
-  assert.deepEqual(paths.sort(), ['branch', 'commit_window_days', 'story_code'])
-  const branch = violations.find((item) => item.path === 'branch')
-  assert.match(branch.message, /必填/)
-  assert.match(branch.expected, /feature_dev/, '要告诉模型允许的取值，否则它只能猜')
+  assert.deepEqual(violations.map((item) => item.path), ['story_code'])
+  assert.match(violations[0].message, /必填/)
+  assert.equal(violations[0].expected, 'string')
+})
+
+test('分支与窗口缺失不再是错误，但给了非法值仍然拒', () => {
+  assert.deepEqual(validateAgainstSchema(TOOL_DEFINITION.inputSchema, { story_code: 'US-1' }), [])
+  const bad = validateAgainstSchema(TOOL_DEFINITION.inputSchema, {
+    story_code: 'US-1',
+    branch: 'main',
+    commit_window_days: 30,
+  })
+  assert.equal(bad.length, 2)
 })
 
 test('一次把全部问题说清，不是只报第一条', () => {
@@ -91,8 +100,9 @@ test('一次把全部问题说清，不是只报第一条', () => {
     story_code: '需求标题带空格',
     branch: 'dev',
     commit_window_days: 30,
+    release_cycle: '2026-10-20',
   })
-  assert.ok(violations.length >= 3, `应同时报出 3 处，实际 ${violations.length}`)
+  assert.ok(violations.length >= 4, `应同时报出 4 处，实际 ${violations.length}`)
 })
 
 test('枚举违规要回显允许的取值（代码基线）', () => {

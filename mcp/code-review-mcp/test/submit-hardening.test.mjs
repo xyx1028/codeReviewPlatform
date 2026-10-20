@@ -19,7 +19,7 @@ import {
 
 const CONFIG = {
   platform: { webUrl: 'https://review.example.com' },
-  defaults: { modelLabel: 'kimi-k3', batchNamePrefix: 'MCP 评审' },
+  defaults: { modelLabel: 'kimi-k3', batchNamePrefix: 'MCP 评审', branch: 'release', commitWindowDays: 14 },
 }
 
 const VALID_ARGS = {

@@ -27,7 +27,7 @@ import { TOOL_NAME, LOOKUP_TOOL_NAME, createToolRegistry } from '../src/tools.mj
 
 const CONFIG = {
   platform: { webUrl: 'https://review.example.com' },
-  defaults: { modelLabel: 'kimi-k3', batchNamePrefix: 'MCP 评审', timeZone: 'Asia/Shanghai' },
+  defaults: { modelLabel: 'kimi-k3', batchNamePrefix: 'MCP 评审', timeZone: 'Asia/Shanghai', branch: 'release', commitWindowDays: 14 },
 }
 
 /** 一条真实形状的详情响应（字段名取自 /stories/help 与 worker mapping.ts）。 */
@@ -500,7 +500,7 @@ test('lookup_requirement 只读：不建批次、不花额度', async () => {
   assert.match(result.content[0].text, /测试负责人：王五/)
 })
 
-test('lookup_requirement 缺分支/窗口时不签令牌，并说明还缺什么', async () => {
+test('lookup_requirement 不给分支/窗口时按默认值签令牌（V1.63）', async () => {
   const registry = createToolRegistry({
     client: platformStub(),
     config: CONFIG,
@@ -508,8 +508,15 @@ test('lookup_requirement 缺分支/窗口时不签令牌，并说明还缺什么
     confirmations: new ConfirmationSigner(),
   })
   const result = await registry.call(LOOKUP_TOOL_NAME, { story_code: 'US-2026-017341' })
-  assert.match(result.content[0].text, /还没有确定|还没有：/)
-  assert.ok(!/confirmation_token: v1\./.test(result.content[0].text))
+  const text = result.content[0].text
+  // 默认值必须签得出令牌 —— 否则用户还得先回答两个他未必在意的问题才能开始。
+  assert.match(text, /confirmation_token: v1\./)
+  // 但默认值绝不沉默：要标出"默认值"，并列出替代项。
+  assert.match(text, /release.*← 默认值/)
+  assert.match(text, /14 天.*← 默认值/)
+  assert.match(text, /feature_dev/)
+  assert.match(text, /feature_sit/)
+  assert.match(text, /7 天 \/ 21 天 \/ 28 天|7 天 \/ 21 天|21 天/)
 })
 
 test('lookup_requirement 带齐分支与窗口时直接签出可提交的令牌', async () => {

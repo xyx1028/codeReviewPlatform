@@ -141,6 +141,11 @@ import { AttributionRuleManagementPage } from './pages/AttributionRuleManagement
 import { GitIdentityManagementPage } from './pages/GitIdentityManagementPage'
 import { ProfilePage } from './pages/ProfilePage'
 import { supabaseConfigured } from './lib/supabase'
+import {
+  buildWorkspaceFilters,
+  matchesWorkspaceFilter,
+  normalizeWorkspaceNames,
+} from './components/batches/workspace-column'
 import type {
   AdminUserListItem,
   AiImportRecord,
@@ -1611,6 +1616,31 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
       ),
     },
     { title: '发布周期', dataIndex: 'week_code', width: 112 },
+    {
+      title: '项目组',
+      dataIndex: 'workspace_names',
+      key: 'workspace_names',
+      width: 168,
+      ellipsis: { showTitle: false },
+      filters: buildWorkspaceFilters(batchesQuery.data ?? []),
+      filterSearch: true,
+      // 多项目组按"包含"判定：写成相等的话，跨组批次在任何单组筛选下都会消失。
+      onFilter: (value, record) => matchesWorkspaceFilter(record, String(value)),
+      render: (_value, record) => {
+        const names = normalizeWorkspaceNames(record.workspace_names)
+        // 历史批次（Excel 导入）确实没有项目组，如实留空，不编一个出来。
+        if (names.length === 0) return <Text type="secondary">-</Text>
+        return (
+          <Tooltip title={names.join('、')}>
+            <span>
+              {names.map((name) => (
+                <Tag key={name} color="blue" style={{ marginInlineEnd: 4 }}>{name}</Tag>
+              ))}
+            </span>
+          </Tooltip>
+        )
+      },
+    },
     { title: '状态', dataIndex: 'status', width: 118, render: (status: BatchStatus) => <Tag color={statusColor(status)}>{batchStatusLabels[status]}</Tag> },
     { title: '代码基线', dataIndex: 'default_branch', width: 112, render: (value) => value || '-' },
     {

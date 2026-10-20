@@ -49,7 +49,12 @@ import {
   toRequirementRow,
 } from './query-tools.mjs'
 import { filterWorkspaces } from './workspaces.mjs'
-import { SUPPORTED_BRANCHES, SUPPORTED_COMMIT_WINDOWS } from './config.mjs'
+import {
+  DEFAULT_BRANCH,
+  DEFAULT_COMMIT_WINDOW_DAYS,
+  SUPPORTED_BRANCHES,
+  SUPPORTED_COMMIT_WINDOWS,
+} from './config.mjs'
 
 export const TOOL_NAME = 'start_requirement_review'
 export const LOOKUP_TOOL_NAME = 'lookup_requirement'
@@ -96,13 +101,12 @@ export const LOOKUP_TOOL_DEFINITION = {
       branch: {
         type: 'string',
         enum: SUPPORTED_BRANCHES,
-        description:
-          '目标分支，可选。填了才会在返回里签出可直接用于提交的 confirmation_token。',
+        description: '代码基线，可选。不填按默认值（release）展示在确认卡片上。',
       },
       commit_window_days: {
         type: 'integer',
         enum: SUPPORTED_COMMIT_WINDOWS,
-        description: '提交时间窗口（天），可选。与 branch 同时填才会签出 confirmation_token。',
+        description: '提交时间窗口（天），可选。不填按默认值（14）展示在确认卡片上。',
       },
     },
     required: ['story_code'],
@@ -127,9 +131,12 @@ export const TOOL_DEFINITION = {
     '读代码给出结论（已实现/部分实现/未实现、缺失内容、风险、测试要点、代码证据）。' +
     '评审模型由服务端配置，调用方不需要也不能指定。\n\n' +
     '**提交分两步，这是强制的。** 第一次调用（不带 confirmation_token）**不会创建任何评审**，' +
-    '它返回平台从 Linky 查到的真实需求信息和一个 confirmation_token。你必须把那些信息' +
-    '告诉用户、等他确认，再带上 confirmation_token 调用第二次才真正提交。' +
+    '它返回平台从 Linky 查到的真实需求信息、本次将要使用的参数，以及一个 confirmation_token。' +
+    '你必须把那些内容告诉用户、等他确认，再带上 confirmation_token 调用第二次才真正提交。' +
     '用户没有明确同意之前不要自行带令牌提交。\n\n' +
+    '**代码基线与提交时间窗口可以不填**：默认 release + 14 天。第一次调用的返回里会写明' +
+    '哪些值用了默认、以及还能选什么。用户要改的话，带上他指定的值重新调用第一次' +
+    '（旧令牌会失效，需要重新确认）。\n\n' +
     '**这是异步提交，会真实消耗模型额度。** 受理并落库后立刻返回，不等待导入与评审完成。\n\n' +
     '成功后请把返回的批次编号、受理编号和平台详情链接完整转述给用户，提示他去平台查看进度与结果，' +
     '然后结束本次提交流程：本服务不提供进度查询、结果查询或轮询，不要再次调用本工具查状态，' +
@@ -147,12 +154,16 @@ export const TOOL_DEFINITION = {
       branch: {
         type: 'string',
         enum: SUPPORTED_BRANCHES,
-        description: '目标分支：评审哪一条分支上的代码。必填，没有默认值。',
+        description:
+          '代码基线：评审哪一条分支上的代码。**可选**，不填默认 release（发布分支，最接近线上）。' +
+          '其余可选值：feature_dev（开发分支，最新但可能还没测过）、feature_sit（集成测试分支）。',
       },
       commit_window_days: {
         type: 'integer',
         enum: SUPPORTED_COMMIT_WINDOWS,
-        description: '提交时间窗口（天）：向前追溯多少天的提交作为该需求的精准提交范围。必填。',
+        description:
+          '提交时间窗口（天）：向前追溯多少天的提交作为该需求的精准提交范围。' +
+          '**可选**，不填默认 14 天。其余可选值：7 / 21 / 28。',
       },
       workspace_name: {
         type: 'string',
@@ -180,7 +191,7 @@ export const TOOL_DEFINITION = {
           '只有用户确认过需求信息之后才带上它 —— 带上它这次就会真的创建评审并消耗模型额度。',
       },
     },
-    required: ['story_code', 'branch', 'commit_window_days'],
+    required: ['story_code'],
     additionalProperties: false,
   },
   /**
@@ -242,6 +253,31 @@ export function createToolRegistry({
     }
   }
 
+  /**
+   * 套用默认的代码基线与提交时间窗口。
+   *
+   * 同时记下每个值**是调用方给的还是默认来的** —— 确认卡片要靠它区分"你指定的"和
+   * "平台默认的"。不记的话，卡片上两种值长得一样，使用者就无从判断哪些是他自己定的。
+   *
+   * 两个入口（查询与提交）都走这里：如果两处各自套默认，第一步签进令牌的值和第二步
+   * 算出来的"期望值"就可能不一致，于是刚确认过的提交会被自己的门禁拒掉。
+   */
+  function resolveSubmitParams(args) {
+    const givenBranch = SUPPORTED_BRANCHES.includes(String(args.branch ?? '')) ? args.branch : null
+    const givenWindow = SUPPORTED_COMMIT_WINDOWS.includes(Number(args.commit_window_days))
+      ? Number(args.commit_window_days)
+      : null
+    // 配置里缺这两项时退到模块常量，而不是产出 undefined：undefined 会在卡片上
+    // 显示成"（空）"，然后在 assertBranch 那里才炸 —— 一个本可以在此处消失的失败。
+    return {
+      branch: givenBranch ?? config.defaults.branch ?? DEFAULT_BRANCH,
+      commitWindowDays:
+        givenWindow ?? config.defaults.commitWindowDays ?? DEFAULT_COMMIT_WINDOW_DAYS,
+      branchIsDefault: givenBranch === null,
+      windowIsDefault: givenWindow === null,
+    }
+  }
+
   function handleListWorkspaces(args, context) {
     const keyword = String(args.keyword ?? '').trim()
     const matches = filterWorkspaces(keyword)
@@ -259,6 +295,8 @@ export function createToolRegistry({
       formatSubmitOptions({
         modelLabel: config.defaults.modelLabel,
         timeZone: config.defaults.timeZone,
+        defaultBranch: config.defaults.branch ?? DEFAULT_BRANCH,
+        defaultCommitWindowDays: config.defaults.commitWindowDays ?? DEFAULT_COMMIT_WINDOW_DAYS,
       }),
     )
   }
@@ -359,40 +397,16 @@ export function createToolRegistry({
       )
     }
 
-    // 分支与窗口齐全才签令牌：令牌和这两个参数绑定，缺一个就签不出可用的令牌。
-    const branch = SUPPORTED_BRANCHES.includes(String(args.branch ?? '')) ? args.branch : null
-    const window = SUPPORTED_COMMIT_WINDOWS.includes(Number(args.commit_window_days))
-      ? Number(args.commit_window_days)
-      : null
-    const token =
-      branch === null || window === null
-        ? null
-        : issueToken({
-            storyCode: outcome.story?.story_code ?? storyCode,
-            workspaceName,
-            givenWorkspace: args.workspace_name ?? null,
-            branch,
-            commitWindowDays: window,
-            verification: outcome.status,
-          })
-
-    if (token === null) {
-      return textResult(
-        formatConfirmationCard({
-          status: outcome.status,
-          story: outcome.story,
-          corrections: outcome.corrections,
-          reason: outcome.reason,
-          request: {
-            branch: branch ?? '（还没确定，提交时必填）',
-            commit_window_days: window ?? '（还没确定，提交时必填）',
-            workspace_name: workspaceName,
-            story_code: storyCode,
-          },
-          token: { value: '（还没有：需要先确定目标分支与提交时间窗口）', ttlMs: 0 },
-        }),
-      )
-    }
+    // 分支与窗口可以不给：按默认值补齐后总能签出一张可直接用于提交的令牌。
+    const params = resolveSubmitParams(args)
+    const token = issueToken({
+      storyCode: outcome.story?.story_code ?? storyCode,
+      workspaceName,
+      givenWorkspace: args.workspace_name ?? null,
+      branch: params.branch,
+      commitWindowDays: params.commitWindowDays,
+      verification: outcome.status,
+    })
 
     return textResult(
       formatConfirmationCard({
@@ -401,10 +415,12 @@ export function createToolRegistry({
         corrections: outcome.corrections,
         reason: outcome.reason,
         request: {
-          branch,
-          commit_window_days: window,
+          branch: params.branch,
+          commit_window_days: params.commitWindowDays,
           workspace_name: workspaceName,
           story_code: storyCode,
+          branch_is_default: params.branchIsDefault,
+          window_is_default: params.windowIsDefault,
         },
         token,
       }),
@@ -415,8 +431,10 @@ export function createToolRegistry({
     // 形状校验必须在最前面。分支/窗口非法时还去查 Linky、还签一张令牌出来，等于把一个
     // 注定失败的参数组合"确认"给使用者看 —— 门禁要拦在更早的地方。
     const storyCode = normalizeStoryCode(args.story_code)
-    const branch = assertBranch(args.branch)
-    const commitWindowDays = assertCommitWindow(args.commit_window_days)
+    // 先套默认值再校验：两者都是可选参数，缺失不是错误。
+    const params = resolveSubmitParams(args)
+    const branch = assertBranch(params.branch)
+    const commitWindowDays = assertCommitWindow(params.commitWindowDays)
 
     // 第一步：没有令牌 —— 核对、回卡片、签令牌，**不建批次**。
     if (String(args.confirmation_token ?? '').trim() === '') {
@@ -440,7 +458,7 @@ export function createToolRegistry({
               story_code: storyCode,
               workspace_name: args.workspace_name ?? null,
               branch,
-              commit_window_days: args.commit_window_days,
+              commit_window_days: commitWindowDays,
             },
           }),
           { isError: true },
@@ -470,9 +488,11 @@ export function createToolRegistry({
           reason: outcome.reason,
           request: {
             branch,
-            commit_window_days: args.commit_window_days,
+            commit_window_days: commitWindowDays,
             workspace_name: workspaceName,
             story_code: storyCode,
+            branch_is_default: params.branchIsDefault,
+            window_is_default: params.windowIsDefault,
           },
           token,
         }),

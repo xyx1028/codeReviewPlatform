@@ -7,6 +7,18 @@
 
 export const SUPPORTED_BRANCHES = ['feature_dev', 'feature_sit', 'release']
 export const SUPPORTED_COMMIT_WINDOWS = [7, 14, 21, 28]
+/**
+ * 默认的代码基线与提交时间窗口（V1.63）。
+ *
+ * 此前这两个参数刻意**没有**默认值，理由是它们会直接改变评审结论，静默替一个默认值比
+ * 报错更糟。现在给了默认值，但那条理由并没有被推翻 —— 它被换了一种方式满足：
+ * 默认值**绝不沉默**。确认卡片必须写明"这是默认值"，并把全部替代项列出来，
+ * 由使用者看过之后才可能提交。所以它不是"悄悄替你选了"，而是"给你一个可以直接确认的
+ * 起点，同时告诉你还能选什么"。
+ */
+export const DEFAULT_BRANCH = 'release'
+export const DEFAULT_COMMIT_WINDOW_DAYS = 14
+
 /** 平台使用者所在时区。发布周期编码按它生成，必须与批次列表里的「创建时间」对得上。 */
 export const DEFAULT_TIME_ZONE = 'Asia/Shanghai'
 /** 公司 Linky 取数接口。与 Worker 的 LINKY_API_BASE_URL 配置模板保持一致。 */
@@ -263,6 +275,26 @@ export function loadConfig(env = process.env) {
       /** 服务端配置好的默认模型（展示名或 id）。留空时平台只有一个可用模型才能自动确定。 */
       modelLabel: optional(env, 'CRP_DEFAULT_MODEL'),
       batchNamePrefix: optional(env, 'CRP_BATCH_NAME_PREFIX', 'MCP 评审'),
+      /** 调用方没给代码基线时用它。必须是受支持的分支之一，配错即启动失败。 */
+      branch: (() => {
+        const value = optional(env, 'CRP_DEFAULT_BRANCH', DEFAULT_BRANCH)
+        if (!SUPPORTED_BRANCHES.includes(value)) {
+          throw new ConfigError(
+            `CRP_DEFAULT_BRANCH 只能是 ${SUPPORTED_BRANCHES.join(' / ')}，当前是 ${value}`,
+          )
+        }
+        return value
+      })(),
+      /** 调用方没给提交时间窗口时用它。必须是受支持的取值之一，配错即启动失败。 */
+      commitWindowDays: (() => {
+        const value = integer(env, 'CRP_DEFAULT_COMMIT_WINDOW_DAYS', DEFAULT_COMMIT_WINDOW_DAYS)
+        if (!SUPPORTED_COMMIT_WINDOWS.includes(value)) {
+          throw new ConfigError(
+            `CRP_DEFAULT_COMMIT_WINDOW_DAYS 只能是 ${SUPPORTED_COMMIT_WINDOWS.join(' / ')}，当前是 ${value}`,
+          )
+        }
+        return value
+      })(),
       /**
        * 生成发布周期编码用的时区。
        *

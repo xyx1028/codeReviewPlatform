@@ -23,7 +23,7 @@ import { ConfirmationSigner } from '../src/confirm.mjs'
 
 const CONFIG = {
   platform: { webUrl: 'https://review.example.com' },
-  defaults: { modelLabel: 'kimi-k3', batchNamePrefix: 'MCP 评审' },
+  defaults: { modelLabel: 'kimi-k3', batchNamePrefix: 'MCP 评审', branch: 'release', commitWindowDays: 14 },
 }
 
 const VALID_ARGS = {
@@ -253,15 +253,12 @@ test('权限不足时给出可照着做的提示', () => {
   )
 })
 
-test('工具定义：三个必填参数 + 枚举约束 + 不开放模型参数', () => {
+test('工具定义：只有需求编号必填 + 枚举约束 + 不开放模型参数', () => {
   assert.equal(TOOL_NAME, 'start_requirement_review')
-  // V1.56：workspace_name 从必填改为可选 —— 它可以由需求编号反查，
-  // 要求使用者自己拼对项目组名正是上一次事故的起点。
-  assert.deepEqual(TOOL_DEFINITION.inputSchema.required, [
-    'story_code',
-    'branch',
-    'commit_window_days',
-  ])
+  // V1.56：workspace_name 改可选（可按编号反查）。
+  // V1.63：branch 与 commit_window_days 也改可选（默认 release + 14 天）——
+  // 默认值不沉默，确认卡片会写明用了默认并列出替代项，所以"可选"不等于"替你偷偷决定"。
+  assert.deepEqual(TOOL_DEFINITION.inputSchema.required, ['story_code'])
   assert.ok('workspace_name' in TOOL_DEFINITION.inputSchema.properties)
   assert.ok('confirmation_token' in TOOL_DEFINITION.inputSchema.properties)
   assert.deepEqual(TOOL_DEFINITION.inputSchema.properties.branch.enum, [
@@ -273,8 +270,12 @@ test('工具定义：三个必填参数 + 枚举约束 + 不开放模型参数',
   assert.equal(TOOL_DEFINITION.inputSchema.additionalProperties, false)
   assert.ok(!('model' in TOOL_DEFINITION.inputSchema.properties))
   assert.match(TOOL_DEFINITION.description, /不提供进度查询/)
-  // 分支与窗口会直接改变评审结论，必须留在必填里。
-  assert.match(TOOL_DEFINITION.inputSchema.properties.branch.description, /必填/)
+  // 可选，但描述里必须写明默认值是什么，否则模型无从告知用户。
+  assert.match(TOOL_DEFINITION.inputSchema.properties.branch.description, /默认 release/)
+  assert.match(
+    TOOL_DEFINITION.inputSchema.properties.commit_window_days.description,
+    /默认 14 天/,
+  )
 })
 
 test('registry 对未知工具与失败调用都回 isError，不回成功文案', async () => {

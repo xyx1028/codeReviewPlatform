@@ -110,11 +110,7 @@ test('带凭证可以 initialize、列工具、调用工具', async () => {
       assert.equal(tools.tools.length, 2, '只读查询工具 + 提交工具')
       const submit = tools.tools.find((tool) => tool.name === TOOL_NAME)
       assert.ok(submit, '提交工具必须在清单里')
-      assert.deepEqual(submit.inputSchema.required, [
-        'story_code',
-        'branch',
-        'commit_window_days',
-      ])
+      assert.deepEqual(submit.inputSchema.required, ['story_code'])
 
       const result = await client.callTool({
         name: TOOL_NAME,

@@ -62,6 +62,12 @@ export interface ReviewBatch {
 
 export interface ReviewBatchListItem extends ReviewBatch {
   creator_name: string | null
+  /**
+   * V1.62：这批需求来自哪些项目组。由列表 RPC 聚合得到，不是 review_batch 的列。
+   * 可能为多个（同一批次可以发起多次导入），也可能为空数组
+   * （Excel 时代导入的历史批次没有项目组，如实留空而不是编一个）。
+   */
+  workspace_names: string[]
 }
 
 // ---------------------------------------------------------------------------
