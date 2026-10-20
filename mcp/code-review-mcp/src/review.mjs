@@ -18,7 +18,6 @@
  *    拿着查不到的编号去平台里找。
  */
 
-import { randomBytes } from 'node:crypto'
 import { PlatformError } from './platform.mjs'
 import { DEFAULT_TIME_ZONE, SUPPORTED_BRANCHES, SUPPORTED_COMMIT_WINDOWS } from './config.mjs'
 
@@ -61,32 +60,59 @@ export function zonedParts(date, timeZone = DEFAULT_TIME_ZONE) {
 /**
  * 发布周期编码。
  *
- * `review_batch.week_code` 全库唯一，而前端用的是 `YYYYMMDD`（一天一个批次）。
- * MCP 一天可能提交很多次，所以加时分秒后缀；前缀保持 `YYYYMMDD`，这样它在批次列表里
- * 仍按日期排得上。后缀是并发兜底：同一秒两次提交不该因为唯一键相撞而失败。
+ * 与平台「创建评审批次」弹窗里那三个下拉拼出来的格式**完全一致**：8 位 `YYYYMMDD`。
+ * 这一点此前是错的 —— MCP 生成的是 `20261019-MCP174949-20be86`，在批次列表的「发布周期」
+ * 那一列里和旁边的 `20261016` 根本不是一类东西，既难读也无法和人工批次比对。
  *
  * **按指定时区格式化，不用运行环境的本地时间。** MCP 容器的 TZ 通常是 UTC，而批次列表里
  * 的「创建时间」是按使用者所在时区渲染的。用容器本地时间的后果实测如下：16:54 提交，
  * 编码里写的是 `085407` —— 差 8 小时；更糟的是北京时间每天 08:00 之前提交，UTC 还在前一天，
  * 日期前缀会整体错一天，于是这个批次在列表里排到昨天去。
  */
-export function buildWeekCode(
-  date = new Date(),
-  { suffix = null, timeZone = DEFAULT_TIME_ZONE } = {},
-) {
-  const { year, month, day, hour, minute, second } = zonedParts(date, timeZone)
-  return `${year}${month}${day}-MCP${hour}${minute}${second}${suffix === null ? '' : suffix}`
+export function buildWeekCode(date = new Date(), { timeZone = DEFAULT_TIME_ZONE } = {}) {
+  const { year, month, day } = zonedParts(date, timeZone)
+  return `${year}${month}${day}`
 }
 
 /**
- * 同秒并发的区分后缀。
+ * 校验调用方给的发布周期。
  *
- * 用随机串而不是毫秒：毫秒只是把碰撞窗口从"同一秒"缩到"同一毫秒"，而两个客户端
- * 同时提交落在同一毫秒是会发生的，代价是整次提交以一个唯一键冲突失败。随机 3 字节
- * 把碰撞概率压到 1/16M，且不依赖两台机器的时钟精度。
+ * 只卡 8 位数字是不够的：`20260230` 和 `20261332` 都能过正则，却不是真实日期，
+ * 落进 `week_code` 之后没有任何地方会再发现它。年份窗口与页面上的下拉保持一致
+ * （当前年份的前 2 年到后 3 年），避免 `19700101` 这种明显手滑的值。
  */
-export function randomWeekCodeSuffix(bytes = randomBytes) {
-  return `-${bytes(3).toString('hex')}`
+export function assertReleaseCycle(input, { now = new Date(), timeZone = DEFAULT_TIME_ZONE } = {}) {
+  const raw = String(input ?? '').trim()
+  if (raw === '') return null
+  if (!/^\d{8}$/.test(raw)) {
+    throw new PlatformError(
+      `release_cycle 必须是 8 位 YYYYMMDD（例如 20261020），当前是「${raw}」。`,
+      { code: 'RELEASE_CYCLE_INVALID' },
+    )
+  }
+  const year = Number(raw.slice(0, 4))
+  const month = Number(raw.slice(4, 6))
+  const day = Number(raw.slice(6, 8))
+  // 用 UTC 构造再比对回去：只要月/日被"滚动"过（2 月 30 日 → 3 月 2 日），就说明日期不存在。
+  const probe = new Date(Date.UTC(year, month - 1, day))
+  if (
+    probe.getUTCFullYear() !== year ||
+    probe.getUTCMonth() !== month - 1 ||
+    probe.getUTCDate() !== day
+  ) {
+    throw new PlatformError(`release_cycle「${raw}」不是真实存在的日期。`, {
+      code: 'RELEASE_CYCLE_INVALID',
+    })
+  }
+  const currentYear = Number(zonedParts(now, timeZone).year)
+  if (year < currentYear - 2 || year > currentYear + 3) {
+    throw new PlatformError(
+      `release_cycle「${raw}」的年份超出允许范围（${currentYear - 2} ~ ${currentYear + 3}）。` +
+        '平台页面上的发布周期下拉也是这个范围。',
+      { code: 'RELEASE_CYCLE_OUT_OF_RANGE' },
+    )
+  }
+  return raw
 }
 
 export function normalizeStoryCode(input) {
@@ -316,12 +342,17 @@ export async function submitRequirementReview(client, config, input, { settle } 
     )
   }
 
+  const timeZone = config.defaults.timeZone ?? DEFAULT_TIME_ZONE
+  const now = new Date()
+  // 调用方指定了发布周期就用它（已校验是真实日期），否则用当天 —— 与页面默认值一致。
+  // V1.61 起 week_code 不再唯一，所以这里不需要候补编码，也不需要为唯一键冲突重试：
+  // 同一天提交多次就是同一个发布周期，这在产品上本来就是允许的。
+  const requestedCycle = assertReleaseCycle(input.release_cycle, { now, timeZone })
+  const weekCode = requestedCycle ?? buildWeekCode(now, { timeZone })
+
   const batch = await client.insert('review_batch', {
     name: `${config.defaults.batchNamePrefix}：${storyCode}`.slice(0, 120),
-    week_code: buildWeekCode(new Date(), {
-      suffix: randomWeekCodeSuffix(),
-      timeZone: config.defaults.timeZone ?? DEFAULT_TIME_ZONE,
-    }),
+    week_code: weekCode,
     default_branch: branch,
     ai_model_config_id: model.id,
     remark: `由远程 MCP 提交（调用方 ${input.caller ?? '未命名'}，平台账号 ${client.email}）`,

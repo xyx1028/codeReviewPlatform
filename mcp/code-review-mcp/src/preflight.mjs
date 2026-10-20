@@ -211,6 +211,56 @@ export async function preflightRequirement(client, input) {
     })
   }
 
+  /**
+   * 用列表端点补齐详情端点给不出来的字段，并顺手验一件要紧的事。
+   *
+   * 两个目的：
+   *
+   * 1. **补字段。** 可读的「迭代 / 发布窗口 / 关联特性 / 负责人」只有列表端点给，
+   *    详情端点这几项是 null（实测 US-2026-017341：详情 iteration=null，
+   *    列表 iteration='202610-1（0928-1016）'、release_window='R20261030'）。
+   *    不补的话确认卡片上这几行只能显示"空"，而它们在上游明明有值 —— 那是在误导使用者。
+   *
+   * 2. **验导入前提。** Worker 导入时要求需求**出现在该项目组的列表里**
+   *    （可读字段只能从列表取，取不到就整条失败）。所以"详情查得到、列表里没有"
+   *    这种情况会让一次看起来核对通过的提交照样导入失败。只有在**确实翻完整个范围**
+   *    （`complete === true`）时，"列表里没有"才等于"不在这个组里"，才值得预警。
+   *
+   * 这一步失败不影响结论：补充字段拿不到就不补，不把一次成功的核对降级成失败。
+   */
+  let listedItem = null
+  let listOutcome = null
+  if (typeof client.listStories === 'function') {
+    try {
+      listOutcome = await client.listStories({ workspaceName: actualWorkspace })
+      listedItem =
+        listOutcome.items.find(
+          (item) => typeof item === 'object' && item !== null && text(item.code) === story.story_code,
+        ) ?? null
+    } catch {
+      // 列表取不到就只用详情的字段。核对结论不因为"补充信息缺失"而变化。
+      listOutcome = null
+    }
+  }
+  if (listedItem !== null) {
+    story.iteration = text(listedItem.iteration) ?? story.iteration
+    story.release_window = text(listedItem.release_window) ?? story.release_window
+    story.subject_name = text(listedItem.subject) ?? story.subject_name
+    story.assignee_name = text(listedItem.assignee) ?? story.assignee_name
+    story.status_label = text(listedItem.status) ?? story.status_label
+  } else if (listOutcome !== null && listOutcome.complete === true) {
+    corrections.push({
+      field: 'story_in_workspace',
+      given: null,
+      resolved: `不在「${actualWorkspace}」的需求列表里`,
+      note:
+        `Linky 的详情接口说这条需求属于「${actualWorkspace}」，但它没有出现在该项目组的` +
+        `需求列表里（已翻完 ${listOutcome.total} 条）。平台导入时要求需求出现在列表里` +
+        '（可读的迭代/发布窗口只能从列表取），所以这次提交很可能以"全部导入失败"收场。' +
+        '建议先在平台「用户故事」看板上确认这条需求的归属。',
+    })
+  }
+
   // 存在但正文与附件都空：平台允许导入（V1.20 起不设内容门禁），但结论会更弱，要说明白。
   if (story.body_chars === 0 && story.attachment_count === 0) {
     corrections.push({

@@ -92,9 +92,10 @@ test('参数校验：需求编号、项目组、分支、提交窗口都必须�
   assert.throws(() => assertCommitWindow(30), /7 \/ 14 \/ 21 \/ 28/)
 })
 
-test('发布周期编码带日期前缀且可区分同秒提交', () => {
-  const code = buildWeekCode(new Date(2026, 9, 13, 20, 35, 42), { suffix: '-007' })
-  assert.equal(code, '20261013-MCP203542-007')
+test('发布周期编码与平台页面同构：干净的 YYYYMMDD', () => {
+  // 页面上「发布周期」是年/月/日三个下拉拼出来的 8 位数字，MCP 必须给同一种东西，
+  // 否则批次列表那一列里 MCP 批次和人工批次不是一类值，没法比对。
+  assert.equal(buildWeekCode(new Date('2026-10-13T12:35:42Z'), { timeZone: 'Asia/Shanghai' }), '20261013')
 })
 
 test('批次链接指向平台的 AI 结果页', () => {
@@ -280,7 +281,7 @@ test('registry 对未知工具与失败调用都回 isError，不回成功文案
   const client = createFakeClient()
   const confirmations = new ConfirmationSigner()
   const registry = createToolRegistry({ client, config: CONFIG, confirmations })
-  assert.equal(registry.definitions.length, 2, '查询工具 + 提交工具')
+  assert.equal(registry.definitions.length, 5, '3 个查询 + 1 个核对 + 1 个提交')
 
   const unknown = await registry.call('get_requirement_review', {})
   assert.equal(unknown.isError, true)

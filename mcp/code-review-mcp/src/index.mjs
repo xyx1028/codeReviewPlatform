@@ -59,6 +59,8 @@ async function main() {
       : new LinkyReadOnlyClient({
           baseUrl: config.linky.baseUrl,
           timeoutMs: config.linky.timeoutMs,
+          healthTimeoutMs: config.linky.healthTimeoutMs,
+          healthWorkspace: config.linky.healthWorkspace,
         })
   const confirmations = new ConfirmationSigner({
     secret: config.confirm.secret,

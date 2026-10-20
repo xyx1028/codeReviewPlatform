@@ -11,8 +11,8 @@ import test from 'node:test'
 
 import { PlatformError } from '../src/platform.mjs'
 import {
+  assertReleaseCycle,
   buildWeekCode,
-  randomWeekCodeSuffix,
   resolveSubmissionOutcome,
   submitRequirementReview,
 } from '../src/review.mjs'
@@ -53,18 +53,7 @@ function createFakeClient(overrides = {}) {
   }
 }
 
-test('发布周期编码后缀用随机串而不是毫秒：同毫秒并发不该撞唯一键', () => {
-  const suffix = randomWeekCodeSuffix()
-  assert.match(suffix, /^-[0-9a-f]{6}$/)
-  const many = new Set(Array.from({ length: 2000 }, () => randomWeekCodeSuffix()))
-  assert.ok(many.size > 1990, `2000 次抽样只拿到 ${many.size} 个不同后缀，随机性不足`)
-
-  // 真正写进批次的 week_code：日期前缀仍在，排序行为不变。
-  const code = buildWeekCode(new Date(2026, 9, 13, 20, 35, 42), { suffix: randomWeekCodeSuffix() })
-  assert.match(code, /^20261013-MCP203542-[0-9a-f]{6}$/)
-})
-
-test('同一毫秒内连续两次提交必须拿到不同的 week_code', async () => {
+test('同一天多次提交用同一个发布周期，不再加任何后缀（V1.61 起允许重复）', async () => {
   const codes = []
   const client = createFakeClient({
     insert: (_table, row) => {
@@ -72,17 +61,62 @@ test('同一毫秒内连续两次提交必须拿到不同的 week_code', async (
       return { id: `batch-${codes.length}`, name: row.name, week_code: row.week_code }
     },
   })
-  const frozenNow = Date.now()
-  const realNow = Date.now
-  Date.now = () => frozenNow // 冻住时钟：旧实现的后缀是 Date.now() % 1000，此刻必然相同
-  try {
-    await submitRequirementReview(client, CONFIG, { ...VALID_ARGS, caller: 'alice' })
-    await submitRequirementReview(client, CONFIG, { ...VALID_ARGS, caller: 'alice' })
-  } finally {
-    Date.now = realNow
-  }
+  await submitRequirementReview(client, CONFIG, { ...VALID_ARGS, caller: 'alice' })
+  await submitRequirementReview(client, CONFIG, { ...VALID_ARGS, caller: 'alice' })
   assert.equal(codes.length, 2)
-  assert.notEqual(codes[0], codes[1], '时钟冻住时两次提交的发布周期编码仍必须不同')
+  assert.equal(codes[0], codes[1], '同一天两次提交就该是同一个发布周期')
+  assert.match(codes[0], /^\d{8}$/, '干净的 8 位日期，没有时分秒、没有随机后缀')
+})
+
+test('调用方指定的发布周期：格式、真实日期与年份范围都要卡', () => {
+  const now = new Date('2026-10-20T02:00:00Z')
+  const opts = { now, timeZone: 'Asia/Shanghai' }
+  assert.equal(assertReleaseCycle('20261020', opts), '20261020')
+  assert.equal(assertReleaseCycle('', opts), null, '不填就是用默认（当天）')
+  assert.equal(assertReleaseCycle(undefined, opts), null)
+
+  for (const bad of ['2026-10-20', '202610', '20261020x', 'abcdefgh']) {
+    assert.throws(
+      () => assertReleaseCycle(bad, opts),
+      (error) => error.code === 'RELEASE_CYCLE_INVALID',
+      `${bad} 应被判为格式错误`,
+    )
+  }
+  // 正则过得去但不是真实日期 —— 这类值落库之后没有任何地方会再发现它。
+  for (const bad of ['20260230', '20261332', '20260931']) {
+    assert.throws(
+      () => assertReleaseCycle(bad, opts),
+      (error) => error.code === 'RELEASE_CYCLE_INVALID',
+      `${bad} 应被判为不存在的日期`,
+    )
+  }
+  // 年份窗口与页面上的下拉一致：当前年份前 2 后 3。
+  assert.doesNotThrow(() => assertReleaseCycle('20240101', opts))
+  assert.doesNotThrow(() => assertReleaseCycle('20291231', opts))
+  for (const bad of ['19700101', '20230101', '20300101']) {
+    assert.throws(
+      () => assertReleaseCycle(bad, opts),
+      (error) => error.code === 'RELEASE_CYCLE_OUT_OF_RANGE',
+      `${bad} 应超出年份范围`,
+    )
+  }
+})
+
+test('指定了发布周期就按它建批次，不悄悄换成当天', async () => {
+  const codes = []
+  const client = createFakeClient({
+    insert: (_table, row) => {
+      codes.push(row.week_code)
+      return { id: 'batch-1', name: row.name, week_code: row.week_code }
+    },
+  })
+  const receipt = await submitRequirementReview(client, CONFIG, {
+    ...VALID_ARGS,
+    release_cycle: '20261231',
+    caller: 'alice',
+  })
+  assert.equal(codes[0], '20261231')
+  assert.equal(receipt.week_code, '20261231')
 })
 
 test('登录了但没拿到用户 id 时，报的是登录问题而不是"账号权限不够"', async () => {

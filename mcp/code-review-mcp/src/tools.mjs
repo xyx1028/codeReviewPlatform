@@ -34,13 +34,38 @@ import {
   preflightRequirement,
 } from './preflight.mjs'
 import { ConfirmationError } from './confirm.mjs'
+import { formatSchemaViolations, validateAgainstSchema } from './schema.mjs'
+import {
+  DESCRIBE_OPTIONS_DEFINITION,
+  DESCRIBE_OPTIONS_TOOL,
+  LIST_WORKSPACES_DEFINITION,
+  LIST_WORKSPACES_TOOL,
+  SEARCH_REQUIREMENTS_DEFINITION,
+  SEARCH_REQUIREMENTS_TOOL,
+  filterRequirements,
+  formatRequirementList,
+  formatSubmitOptions,
+  formatWorkspaceList,
+  toRequirementRow,
+} from './query-tools.mjs'
+import { filterWorkspaces } from './workspaces.mjs'
 import { SUPPORTED_BRANCHES, SUPPORTED_COMMIT_WINDOWS } from './config.mjs'
 
 export const TOOL_NAME = 'start_requirement_review'
 export const LOOKUP_TOOL_NAME = 'lookup_requirement'
 
 const STORY_CODE_DESCRIPTION =
-  '需求编号，例如 US-2026-017341 或 F-123456。必填，一次一条。平台会按它反查需求所属项目组。'
+  '需求编号，例如 US-2026-017341 或 F-123456。必填，一次一条。平台会按它反查需求所属项目组。' +
+  '也接受 issue UUID 与 PREFIX-NUMBER 形式。不要填需求标题或中文名。'
+
+/**
+ * 需求编号的形状约束。
+ *
+ * 上游接受三种写法（issue UUID / PREFIX-NUMBER / 格式化编码 US-2026-0042），它们的共同点
+ * 是只含字母数字和连字符。卡在这一层的价值很实际：模型有时会把**需求标题**填进 story_code，
+ * 那种值带空格和中文，上游只会回一个 404「未找到用户故事」，而真正的问题是参数填错了位置。
+ */
+const STORY_CODE_PATTERN = '^[A-Za-z0-9][A-Za-z0-9_-]{1,63}$'
 
 export const LOOKUP_TOOL_DEFINITION = {
   name: LOOKUP_TOOL_NAME,
@@ -56,7 +81,13 @@ export const LOOKUP_TOOL_DEFINITION = {
   inputSchema: {
     type: 'object',
     properties: {
-      story_code: { type: 'string', minLength: 1, description: STORY_CODE_DESCRIPTION },
+      story_code: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 64,
+        pattern: STORY_CODE_PATTERN,
+        description: STORY_CODE_DESCRIPTION,
+      },
       workspace_name: {
         type: 'string',
         description:
@@ -106,7 +137,13 @@ export const TOOL_DEFINITION = {
   inputSchema: {
     type: 'object',
     properties: {
-      story_code: { type: 'string', minLength: 1, description: STORY_CODE_DESCRIPTION },
+      story_code: {
+        type: 'string',
+        minLength: 1,
+        maxLength: 64,
+        pattern: STORY_CODE_PATTERN,
+        description: STORY_CODE_DESCRIPTION,
+      },
       branch: {
         type: 'string',
         enum: SUPPORTED_BRANCHES,
@@ -125,10 +162,19 @@ export const TOOL_DEFINITION = {
       },
       workspace_id: {
         type: 'string',
+        pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
         description: '项目组 UUID。可选，不确定时不要填。',
+      },
+      release_cycle: {
+        type: 'string',
+        pattern: '^[0-9]{8}$',
+        description:
+          '发布周期，8 位 `YYYYMMDD`（例如 20261020），与平台「创建评审批次」里那三个下拉拼出来的' +
+          '是同一个值。可选，默认当天。必须是真实存在的日期，且在当前年份的前 2 年到后 3 年之内。',
       },
       confirmation_token: {
         type: 'string',
+        minLength: 1,
         description:
           '确认令牌：由第一次调用（或 lookup_requirement）返回。' +
           '只有用户确认过需求信息之后才带上它 —— 带上它这次就会真的创建评审并消耗模型额度。',
@@ -194,6 +240,91 @@ export function createToolRegistry({
       }),
       ttlMs: confirmations.ttlMs,
     }
+  }
+
+  function handleListWorkspaces(args, context) {
+    const keyword = String(args.keyword ?? '').trim()
+    const matches = filterWorkspaces(keyword)
+    logger('workspaces_listed', {
+      caller: context.caller ?? null,
+      keyword: keyword === '' ? null : keyword,
+      matches: matches.length,
+    })
+    return textResult(formatWorkspaceList(keyword, matches))
+  }
+
+  function handleDescribeOptions(context) {
+    logger('submit_options_described', { caller: context.caller ?? null })
+    return textResult(
+      formatSubmitOptions({
+        modelLabel: config.defaults.modelLabel,
+        timeZone: config.defaults.timeZone,
+      }),
+    )
+  }
+
+  async function handleSearch(args, context) {
+    if (linky === null) {
+      return textResult(
+        'MCP 服务端没有配置 Linky 取数地址（CRP_LINKY_API_BASE_URL），无法查询需求列表。' +
+          '请联系 MCP 维护者。',
+        { isError: true },
+      )
+    }
+    const workspaceName = String(args.workspace_name ?? '').trim()
+    const keyword = String(args.keyword ?? '').trim()
+    const assigneeName = String(args.assignee_name ?? '').trim()
+    const limit = Number.isInteger(args.limit) ? args.limit : 20
+
+    let outcome
+    try {
+      outcome = await linky.listStories({
+        workspaceName,
+        assigneeName: assigneeName === '' ? null : assigneeName,
+      })
+    } catch (error) {
+      // 查询失败如实回出，并把上游原话带上 —— 它可能是"凭据失效"这种只有维护者能处理的事。
+      logger('requirements_search_failed', {
+        caller: context.caller ?? null,
+        workspace_name: workspaceName,
+        code: error?.code ?? null,
+      })
+      return textResult(
+        [
+          `❌ 查询项目组「${workspaceName}」的需求列表失败。`,
+          '',
+          `原因（${error?.code ?? '未知'}）：${String(error?.message ?? error)}`,
+          '',
+          error?.code === 'LINKY_UPSTREAM_AUTH_FAILED'
+            ? '这不是你的网络问题：需要质量执行平台的维护者在「配置 › Linky 工作区」更新 token。'
+            : '可以先用 list_workspaces 确认项目组名称是否完整正确。',
+        ].join('\n'),
+        { isError: true },
+      )
+    }
+
+    const rows = outcome.items.map(toRequirementRow).filter((row) => row !== null)
+    const filtered = filterRequirements(rows, keyword)
+    logger('requirements_searched', {
+      caller: context.caller ?? null,
+      workspace_name: workspaceName,
+      keyword: keyword === '' ? null : keyword,
+      assignee_name: assigneeName === '' ? null : assigneeName,
+      upstream_total: outcome.total,
+      matched: filtered.length,
+    })
+    return textResult(
+      formatRequirementList({
+        workspaceName,
+        keyword,
+        assigneeName,
+        rows: filtered.slice(0, limit),
+        matched: filtered.length,
+        limit,
+        complete: outcome.complete,
+        total: outcome.total,
+      }),
+    )
   }
 
   async function handleLookup(args, context) {
@@ -409,19 +540,54 @@ export function createToolRegistry({
   }
 
   return {
-    definitions: [LOOKUP_TOOL_DEFINITION, TOOL_DEFINITION],
+    /**
+     * 工具清单的顺序是给模型看的：先"怎么查"，再"怎么提交"。
+     * 只读查询排在前面，提交排最后 —— 它是唯一会花钱的那个。
+     */
+    definitions: [
+      LIST_WORKSPACES_DEFINITION,
+      SEARCH_REQUIREMENTS_DEFINITION,
+      DESCRIBE_OPTIONS_DEFINITION,
+      LOOKUP_TOOL_DEFINITION,
+      TOOL_DEFINITION,
+    ],
 
     /**
      * 统一出口。
+     *
+     * 第一道门是**按对外公布的 schema 校验实参**。低层 SDK 不做这件事，所以如果这里不做，
+     * 那份 schema 对服务端就只是装饰：多传的字段被静默忽略，类型错的参数要一路走到
+     * 业务代码才被另一份手写规则拦住。
      *
      * 工具级失败一律以 isError 文本回给模型，而不是抛协议错误：模型能读懂"项目组填错了"
      * 并自己改参数，而协议层错误在多数客户端里只会显示一句 "tool call failed"。
      */
     async call(name, args = {}, context = {}) {
+      const definition = this.definitions.find((tool) => tool.name === name)
+      if (definition === undefined) {
+        return textResult(
+          `未知工具：${name}。本服务只有两个工具：${LOOKUP_TOOL_NAME}（只读查需求）、` +
+            `${TOOL_NAME}（提交评审）。`,
+          { isError: true },
+        )
+      }
+
+      const violations = validateAgainstSchema(definition.inputSchema, args ?? {})
+      if (violations.length > 0) {
+        logger('tool_args_rejected', {
+          caller: context.caller ?? null,
+          tool: name,
+          violations: violations.map((item) => `${item.path}:${item.message}`),
+        })
+        return textResult(formatSchemaViolations(name, violations), { isError: true })
+      }
+
       try {
+        if (name === LIST_WORKSPACES_TOOL) return handleListWorkspaces(args ?? {}, context)
+        if (name === SEARCH_REQUIREMENTS_TOOL) return await handleSearch(args ?? {}, context)
+        if (name === DESCRIBE_OPTIONS_TOOL) return handleDescribeOptions(context)
         if (name === LOOKUP_TOOL_NAME) return await handleLookup(args ?? {}, context)
-        if (name === TOOL_NAME) return await handleSubmit(args ?? {}, context)
-        return textResult(`未知工具：${name}`, { isError: true })
+        return await handleSubmit(args ?? {}, context)
       } catch (error) {
         if (error instanceof SubmissionStateUnknownError) {
           // 结果不明：批次保留，既不报成功也不报"没创建"。运维要靠这条日志去核对。

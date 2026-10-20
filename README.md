@@ -296,7 +296,11 @@ AI 客户端 ──Streamable HTTP + Bearer 凭证──► mcp/code-review-mcp�
 使用者把项目组说成「工具组」（真名「工具开发组」），而上游对不存在的工作区**返回空列表
 而不是报错**，于是批次建好了、回执说"已成功受理"，几十秒后平台侧才以
 `LINKY_NETWORK_ERROR 全部导入失败` 收场；那句话既不是网络问题，也没有真的受理成功。
-另新增只读工具 `lookup_requirement`，单独查需求、不花额度。
+**V1.60 又补了三个只读查询工具**，因为调用方的模型看不到平台页面上的下拉框，不给它查的
+途径它就只能猜：`list_workspaces`（有哪些项目组，说"工具组"能模糊查到"工具开发组"）、
+`search_requirements`（按项目组列需求，用标题找编号）、`describe_submit_options`
+（代码基线/时间窗口/发布周期各自的合法取值）。连同 `lookup_requirement` 共四个只读工具，
+都不消耗模型额度。
 
 公司 Linux 的日常发布从同一 CI 镜像启动独立 MCP 容器；统一 `release.sh --apply` 会自动初始化
 MCP 专用 REVIEWER 系统账号、随机凭证和默认 `glm5.3-flash` 模型配置，再同时更新 Worker、Web 和 MCP。

@@ -1694,13 +1694,14 @@ function BatchesPage({ canCreateBatch, canManageBatch }: { canCreateBatch: boole
             name="week_code_parts"
             label="发布周期"
             required
-            extra="默认当天，可手动调整；年、月、日会自动拼接成 20260918 这种格式"
+            extra="默认当天，可手动调整；年、月、日会自动拼接成 20260918 这种格式。同一周期可以有多个批次"
             rules={[
               {
                 validator: async (_rule, value?: WeekCodeParts) => {
                   const weekCode = buildWeekCode(value ?? {})
                   if (!weekCode) throw new Error('请选择完整的发布周期（年 / 月 / 日）')
-                  if (batchesQuery.data?.some((batch) => batch.week_code === weekCode)) throw new Error('发布周期已存在，请换一个')
+                  // V1.61：发布周期不再要求唯一。同一周期下本来就可能有多个批次
+                  // （按模块拆、按代码基线拆、重跑一次评审），不该在创建这一步被挡住。
                 },
               },
             ]}

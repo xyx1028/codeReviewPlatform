@@ -22,6 +22,14 @@
 export const DEFAULT_LINKY_BASE_URL =
   'https://linky.kingdee.com/quality-platform/api/linky'
 
+/**
+ * 健康探针默认用的项目组名。
+ *
+ * 必须是一个**真实存在**的组：探一个不存在的名字时上游在本地短路返回空列表，
+ * 探针会永远报"健康"，于是它要防的那个误判（拿上游故障去否认真实需求）照样会发生。
+ */
+export const DEFAULT_LINKY_HEALTH_WORKSPACE = '工具开发组'
+
 /** 单次响应体上限。校验只读几个标量字段，不需要为大正文留空间。 */
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
@@ -83,19 +91,70 @@ function text(value) {
 export class LinkyReadOnlyClient {
   #baseUrl
   #timeoutMs
+  #healthTimeoutMs
   #fetch
+  #healthWorkspace
 
-  constructor({ baseUrl, timeoutMs = 8000, fetchImpl = fetch } = {}) {
+  /**
+   * 两个超时刻意分开，因为两种请求的真实耗时差一个数量级（2026-10-20 实测，新域名）：
+   *
+   *   · 按编号取详情：命中 5.84 秒；**未命中 31.80 秒**（要遍历完所有工作区才能确认找不到）。
+   *     所以这个超时必须大于 32 秒，否则"编号写错了"永远表现为"核对超时"，
+   *     而那恰好是本功能要拦住的情况之一。
+   *   · 按组查询（健康探针用）：0.45～0.60 秒。给它 8 秒绰绰有余。
+   *
+   * 不分开的后果是两头不讨好：按详情给 35 秒，则一次探针也要等 35 秒，
+   * 最坏路径 70 秒，超过客户端通常的 60 秒上限；按探针给 8 秒，则详情永远超时。
+   */
+  constructor({
+    baseUrl,
+    timeoutMs = 35_000,
+    healthTimeoutMs = 8_000,
+    fetchImpl = fetch,
+    healthWorkspace = DEFAULT_LINKY_HEALTH_WORKSPACE,
+  } = {}) {
     this.#baseUrl = String(baseUrl ?? '').replace(/\/+$/, '')
     this.#timeoutMs = timeoutMs
+    this.#healthTimeoutMs = healthTimeoutMs
     this.#fetch = fetchImpl
+    this.#healthWorkspace = healthWorkspace
   }
 
   get baseUrl() {
     return this.#baseUrl
   }
 
-  async #getJson(path, params = {}) {
+  /**
+   * 只读 GET + 一次**有预算约束**的重试。
+   *
+   * 为什么要重试：实测这条链路存在间歇性的瞬时失败 —— 连续 8 次按组查询里有 1 次在
+   * 0.01 秒就 `fetch failed`（2026-10-20）。这些请求全是幂等的只读 GET，重试安全；
+   * 不重试的话，一次网络抖动就会把"核对通过"降级成"没核对成"，白白削弱整个功能。
+   * Worker 侧的 Linky 客户端一直是"GET + 一次重试"，这里与它对齐。
+   *
+   * 为什么重试要看耗时：`fetch` 失败分两种。**瞬时失败**（毫秒级，连接被拒/被重置）
+   * 重试几乎立刻就能成功；**超时**（吃满整个预算）重试一次就会让最坏耗时翻倍 ——
+   * 详情端点 35 秒的预算翻倍就是 70 秒，超过客户端通常的 60 秒上限，使用者看到的
+   * 会是一句 "tool call failed"。所以只重试那些"快速失败"的。
+   */
+  async #getJson(path, params = {}, { timeoutMs } = {}) {
+    const budget = timeoutMs ?? this.#timeoutMs
+    const startedAt = Date.now()
+    try {
+      return await this.#getJsonOnce(path, params, { timeoutMs: budget })
+    } catch (error) {
+      const elapsed = Date.now() - startedAt
+      const retryable =
+        error instanceof LinkyLookupError &&
+        (error.code === 'LINKY_UNREACHABLE' || (error.status !== null && error.status >= 500)) &&
+        elapsed < budget * 0.25
+      if (!retryable) throw error
+      // 剩余预算内再试一次；不叠加新的完整预算。
+      return this.#getJsonOnce(path, params, { timeoutMs: Math.max(budget - elapsed, 1_000) })
+    }
+  }
+
+  async #getJsonOnce(path, params = {}, { timeoutMs } = {}) {
     const url = new URL(`${this.#baseUrl}${path}`)
     for (const [key, value] of Object.entries(params)) {
       if (value === null || value === undefined || value === '') continue
@@ -109,7 +168,7 @@ export class LinkyReadOnlyClient {
         headers: { Accept: 'application/json' },
         signal:
           typeof AbortSignal?.timeout === 'function'
-            ? AbortSignal.timeout(this.#timeoutMs)
+            ? AbortSignal.timeout(timeoutMs ?? this.#timeoutMs)
             : undefined,
       })
     } catch (error) {
@@ -186,15 +245,82 @@ export class LinkyReadOnlyClient {
    * 上游凭据失效时，遍历工作区的那条路径可能根本没走完 —— 此时把"查不到"当成
    * "需求不存在"去拒绝提交，就是拿上游的故障去否认一条真实需求。
    *
+   * **必须按某个真实项目组查，不能用跨组查询。** 两个实测理由（2026-10-20，新域名）：
+   *
+   *   · 跨组查询先汇总再分页，`/stories?page=1&page_size=1` 要 15.06 秒；
+   *     指定 `workspace_name=工具开发组` 只要 0.45 秒。探针挂在 15 秒上毫无意义。
+   *   · 探一个**不存在**的组名检测不出凭据失效：名字匹配不到工作区时，上游在本地就
+   *     短路返回 `200 {"items":[],"total":0}`，根本不会去调 Linky。所以探针用的名字
+   *     必须真实存在，否则它永远报"健康"。
+   *
    * 返回 `{ healthy, error }`。不抛错：它本身是一次辅助判断，失败了也只是让结论更保守。
    */
   async probeHealth() {
     try {
-      await this.#getJson('/stories', { page: 1, page_size: 1 })
+      const payload = await this.#getJson(
+        '/stories',
+        { workspace_name: this.#healthWorkspace, page: 1, page_size: 1 },
+        { timeoutMs: this.#healthTimeoutMs },
+      )
+      const record = typeof payload === 'object' && payload !== null ? payload : {}
+      const items = Array.isArray(record.items) ? record.items : []
+      const total = typeof record.total === 'number' ? record.total : items.length
+      if (total === 0 && items.length === 0) {
+        // 探针用的组名自己都解析不到 —— 这说明探针配错了，而不是上游坏了。
+        // 如实说"测不出来"，不要拿一个失效的探针去给上游盖健康章。
+        return {
+          healthy: false,
+          error: new LinkyLookupError(
+            `健康探针用的项目组「${this.#healthWorkspace}」在上游解析不到，` +
+              '无法判断上游是否正常。请把 CRP_LINKY_HEALTH_WORKSPACE 配成一个真实存在的项目组名。',
+            { code: 'LINKY_HEALTH_PROBE_MISCONFIGURED', unverifiable: true },
+          ),
+        }
+      }
       return { healthy: true, error: null }
     } catch (error) {
       if (error instanceof LinkyLookupError) return { healthy: false, error }
       return { healthy: false, error: null }
+    }
+  }
+
+  /**
+   * 按项目组列需求。
+   *
+   * **只按组查，不做跨组查询。** 跨组时上游先汇总再分页，实测 15.06 秒；
+   * 指定组 1.05 秒就能拿回 200 条（2026-10-20 实测，`工具开发组` 共 275 条）。
+   *
+   * 列表端点是**唯一**给出可读「迭代 / 发布窗口 / 关联特性 / 状态 / 负责人」的地方 ——
+   * 详情端点这几个字段是 null 或内部码。所以确认卡片上的这些值只能来自这里。
+   *
+   * `maxPages` 是安全阀而不是业务上限：上游 `total` 与实际条数不一致时得有地方停下。
+   */
+  async listStories(
+    { workspaceName, assigneeName = null, pageSize = 200, maxPages = 2 } = {},
+  ) {
+    const collected = []
+    let total = 0
+    let pages = 0
+    for (let page = 1; page <= Math.max(maxPages, 1); page += 1) {
+      const payload = await this.#getJson('/stories', {
+        workspace_name: workspaceName,
+        assignee_name: assigneeName,
+        page,
+        page_size: Math.min(Math.max(pageSize, 1), 200),
+      })
+      const record = typeof payload === 'object' && payload !== null ? payload : {}
+      const items = Array.isArray(record.items) ? record.items : []
+      total = typeof record.total === 'number' ? record.total : items.length
+      pages = page
+      collected.push(...items)
+      if (items.length === 0 || collected.length >= total) break
+    }
+    return {
+      items: collected,
+      total,
+      pages,
+      /** true 表示这次确实把该范围翻完了 —— 只有此时"列表里没有"才等于"不在这个组里"。 */
+      complete: collected.length >= total,
     }
   }
 

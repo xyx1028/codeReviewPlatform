@@ -152,9 +152,6 @@ export function describePlatformError(error) {
       `请让平台管理员把该账号的角色提到 ADMIN 或 REVIEWER。（原始报错：${raw}）`
     )
   }
-  if (/duplicate key value|week_code/i.test(raw)) {
-    return `创建批次时与既有批次的发布周期编码相撞，请原样重试一次。（原始报错：${raw}）`
-  }
   return raw === '' ? '提交失败，但平台没有给出原因。' : raw
 }
 

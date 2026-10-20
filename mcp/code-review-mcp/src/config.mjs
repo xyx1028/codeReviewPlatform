@@ -12,6 +12,13 @@ export const DEFAULT_TIME_ZONE = 'Asia/Shanghai'
 /** 公司 Linky 取数接口。与 Worker 的 LINKY_API_BASE_URL 配置模板保持一致。 */
 export const DEFAULT_LINKY_BASE_URL =
   'https://linky.kingdee.com/quality-platform/api/linky'
+/**
+ * 健康探针默认用的项目组名。
+ *
+ * 必须是一个**真实存在**的组。探一个不存在的名字时上游会在本地短路返回空列表，
+ * 探针于是永远报"健康"，它要防的那个误判（拿上游故障去否认一条真实需求）照样发生。
+ */
+export const DEFAULT_LINKY_HEALTH_WORKSPACE = '工具开发组'
 
 export class ConfigError extends Error {
   constructor(message) {
@@ -236,7 +243,16 @@ export function loadConfig(env = process.env) {
      */
     linky: {
       baseUrl: linkyBaseUrl,
-      timeoutMs: integer(env, 'CRP_LINKY_TIMEOUT_MS', 8_000),
+      /**
+       * 按编号取详情的超时。实测命中 5.84 秒、**未命中 31.80 秒**（遍历完所有工作区才
+       * 能确认找不到），所以必须大于 32 秒 —— 否则"编号写错了"会永远表现为"核对超时"，
+       * 而那正是本功能要拦住的情况之一。
+       */
+      timeoutMs: integer(env, 'CRP_LINKY_TIMEOUT_MS', 35_000),
+      /** 健康探针（按组查询）的超时。实测 0.45～0.60 秒，与详情分开计时。 */
+      healthTimeoutMs: integer(env, 'CRP_LINKY_HEALTH_TIMEOUT_MS', 8_000),
+      /** 健康探针用的项目组，必须真实存在（探不存在的组检测不出凭据失效）。 */
+      healthWorkspace: optional(env, 'CRP_LINKY_HEALTH_WORKSPACE', DEFAULT_LINKY_HEALTH_WORKSPACE),
     },
     confirm: {
       ttlMs: confirmTtlMs,
