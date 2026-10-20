@@ -301,7 +301,7 @@ test('令牌会过期：十分钟前的确认不代表现在的事实', () => {
   )
 })
 
-test('别人签的令牌不认（换了密钥/换了实例）', () => {
+test('另一进程的确认编号不认', () => {
   const claim = {
     story_code: 'US-1',
     workspace_name: 'w',
@@ -349,7 +349,7 @@ test('没带令牌的提交绝不建批次，只回确认卡片与令牌', async
   assert.match(result.content[0].text, /还没有提交/)
   assert.match(result.content[0].text, /工具开发组/)
   assert.match(result.content[0].text, /你给的是「工具组」/)
-  assert.match(result.content[0].text, /confirmation_token: v1\./)
+  assert.match(result.content[0].text, /confirmation_token: v2\.[A-Za-z0-9_-]{32}/)
   assert.match(result.content[0].text, /不要自行带上令牌提交/)
 })
 
@@ -510,7 +510,7 @@ test('lookup_requirement 不给分支/窗口时按默认值签令牌（V1.63）'
   const result = await registry.call(LOOKUP_TOOL_NAME, { story_code: 'US-2026-017341' })
   const text = result.content[0].text
   // 默认值必须签得出令牌 —— 否则用户还得先回答两个他未必在意的问题才能开始。
-  assert.match(text, /confirmation_token: v1\./)
+  assert.match(text, /confirmation_token: v2\.[A-Za-z0-9_-]{32}/)
   // 但默认值绝不沉默：要标出"默认值"，并列出替代项。
   assert.match(text, /release.*← 默认值/)
   assert.match(text, /14 天.*← 默认值/)

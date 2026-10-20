@@ -251,7 +251,7 @@ test('只给需求编号就能拿到确认卡片与可用令牌', async () => {
   assert.match(text, /还没有提交/)
   assert.match(text, /release.*← 默认值/)
   assert.match(text, /14 天.*← 默认值/)
-  assert.match(text, /confirmation_token: v1\./)
+  assert.match(text, /confirmation_token: v2\.[A-Za-z0-9_-]{32}/)
   assert.equal(
     calls.filter((call) => call.startsWith('insert')).length,
     0,
@@ -327,7 +327,7 @@ test('lookup_requirement 不给分支/窗口也按默认值给出完整卡片', 
   const text = result.content[0].text
   assert.match(text, /release.*← 默认值/)
   assert.match(text, /14 天.*← 默认值/)
-  assert.match(text, /confirmation_token: v1\./)
+  assert.match(text, /confirmation_token: v2\.[A-Za-z0-9_-]{32}/)
 })
 
 test('配置缺默认值时退到模块常量，不产出"（空）"', async () => {

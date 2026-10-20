@@ -41,6 +41,7 @@ const VALID_ARGS = {
  */
 function confirmedToken(confirmations, overrides = {}) {
   return confirmations.issue({
+    caller: 'alice',
     story_code: VALID_ARGS.story_code,
     workspace_name: VALID_ARGS.workspace_name,
     branch: VALID_ARGS.branch,

@@ -243,6 +243,7 @@ export function formatConfirmationCard({
   lines.push(`（其余参数保持不变，令牌 ${Math.round((token.ttlMs ?? 0) / 60000)} 分钟内有效）：`)
   lines.push('')
   lines.push(`confirmation_token: ${token.value}`)
+  lines.push('这是短确认编号，请逐字原样传回；不要解码、改写或自行生成。')
   lines.push('')
   lines.push(
     count > 1

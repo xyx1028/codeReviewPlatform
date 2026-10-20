@@ -242,6 +242,7 @@ test('工具层把"结果不明"作为 isError 文本回出，并保留链接', 
     confirmations,
   })
   const token = confirmations.issue({
+    caller: 'alice',
     story_code: VALID_ARGS.story_code,
     workspace_name: VALID_ARGS.workspace_name,
     branch: VALID_ARGS.branch,

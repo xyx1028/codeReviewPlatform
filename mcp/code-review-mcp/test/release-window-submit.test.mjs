@@ -208,7 +208,7 @@ test('两步提交：卡片列出窗口下全部需求，第二次只带令牌�
   const first = await reg.call(TOOL_NAME, {
     workspace_name: '工具开发组',
     release_window: 'R20261106',
-  })
+  }, { caller: 'alice' })
   assert.equal(first.isError, false)
   const card = first.content[0].text
   assert.match(card, /还没有提交/)

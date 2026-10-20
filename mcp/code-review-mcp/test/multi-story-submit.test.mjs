@@ -301,7 +301,7 @@ test('两步提交：卡片列出两条需求与条数，确认后只建一个�
 
   const first = await registry.call(TOOL_NAME, {
     story_codes: ['US-2026-042423', 'US-2026-042424'],
-  })
+  }, { caller: 'alice' })
   assert.equal(first.isError, false)
   const card = first.content[0].text
   assert.match(card, /还没有提交/)
@@ -317,7 +317,7 @@ test('两步提交：卡片列出两条需求与条数，确认后只建一个�
   )
 
   const token = /confirmation_token:\s*(\S+)/.exec(card)?.[1]
-  assert.ok(token?.startsWith('v1.'), '第一步必须给出可用令牌')
+  assert.match(token, /^v2\.[A-Za-z0-9_-]{32}$/, '第一步必须给出短确认编号')
 
   const second = await registry.call(
     TOOL_NAME,
@@ -339,6 +339,32 @@ test('两步提交：卡片列出两条需求与条数，确认后只建一个�
     1,
     '确认后只建一个批次',
   )
+})
+
+test('短编号不能跨调用身份或被改写，被拒后原调用身份仍可确认提交', async () => {
+  const client = fakeClient()
+  const registry = createToolRegistry({
+    client, config: CONFIG, confirmations: new ConfirmationSigner(),
+    linky: fakeLinky({ details: {
+      'US-2026-042423': storyDetail('US-2026-042423'),
+      'US-2026-042424': storyDetail('US-2026-042424'),
+    } }),
+  })
+  const first = await registry.call(TOOL_NAME, {
+    story_codes: ['US-2026-042423', 'US-2026-042424'],
+  }, { caller: 'alice' })
+  const token = /confirmation_token:\s*(\S+)/.exec(first.content[0].text)?.[1]
+  assert.match(token, /^v2\.[A-Za-z0-9_-]{32}$/)
+  const changed = token.slice(0, -1) + (token.endsWith('A') ? 'B' : 'A')
+  for (const [value, caller] of [[token, 'bob'], [changed, 'alice']]) {
+    const rejected = await registry.call(TOOL_NAME, { confirmation_token: value }, { caller })
+    assert.equal(rejected.isError, true)
+    assert.match(rejected.content[0].text, /CONFIRMATION_INVALID/)
+    assert.equal(client.calls.length, 0, '无效编号不得调用平台创建评审')
+  }
+  const accepted = await registry.call(TOOL_NAME, { confirmation_token: token }, { caller: 'alice' })
+  assert.equal(accepted.isError, false)
+  assert.equal(client.calls.filter((call) => call.kind === 'insert').length, 1)
 })
 
 test('跨组提交被工具层拒绝，且平台上没有任何批次', async () => {

@@ -236,7 +236,7 @@ export const TOOL_DEFINITION = {
         type: 'string',
         minLength: 1,
         description:
-          '确认令牌：由第一次调用（或 lookup_requirement）返回。' +
+          '短确认编号：由第一次调用（或 lookup_requirement）返回，必须逐字原样传回，不要解码或重新生成。' +
           '只有用户确认过需求信息之后才带上它 —— 带上它这次就会真的创建评审并消耗模型额度。',
       },
     },
@@ -302,6 +302,7 @@ export function createToolRegistry({
   }
 
   function issueToken({
+    caller = null,
     storyCodes,
     workspaceName,
     givenWorkspace,
@@ -313,6 +314,7 @@ export function createToolRegistry({
     if (confirmations === null) return null
     return {
       value: confirmations.issue({
+        caller,
         story_codes: storyCodes,
         workspace_name: workspaceName,
         given_workspace: givenWorkspace ?? null,
@@ -491,6 +493,7 @@ export function createToolRegistry({
     // 分支与窗口可以不给：按默认值补齐后总能签出一张可直接用于提交的令牌。
     const params = resolveSubmitParams(args)
     const token = issueToken({
+      caller: context.caller ?? null,
       storyCodes: [outcome.story?.story_code ?? storyCode],
       workspaceName,
       givenWorkspace: args.workspace_name ?? null,
@@ -629,6 +632,7 @@ export function createToolRegistry({
       }
 
       const token = issueToken({
+        caller: context.caller ?? null,
         storyCodes,
         workspaceName,
         givenWorkspace: args.workspace_name ?? null,
@@ -638,7 +642,7 @@ export function createToolRegistry({
         verification: outcome.status,
       })
       if (token === null) {
-        // 没有签名器 = 门禁不可用。宁可不提交也不绕过确认。
+        // 没有确认存储 = 门禁不可用。宁可不提交也不绕过确认。
         return textResult(
           '服务端没有启用确认门禁，无法安全地走"确认后提交"流程。请联系 MCP 维护者。',
           { isError: true },
@@ -669,6 +673,7 @@ export function createToolRegistry({
     let claim
     try {
       claim = confirmations.verify(args.confirmation_token, {
+        caller: context.caller ?? null,
         // 没回传编号/窗口时不比对（提交用的是令牌里的那份，见 confirm.mjs）。
         story_codes: givenCodes ?? undefined,
         workspace_name: args.workspace_name ?? null,

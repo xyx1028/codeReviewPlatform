@@ -314,7 +314,6 @@ export function loadConfig(env = process.env) {
     confirm: {
       ttlMs: confirmTtlMs,
       /** 多实例部署必须显式配置，否则 A 实例签的令牌到 B 实例会被拒。 */
-      secret: optional(env, 'CRP_CONFIRM_SECRET'),
     },
     defaults: {
       /** 服务端配置好的默认模型（展示名或 id）。留空时平台只有一个可用模型才能自动确定。 */

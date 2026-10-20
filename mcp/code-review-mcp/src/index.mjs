@@ -63,7 +63,6 @@ async function main() {
           healthWorkspace: config.linky.healthWorkspace,
         })
   const confirmations = new ConfirmationSigner({
-    secret: config.confirm.secret,
     ttlMs: config.confirm.ttlMs,
   })
   const registry = createToolRegistry({
@@ -81,12 +80,9 @@ async function main() {
         '参数写错时要等平台侧导入失败才会发现。\n',
     )
   }
-  if (config.confirm.secret === null) {
-    process.stderr.write(
-      '[提示] 未配置 CRP_CONFIRM_SECRET，确认令牌密钥为本次启动随机生成：' +
-        '重启后未使用的令牌失效；多实例部署请显式配置，否则令牌只在签发它的实例上有效。\n',
-    )
-  }
+  process.stderr.write(
+    '[提示] 短确认编号使用进程内存储：重启后需重新核对；多实例请求需固定到原实例。\n',
+  )
 
   if (config.transport === 'stdio') {
     const server = createMcpServer(registry)
