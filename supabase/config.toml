@@ -4,7 +4,13 @@ project_id = "codeReviewPlatform"
 # Local Vite frontend. Supabase Auth uses this URL when constructing email
 # confirmation links and only redirects to explicitly allowed local origins.
 site_url = "http://localhost:5173"
-additional_redirect_urls = ["http://localhost:5173", "http://127.0.0.1:5173"]
+# 重置密码邮件会回到 /reset-password，所以白名单要能匹配子路径（通配）。
+additional_redirect_urls = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:5173/**",
+  "http://127.0.0.1:5173/**",
+]
 enable_signup = true
 
 [auth.email]

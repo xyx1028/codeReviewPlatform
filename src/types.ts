@@ -45,6 +45,22 @@ export interface AdminUserListItem {
   updated_at: string
 }
 
+/**
+ * 管理员代重置密码的结果（V1.65）。
+ *
+ * `sessions_revoked` 是数据库实际删掉的 session 行数，不是前端猜的；
+ * `reset_self` 为真时前端必须清掉本地会话 —— 服务端已经把当前管理员的登录态一起删了。
+ */
+export interface AdminPasswordResetResult {
+  id: string
+  email: string
+  display_name: string | null
+  role: UserRole
+  email_confirmed_at: string | null
+  sessions_revoked: number
+  reset_self: boolean
+}
+
 export interface ReviewBatch {
   id: string
   name: string

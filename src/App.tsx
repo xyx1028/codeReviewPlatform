@@ -67,6 +67,7 @@ import {
   adminListUsers,
   adminUpdateUserRole,
   adminConfirmUserEmail,
+  adminResetUserPassword,
   adminCreateModelConfig,
   adminDeleteModelConfig,
   adminListModelConfigs,
@@ -110,6 +111,9 @@ import {
   setBatchDefaultBranch,
   setBatchModel,
   resendSignUpEmail,
+  requestPasswordReset,
+  completePasswordReset,
+  PasswordResetSignOutError,
   clearLocalAuthSession,
   signIn,
   signOut,
@@ -119,6 +123,17 @@ import {
   wechatLoginEnabled,
 } from './lib/api'
 import type { CreateBatchInput, ModelConfigInput } from './lib/api'
+import {
+  clearRecoveryFlow,
+  getRecoveryLanding,
+  isRecoveryFlow,
+  RESET_PASSWORD_PATH,
+} from './lib/password-recovery'
+import {
+  describeAdminPasswordResetError,
+  generateTemporaryPassword,
+  validateTemporaryPassword,
+} from './lib/admin-password-reset'
 import type { LinkyBatchImportRequest } from './types'
 import { downloadAiTemplate, parseAiWorkbook, templateVersion } from './lib/excel'
 import { parseBaselineCommit } from './lib/baseline'
@@ -148,6 +163,7 @@ import {
 } from './components/batches/workspace-column'
 import type {
   AdminUserListItem,
+  AdminPasswordResetResult,
   AiImportRecord,
   AiModelConfigSummary,
   ModelConnectivityTest,
@@ -395,12 +411,26 @@ function AuthPageLayout({
 }
 
 /**
- * 重发验证邮件的按钮。
+ * 带冷却倒计时的邮件重发按钮。
  *
- * GoTrue 对重发有 60 秒冷却，前端同步一个倒计时：既挡住连点（连点只会换来一串报错），
+ * GoTrue 对同一邮箱的发信有 60 秒冷却，前端同步一个倒计时：既挡住连点（连点只会换来一串报错），
  * 也让用户知道还要等多久，而不是对着一个「点了没反应」的按钮猜。
  */
-function ResendConfirmationButton({ email, initialCooldown = 0, block }: { email: string; initialCooldown?: number; block?: boolean }) {
+function EmailCooldownButton({
+  send,
+  idleLabel,
+  cooldownLabel,
+  successMessage,
+  initialCooldown = 0,
+  block,
+}: {
+  send: () => Promise<void>
+  idleLabel: string
+  cooldownLabel: (seconds: number) => string
+  successMessage: string
+  initialCooldown?: number
+  block?: boolean
+}) {
   const { message } = AntApp.useApp()
   const [seconds, setSeconds] = useState(initialCooldown)
 
@@ -411,9 +441,9 @@ function ResendConfirmationButton({ email, initialCooldown = 0, block }: { email
   }, [seconds])
 
   const mutation = useMutation({
-    mutationFn: () => resendSignUpEmail(email),
+    mutationFn: send,
     onSuccess: () => {
-      message.success('验证邮件已重新发送，请查收（记得看一下垃圾邮件箱）')
+      message.success(successMessage)
       setSeconds(60)
     },
     onError: (error) => message.error(error.message),
@@ -426,8 +456,21 @@ function ResendConfirmationButton({ email, initialCooldown = 0, block }: { email
       loading={mutation.isPending}
       onClick={() => mutation.mutate()}
     >
-      {seconds > 0 ? `重新发送验证邮件（${seconds}s）` : '重新发送验证邮件'}
+      {seconds > 0 ? cooldownLabel(seconds) : idleLabel}
     </Button>
+  )
+}
+
+function ResendConfirmationButton({ email, initialCooldown = 0, block }: { email: string; initialCooldown?: number; block?: boolean }) {
+  return (
+    <EmailCooldownButton
+      send={() => resendSignUpEmail(email)}
+      idleLabel="重新发送验证邮件"
+      cooldownLabel={(seconds) => `重新发送验证邮件（${seconds}s）`}
+      successMessage="验证邮件已重新发送，请查收（记得看一下垃圾邮件箱）"
+      initialCooldown={initialCooldown}
+      block={block}
+    />
   )
 }
 
@@ -474,6 +517,9 @@ function LoginPage() {
         <Form.Item name="password" label="密码" rules={[{ required: true, message: '请输入密码' }]}>
           <Input.Password size="large" autoComplete="current-password" placeholder="请输入密码" />
         </Form.Item>
+        <div className="auth-row-end">
+          <Link to="/forgot-password">忘记密码？</Link>
+        </div>
         <Button className="auth-submit" type="primary" size="large" block htmlType="submit" loading={mutation.isPending}>
           登录
         </Button>
@@ -590,12 +636,209 @@ function RegisterPage() {
   )
 }
 
-function AuthRoutes() {
+/**
+ * 发起找回密码。
+ *
+ * 文案刻意不说"邮件已发给你"：GoTrue 对未注册邮箱同样返回成功（防账号枚举），
+ * 前端拿不到"这个邮箱存不存在"，所以只能说"如果已注册"。反过来，发送**失败**
+ * （没配 SMTP、超额、频率限制）必须把真实原因显示出来，不能停在一个假的成功页。
+ */
+export function ForgotPasswordPage() {
+  const { message } = AntApp.useApp()
+  const [submittedEmail, setSubmittedEmail] = useState<string | null>(null)
+  const mutation = useMutation({
+    mutationFn: (values: { email: string }) => requestPasswordReset(values.email),
+    onSuccess: (_data, values) => setSubmittedEmail(values.email),
+    onError: (error) => message.error(error.message),
+  })
+
+  if (submittedEmail) {
+    return (
+      <AuthPageLayout title="重置邮件已发出" description="按邮件里的链接设置新密码">
+        <Alert
+          className="auth-alert"
+          type="success"
+          showIcon
+          title={submittedEmail}
+          description="如果这个邮箱已经注册过，你会收到一封重置密码邮件，链接 1 小时内有效。没收到先翻一下垃圾邮件箱。"
+        />
+        <EmailCooldownButton
+          send={() => requestPasswordReset(submittedEmail)}
+          idleLabel="重新发送重置邮件"
+          cooldownLabel={(seconds) => `重新发送重置邮件（${seconds}s）`}
+          successMessage="重置邮件已重新发送，请查收"
+          initialCooldown={60}
+          block
+        />
+        <div className="auth-switch">
+          <Text type="secondary">设置完新密码后</Text>
+          <Link to="/login">返回登录</Link>
+        </div>
+      </AuthPageLayout>
+    )
+  }
+
+  return (
+    <AuthPageLayout title="找回密码" description="填写注册邮箱，我们发一封重置密码邮件给你">
+      <Form layout="vertical" requiredMark={false} onFinish={(values) => mutation.mutate(values)}>
+        <Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email', message: '请输入有效邮箱' }]}>
+          <Input size="large" autoComplete="email" placeholder="name@example.com" />
+        </Form.Item>
+        <Button className="auth-submit" type="primary" size="large" block htmlType="submit" loading={mutation.isPending}>
+          发送重置邮件
+        </Button>
+      </Form>
+      <Paragraph className="auth-hint" type="secondary">
+        用微信扫码注册的账号没有邮箱密码，直接用微信扫码登录即可；需要邮箱登录请在个人中心绑定。
+      </Paragraph>
+      <div className="auth-switch">
+        <Text type="secondary">想起来了？</Text>
+        <Link to="/login">返回登录</Link>
+      </div>
+    </AuthPageLayout>
+  )
+}
+
+/**
+ * 重置密码落地页。
+ *
+ * 四种状态都是真实事实的投影，不猜：
+ * - 链接带错误参数（过期/用过）→ 只给重新发起的入口，不画一个提交必然失败的表单；
+ * - 没有恢复会话 → 说链接无效，而不是让用户对着表单反复试；
+ * - 有恢复会话 → 设置新密码；
+ * - 已设置成功 → 停在结果页由用户点「返回登录」，不自动跳转。自动跳转会和会话被吊销的
+ *   时机赛跑，用户来不及看到"全部设备已退出"这件事。
+ */
+export function ResetPasswordPage({ hasSession }: { hasSession: boolean }) {
+  const { message } = AntApp.useApp()
+  const navigate = useNavigate()
+  // 落地信息在模块加载时就抄下来了，这里固定住：后续清标记不应该改变本页已经展示的结论。
+  const [landing] = useState(getRecoveryLanding)
+  const [result, setResult] = useState<{ otherSessionsRevoked: boolean } | null>(null)
+
+  const leaveRecovery = async () => {
+    clearRecoveryFlow()
+    try {
+      await clearLocalAuthSession()
+    } catch {
+      // 会话可能已经被服务端吊销，本地清理失败不影响回登录页。
+    }
+    navigate('/login', { replace: true })
+  }
+
+  const mutation = useMutation({
+    mutationFn: (values: { password: string; confirmPassword: string }) => completePasswordReset(values.password),
+    onSuccess: () => setResult({ otherSessionsRevoked: true }),
+    onError: (error) => {
+      // 密码其实已经改成功了，只是退出其它会话失败 —— 这时让用户去重置一遍是错的。
+      if (error instanceof PasswordResetSignOutError) {
+        message.warning(error.message)
+        setResult({ otherSessionsRevoked: false })
+        return
+      }
+      message.error(error.message)
+    },
+  })
+
+  if (result) {
+    return (
+      <AuthPageLayout title="密码已重置" description="请用新密码重新登录">
+        <Alert
+          className="auth-alert"
+          type="success"
+          showIcon
+          title="新密码已生效"
+          description={result.otherSessionsRevoked
+            ? '为防止旧密码泄露，这个账号在所有设备上的登录状态都已退出，请用新密码重新登录。'
+            : '新密码已生效。退出其它设备会话时出错，请手动在其它设备上重新登录。'}
+        />
+        <Button className="auth-submit" type="primary" size="large" block onClick={() => { void leaveRecovery() }}>
+          返回登录
+        </Button>
+      </AuthPageLayout>
+    )
+  }
+
+  if (landing.error || !hasSession) {
+    return (
+      <AuthPageLayout title="重置链接不可用" description="重新发起一次就好">
+        <Alert
+          className="auth-alert"
+          type="error"
+          showIcon
+          title={landing.error ?? '没有找到有效的重置链接'}
+          description="重置链接只能用一次、且有有效期。请重新发起找回密码，并直接点开最新那封邮件里的链接。"
+        />
+        <Link to="/forgot-password">
+          <Button className="auth-submit" type="primary" size="large" block>
+            重新发起找回密码
+          </Button>
+        </Link>
+        <div className="auth-switch">
+          <Text type="secondary">想直接登录？</Text>
+          <Link to="/login">返回登录</Link>
+        </div>
+      </AuthPageLayout>
+    )
+  }
+
+  return (
+    <AuthPageLayout title="设置新密码" description="设置完成后所有设备都需要用新密码重新登录">
+      <Form layout="vertical" requiredMark={false} onFinish={(values) => mutation.mutate(values)}>
+        <Form.Item
+          name="password"
+          label="新密码"
+          rules={[
+            { required: true, message: '请输入新密码' },
+            { min: 6, message: '密码至少需要 6 个字符' },
+          ]}
+        >
+          <Input.Password size="large" autoComplete="new-password" placeholder="至少 6 个字符" />
+        </Form.Item>
+        <Form.Item
+          name="confirmPassword"
+          label="确认新密码"
+          dependencies={['password']}
+          rules={[
+            { required: true, message: '请再次输入新密码' },
+            ({ getFieldValue }) => ({
+              validator(_, value) {
+                if (!value || getFieldValue('password') === value) return Promise.resolve()
+                return Promise.reject(new Error('两次输入的密码不一致'))
+              },
+            }),
+          ]}
+        >
+          <Input.Password size="large" autoComplete="new-password" placeholder="再次输入新密码" />
+        </Form.Item>
+        <Button className="auth-submit" type="primary" size="large" block htmlType="submit" loading={mutation.isPending}>
+          设置新密码
+        </Button>
+      </Form>
+      <div className="auth-switch">
+        <Text type="secondary">不想改了？</Text>
+        <Button type="link" onClick={() => { void leaveRecovery() }}>放弃并返回登录</Button>
+      </div>
+    </AuthPageLayout>
+  )
+}
+
+/**
+ * 未登录（或处于密码恢复流）时的路由。
+ *
+ * `pinned` 为真表示手上这个会话是一封重置邮件换来的：此时除了重置页哪儿都不能去 ——
+ * 否则"点一下邮件链接就直接进了工作台"，邮箱就等于密码。
+ */
+function AuthRoutes({ hasSession = false, recovery = false }: { hasSession?: boolean; recovery?: boolean } = {}) {
+  const pinned = recovery && hasSession
+  const guard = (element: ReactNode) => (pinned ? <Navigate to={RESET_PASSWORD_PATH} replace /> : element)
   return (
     <Routes>
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="/register" element={<RegisterPage />} />
-      <Route path="*" element={<Navigate to="/login" replace />} />
+      <Route path="/login" element={guard(<LoginPage />)} />
+      <Route path="/register" element={guard(<RegisterPage />)} />
+      <Route path="/forgot-password" element={guard(<ForgotPasswordPage />)} />
+      <Route path={RESET_PASSWORD_PATH} element={<ResetPasswordPage hasSession={hasSession} />} />
+      <Route path="*" element={<Navigate to={pinned ? RESET_PASSWORD_PATH : '/login'} replace />} />
     </Routes>
   )
 }
@@ -1321,10 +1564,13 @@ function UsersManagementPage({ isAdmin }: { isAdmin: boolean }) {
 
 function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   // 用受控 Modal 而不是 modal.confirm：弹窗内容要等一次异步影响评估回来才完整，
   // 而 modal.confirm 的内容在打开那一刻就固定了，改不动确认按钮的可用状态。
   const { message } = AntApp.useApp()
   const usersQuery = useQuery({ queryKey: ['admin-users'], enabled: isAdmin, queryFn: adminListUsers })
+  // 复用 Shell 已经取过的本人资料：代重置时要认出"这是你自己的账号"并提前警告会被登出。
+  const myProfileQuery = useQuery({ queryKey: ['my-profile'], queryFn: getMyProfile })
   const updateRoleMutation = useMutation({
     mutationFn: ({ userId, role }: { userId: string; role: UserRole }) => adminUpdateUserRole(userId, role),
     onSuccess: () => {
@@ -1375,6 +1621,53 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
     onError: (error) => message.error(describeUserDeletionError(error.message)),
   })
   const deletionView = buildUserDeletionView(impactQuery.data ?? null)
+
+  /**
+   * 代重置密码。
+   *
+   * 明文只在这个组件的 state 里存在，不写 localStorage、不进日志：弹窗关掉就没了，
+   * 所以结果态必须把密码摆在那儿让管理员复制，而不是弹一条三秒就消失的 toast。
+   */
+  const [resetTarget, setResetTarget] = useState<AdminUserListItem | null>(null)
+  const [tempPassword, setTempPassword] = useState('')
+  const [resetResult, setResetResult] = useState<AdminPasswordResetResult | null>(null)
+  const openResetModal = (user: AdminUserListItem) => {
+    setResetTarget(user)
+    setTempPassword(generateTemporaryPassword())
+    setResetResult(null)
+  }
+  const closeResetModal = () => {
+    setResetTarget(null)
+    setTempPassword('')
+    setResetResult(null)
+  }
+  const copyTempPassword = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      message.success('临时密码已复制')
+    } catch {
+      message.warning('浏览器拒绝了剪贴板访问，请手动选中复制')
+    }
+  }
+  const resetPasswordMutation = useMutation({
+    mutationFn: ({ userId, password }: { userId: string; password: string }) => adminResetUserPassword(userId, password),
+    onSuccess: (result) => {
+      setResetResult(result)
+      queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+    },
+    onError: (error) => message.error(describeAdminPasswordResetError(error.message)),
+  })
+  /** 重置自己的密码时服务端已经把本人的会话删了，前端跟着回登录页，而不是留在一个已失效的界面上。 */
+  const leaveAfterSelfReset = async () => {
+    closeResetModal()
+    try {
+      await clearLocalAuthSession()
+    } catch {
+      // 会话已被服务端删除，本地清理失败不影响回登录页。
+    }
+    navigate('/login', { replace: true })
+  }
+  const tempPasswordError = validateTemporaryPassword(tempPassword)
 
   if (!isAdmin) {
     return <Alert type="warning" showIcon title="无权限访问" description="只有管理员可以管理用户角色。" />
@@ -1429,7 +1722,7 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
     { title: '创建时间', dataIndex: 'created_at', width: 200, render: (value) => new Date(value).toLocaleString() },
     {
       title: '操作',
-      width: 220,
+      width: 300,
       render: (_value, record) => (
         <Space size="small">
           {!record.email_confirmed_at ? (
@@ -1450,6 +1743,9 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
               </Button>
             </Popconfirm>
           ) : null}
+          <Button size="small" onClick={() => openResetModal(record)}>
+            重置密码
+          </Button>
           <Button
             danger
             size="small"
@@ -1562,6 +1858,124 @@ function AdminUsersPage({ isAdmin }: { isAdmin: boolean }) {
                 }
               />
             ) : null}
+          </Space>
+        )}
+      </Modal>
+      <Modal
+        open={resetTarget !== null}
+        title={resetResult ? '临时密码已生效' : '重置密码'}
+        okText="设置临时密码"
+        okButtonProps={{ disabled: tempPasswordError !== null }}
+        confirmLoading={resetPasswordMutation.isPending}
+        onCancel={resetResult?.reset_self ? () => { void leaveAfterSelfReset() } : closeResetModal}
+        footer={resetResult ? (
+          <Space>
+            {resetResult.reset_self ? (
+              <Button type="primary" onClick={() => { void leaveAfterSelfReset() }}>去重新登录</Button>
+            ) : (
+              <Button type="primary" onClick={closeResetModal}>我已转交，关闭</Button>
+            )}
+          </Space>
+        ) : undefined}
+        onOk={() => {
+          if (resetTarget && tempPasswordError === null) {
+            resetPasswordMutation.mutate({ userId: resetTarget.id, password: tempPassword })
+          }
+        }}
+        destroyOnClose
+      >
+        {resetTarget === null ? null : (
+          <Space direction="vertical" size="middle" className="full-width">
+            <Descriptions column={1} size="small" bordered>
+              <Descriptions.Item label="邮箱">{resetTarget.email}</Descriptions.Item>
+              <Descriptions.Item label="用户名">
+                {getUserDisplayName(resetTarget.display_name, resetTarget.email)}
+              </Descriptions.Item>
+            </Descriptions>
+
+            {resetResult ? (
+              <>
+                <Alert
+                  type="success"
+                  showIcon
+                  title="这是唯一一次显示这个密码"
+                  description={
+                    <Space direction="vertical" size={4} className="full-width">
+                      <span>平台只保存密码的哈希，关掉弹窗后谁也查不出它是什么。请现在就复制并通过可信渠道转交本人。</span>
+                      <span>已退出该账号的登录会话：{resetResult.sessions_revoked} 个。</span>
+                      <span>请提醒本人：登录后到「个人中心 → 修改密码」改成只有他自己知道的密码。</span>
+                    </Space>
+                  }
+                />
+                <Space>
+                  <Text code className="temp-password-value">{tempPassword}</Text>
+                  <Button size="small" onClick={() => { void copyTempPassword(tempPassword) }}>复制</Button>
+                </Space>
+                {resetResult.email_confirmed_at ? null : (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    title="这个账号的邮箱还没验证，光有密码仍然登不进去"
+                    description="重置密码不会顺带把邮箱标成已验证。请在账号列表里对该账号点一次「标记已验证」。"
+                  />
+                )}
+                {resetResult.reset_self ? (
+                  <Alert
+                    type="info"
+                    showIcon
+                    title="你刚重置的是自己的密码"
+                    description="你在所有设备上的登录态都已失效，请用这个临时密码重新登录。"
+                  />
+                ) : null}
+              </>
+            ) : (
+              <>
+                <Alert
+                  type="warning"
+                  showIcon
+                  title="这是没有邮件服务时的找回密码方式"
+                  description={
+                    <Space direction="vertical" size={4} className="full-width">
+                      <span>确认重置后：该账号在所有设备上的登录态立即失效，必须用新的临时密码重新登录。</span>
+                      <span>临时密码只会显示一次，平台不保存明文；本次操作会记入管理员审计。</span>
+                      <span>请先确认提出申请的人确实是账号本人，再通过可信渠道转交。</span>
+                    </Space>
+                  }
+                />
+                <div>
+                  <Text strong>临时密码</Text>
+                  <Space.Compact className="full-width temp-password-row">
+                    <Input
+                      value={tempPassword}
+                      onChange={(event) => setTempPassword(event.target.value)}
+                      placeholder="至少 8 个字符"
+                      status={tempPasswordError ? 'error' : undefined}
+                    />
+                    <Button onClick={() => setTempPassword(generateTemporaryPassword())}>重新生成</Button>
+                    <Button onClick={() => { void copyTempPassword(tempPassword) }}>复制</Button>
+                  </Space.Compact>
+                  {tempPasswordError ? <Text type="danger">{tempPasswordError}</Text> : (
+                    <Text type="secondary">已自动生成，可直接使用，也可以改成你自己约定的密码。</Text>
+                  )}
+                </div>
+                {resetTarget.email_confirmed_at ? null : (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    title="这个账号的邮箱还没验证"
+                    description="即使改了密码，他仍然会因为邮箱未验证而登不进去。核实归属后请一并点「标记已验证」。"
+                  />
+                )}
+                {resetTarget.id === myProfileQuery.data?.id ? (
+                  <Alert
+                    type="info"
+                    showIcon
+                    title="这是你自己的账号"
+                    description="重置后你会被从所有设备登出，需要用新的临时密码重新登录。"
+                  />
+                ) : null}
+              </>
+            )}
           </Space>
         )}
       </Modal>
@@ -4159,6 +4573,9 @@ export default function App() {
 
   if (!supabaseConfigured) return <SetupPage />
   if (session === undefined) return <main className="center-page"><Spin size="large" /></main>
-  if (!session) return <AuthRoutes />
+  // 恢复流必须先于工作台判断：恢复链接带来的也是一个正常会话，直接渲染 Shell 就等于
+  // 允许"凭一封邮件进工作台"。
+  const recovery = isRecoveryFlow()
+  if (!session || recovery) return <AuthRoutes hasSession={Boolean(session)} recovery={recovery} />
   return <Shell session={session} />
 }

@@ -134,6 +134,29 @@ a {
   font-weight: 600;
 }
 
+/* 登录表单里「忘记密码？」这一行：靠右、紧贴密码框，不占一个表单项的高度。 */.auth-row-end {
+  display: flex;
+  justify-content: flex-end;
+  margin: -8px 0 16px;
+}
+
+.auth-row-end a {
+  color: #1677ff;
+  font-size: 13px;
+}
+
+/* 管理员代重置密码：临时密码要能被准确看清和抄下来，所以等宽、可选中、字号略大。 */
+.temp-password-row {
+  margin-top: 6px;
+}
+
+.temp-password-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  user-select: all;
+}
+
 .auth-hint {
   margin: 10px 0 0 !important;
   font-size: 12px;

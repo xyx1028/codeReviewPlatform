@@ -4,6 +4,7 @@
 
 ## 新对话先恢复的进度
 
+- **外部邮箱注册配置已执行，业务验证待完成（2026-10-20，用户 Linux 输出）**：用户按命令备份并更新 `/home/kduser/crp/supabase/.env`，设置 `DISABLE_SIGNUP=false`、`ENABLE_EMAIL_SIGNUP=true`、`ENABLE_EMAIL_AUTOCONFIRM=true`，随后运行 `docker compose up -d --no-deps --wait auth`，输出 `supabase-auth Healthy`（6.1 秒）。已确认认证容器重建／健康，尚未收到外部邮箱实际注册和登录成功的结果；当前运行时三个字段未另行读取核验。前端原有注册入口无需修改；仓库自部署模板仍为初始关闭注册配置，不能据此推翻本次 Linux 操作记录。下一步由用户刷新 `/register`，使用外部邮箱验证注册及登录；本次不代表互联网访问范围已扩大。
 - **最近已在线确认（2026-10-20，用户完整 Linux 发布日志）**：代码 `27a8056`、镜像 `release_202610201021209` 完成统一发布；数据库已是最新，三个 Functions 无变化；4 个旧 Worker 全部排空后重建，每副本并发 2 并恢复领取任务，Web、MCP 健康检查通过，成功写入 `last-release.env`。这是启动／健康证据，不等于 Linky 或完整评审的业务验收。
 - **已确认入口（2026-10-19，用户 Linux／Mac 输出）**：MCP `http://crp-review.kingdee.com/mcp` 已经由 Nginx 转发；服务器 `/healthz` 返回 `status=ok`，Mac 请求域名 `/mcp` 未带令牌得到 MCP 的 JSON 401。证明入口可达并拒绝匿名，不证明已通过带令牌握手或真实评审。
 - **当前进度（2026-10-20）**：Linky 地址修正已完成上述正式发布，但用户随后提供“用户故事”页持续转圈的截图，业务验收未通过。只读检查线上 runtime-config 的 Linky 覆盖为空，实际 JS 已包含新域名且没有旧地址。新域名跨组列表第 1、2 页均超过 25 秒超时；指定“工具开发组”约 0.7 秒返回 200。不要重新误判成旧域名或重新运行地址替换。

@@ -1,6 +1,7 @@
 import type { Session } from '@supabase/supabase-js'
 import { requireSupabase } from './supabase'
 import { runtimeConfig } from './runtime-config'
+import { RESET_PASSWORD_PATH, markRecoverySession } from './password-recovery'
 import type { UserDeletionImpact } from './user-deletion'
 import type {
   AttributionRuleCatalog,
@@ -21,6 +22,7 @@ import type {
 import type {
   ActiveAnalysisBatchList,
   AdminUserListItem,
+  AdminPasswordResetResult,
   AgentRunDetail,
   AnalysisRuntimeConsoleResponse,
   RuntimeTaskEventHistoryResponse,
@@ -179,7 +181,12 @@ export async function getSession() {
 
 export function onAuthChange(callback: (session: Session | null) => void) {
   const client = requireSupabase()
-  return client.auth.onAuthStateChange((_event, session) => callback(session)).data.subscription
+  return client.auth.onAuthStateChange((event, session) => {
+    // 恢复邮件落地的第二个事实来源：URL 片段被 detectSessionInUrl 清掉之后，
+    // 只有这个事件还能说明"这个会话是一封重置邮件换来的"。
+    if (event === 'PASSWORD_RECOVERY') markRecoverySession()
+    callback(session)
+  }).data.subscription
 }
 
 /**
@@ -199,6 +206,11 @@ const authErrorMessages: Record<string, string> = {
   email_address_invalid: '邮箱地址无效，请检查后重试。',
   email_address_not_authorized: '该邮箱不在允许注册的范围内，请联系管理员。',
   email_address_already_confirmed: '该邮箱已完成验证，直接登录即可。',
+  same_password: '新密码不能与原密码相同，请换一个。',
+  otp_expired: '重置链接已过期或已被使用过，请重新发起找回密码。',
+  session_not_found: '重置链接的会话已失效，请重新发起找回密码。',
+  // GoTrue 发不出邮件时只给 500 + unexpected_failure，自部署最常见的原因就是没配 SMTP。
+  mail_send_failed: '邮件发送失败：Supabase Auth 没有可用的邮件服务（SMTP）。请联系管理员配置后重试。',
 }
 
 /**
@@ -232,6 +244,11 @@ function toAuthError(error: unknown): AuthActionError {
             : normalized.includes('already confirmed') ? 'email_address_already_confirmed'
               : ''
   )
+  // 「发不出邮件」在任何版本都只有 500 + unexpected_failure/无错误码，但它和限流、
+  // 密码强度完全不是一类问题（要去配 SMTP，不是等一会儿再试），所以按文案单独识别。
+  if (normalized.includes('error sending') || normalized.includes('error confirmation mail')) {
+    return new AuthActionError(authErrorMessages.mail_send_failed, 'mail_send_failed')
+  }
   // 重发冷却和「额度用完」共用 over_email_send_rate_limit，但处置方式完全不同（等几十秒 vs 等一小时），
   // GoTrue 只在文案里给出剩余秒数，所以这里优先按秒数还原提示。
   const cooldown = /after (\d+) seconds?/.exec(normalized)
@@ -273,6 +290,51 @@ export async function resendSignUpEmail(email: string) {
   const client = requireSupabase()
   const { error } = await client.auth.resend({ type: 'signup', email })
   if (error) throw toAuthError(error)
+}
+
+/**
+ * 发起找回密码：让 GoTrue 发一封 recovery 邮件，链接回到本站的重置密码页。
+ *
+ * GoTrue 为了防账号枚举，对未注册邮箱**同样返回成功**，所以这里拿不到"邮箱是否存在"，
+ * 界面文案也不能断言账号存在。真正会抛错的是限流和邮件发送失败 —— 那两个必须如实抛出去，
+ * 不能让界面在没发出邮件的情况下显示"已发送"。
+ */
+export async function requestPasswordReset(email: string) {
+  const client = requireSupabase()
+  const redirectTo = typeof window === 'undefined'
+    ? undefined
+    : new URL(RESET_PASSWORD_PATH, window.location.origin).toString()
+  const { error } = await client.auth.resetPasswordForEmail(email, redirectTo ? { redirectTo } : undefined)
+  if (error) throw toAuthError(error)
+}
+
+/**
+ * 用恢复链接换来的会话设置新密码。
+ *
+ * 这里不要求原密码 —— 整条链路的凭据就是那封邮件（`updateUser` 只看会话有效性）。
+ * 正因如此，改完之后用 `scope:'global'` 吊销**全部**会话，包括当前这台设备：
+ * 走到这一步说明旧密码可能已经泄露，个人中心改密码时留用本设备的那套处置在这里不适用。
+ * 全局登出失败不影响密码已改成功的事实，但要抛出去，让界面别说"全部设备已退出"。
+ */
+export async function completePasswordReset(newPassword: string) {
+  const client = requireSupabase()
+  const { error } = await client.auth.updateUser({ password: newPassword })
+  if (error) throw toAuthError(error)
+  const { error: signOutError } = await client.auth.signOut({ scope: 'global' })
+  if (signOutError) throw new PasswordResetSignOutError()
+}
+
+/**
+ * 密码已经改成功，但吊销其它会话失败。
+ *
+ * 单独一个错误类型是因为处置完全不同：用户要用**新**密码登录（旧的已经不能用了），
+ * 而不是重新发一封邮件重置。
+ */
+export class PasswordResetSignOutError extends Error {
+  constructor() {
+    super('密码已重置成功，但退出其它设备会话时出错，请手动在其它设备上重新登录。')
+    this.name = 'PasswordResetSignOutError'
+  }
 }
 
 export async function signOut() {
@@ -426,6 +488,25 @@ export async function adminConfirmUserEmail(userId: string) {
   const client = requireSupabase()
   const { data, error } = await client.rpc('admin_confirm_user_email', { p_user_id: userId })
   return unwrap<AdminUserListItem[]>({ data, error })
+}
+
+/**
+ * ADMIN 代设一个临时密码（V1.65）。
+ *
+ * 明文只在这一次请求里出现：数据库存 bcrypt 哈希，审计表只记"谁给谁重置过"。
+ * 返回的 `sessions_revoked` 是服务端实际删掉的 session 行数 —— 界面上那句"全部设备已退出"
+ * 必须有这个数字支撑，不能靠假设。
+ */
+export async function adminResetUserPassword(userId: string, password: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.rpc('admin_reset_user_password', {
+    p_user_id: userId,
+    p_password: password,
+  })
+  const rows = unwrap<AdminPasswordResetResult[]>({ data, error })
+  const result = rows?.[0]
+  if (!result) throw new Error('重置密码没有返回结果，请刷新后确认账号状态。')
+  return result
 }
 
 /**
