@@ -452,6 +452,34 @@ a.dashboard-distribution-item:focus-visible {
   font-weight: 700;
 }
 
+/*
+ * 评审报告下载工具条（V1.69）。
+ *
+ * 范围说明在左、下载按钮在右：下载范围是这一行要回答的唯一问题，所以它和按钮同处一行，
+ * 而不是做成一段常驻说明文字 —— 那种说明没人读，而读错范围的代价是拿着不完整的报告开会。
+ * 配色沿用 .story-action-bar 的同一组 token，不引新色。
+ */
+.review-list-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 10px 14px;
+  background: #fafbfd;
+  border: 1px solid #eef1f6;
+  border-radius: 10px;
+}
+
+.review-list-toolbar__hint {
+  color: #475569;
+  font-size: 13px;
+}
+
+.review-list-toolbar > .ant-dropdown-trigger,
+.review-list-toolbar > .ant-btn-primary {
+  margin-left: auto;
+}
+
 @media (hover: hover) {
   .dashboard-kpi-card,
   .dashboard-card {

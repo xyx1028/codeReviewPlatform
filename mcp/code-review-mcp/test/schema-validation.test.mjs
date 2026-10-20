@@ -77,12 +77,16 @@ function touchedPlatform(client) {
 
 // ---------------------------------------------------------------- 校验器本身
 
-test('必填缺失逐条报出，并带上该填什么', () => {
-  // V1.63 起只有 story_code 必填；分支与窗口有默认值。
-  const violations = validateAgainstSchema(TOOL_DEFINITION.inputSchema, {})
-  assert.deepEqual(violations.map((item) => item.path), ['story_code'])
-  assert.match(violations[0].message, /必填/)
-  assert.equal(violations[0].expected, 'string')
+test('一个编号都不给时由工具层拒绝（schema 层表达不了"二选一"）', async () => {
+  // V1.63 起分支与窗口有默认值；V1.66 起 story_code 与 story_codes 二选一，
+  // 而本仓库的校验器刻意不实现 anyOf —— 声明一条服务端不执行的约束等于对外撒谎。
+  // 所以这里 schema 层不报，工具层必须报，且不能碰平台。
+  assert.deepEqual(validateAgainstSchema(TOOL_DEFINITION.inputSchema, {}), [])
+  const { client, reg } = registry()
+  const result = await reg.call(TOOL_NAME, {})
+  assert.equal(result.isError, true)
+  assert.match(result.content[0].text, /story_codes/)
+  assert.equal(touchedPlatform(client), false, '缺参数不该碰平台')
 })
 
 test('分支与窗口缺失不再是错误，但给了非法值仍然拒', () => {
@@ -156,7 +160,7 @@ test('多余参数要报错而不是静默忽略（模型常把参数名拼错�
 })
 
 test('需求编号不接受标题/中文/空格这类明显填错位置的值', () => {
-  for (const bad of ['需求标题', 'US 2026 017341', 'a/b', '']) {
+  for (const bad of ['需求标题', 'US 2026 017341', 'a/b']) {
     const violations = validateAgainstSchema(TOOL_DEFINITION.inputSchema, {
       story_code: bad,
       branch: 'release',
@@ -167,6 +171,11 @@ test('需求编号不接受标题/中文/空格这类明显填错位置的值', 
       `${JSON.stringify(bad)} 应被判为非法需求编号`,
     )
   }
+  // 数组形态同样逐项卡，并且要指出是第几项 —— 只说"数组里有东西不对"的话模型得整个重填。
+  const inArray = validateAgainstSchema(TOOL_DEFINITION.inputSchema, {
+    story_codes: ['US-2026-017341', '需求标题'],
+  })
+  assert.deepEqual(inArray.map((item) => item.path), ['story_codes[1]'])
   // 真实存在的三种写法都必须通过。
   for (const good of [
     'US-2026-017341',

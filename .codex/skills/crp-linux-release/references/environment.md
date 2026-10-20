@@ -4,6 +4,7 @@
 
 ## 新对话先恢复的进度
 
+- **发布命令文档已整理（2026-10-20，用户要求及当前脚本）**：工程根目录 `Linux发布说明.md` 保存拉取代码后直接 `--apply` 及结果检查命令。用户明确不需要预览，日常默认查询最新镜像，不固定历史标签；只有查询异常或需固定 CI 产物时显式传 `--image`。本次仅整理文档，未执行 Linux 发布，未收到新的正式发布结果。
 - **`51d80e5` 发布预览通过，正式发布待执行（2026-10-20，用户 Linux 输出）**：首次临时 clone 的 GitLab 认证失败已在重试中解决；固定镜像 `release_202610201612008` 重试 dry-run 完成，临时 release 代码为 `51d80e5`，共 111 个迁移文件，仅待执行 `20261020075636_admin_reset_user_password.sql`，三个 Edge Functions 均无需更新。未修改数据库、Functions 或容器。已给出使用同一镜像运行统一 `release.sh --apply` 的下一步，等待完整发布日志；镜像与 CI 提交对应关系未独立核实，不视为已上线。
 - **外部邮箱注册配置已执行，业务验证待完成（2026-10-20，用户 Linux 输出）**：用户按命令备份并更新 `/home/kduser/crp/supabase/.env`，设置 `DISABLE_SIGNUP=false`、`ENABLE_EMAIL_SIGNUP=true`、`ENABLE_EMAIL_AUTOCONFIRM=true`，随后运行 `docker compose up -d --no-deps --wait auth`，输出 `supabase-auth Healthy`（6.1 秒）。已确认认证容器重建／健康，尚未收到外部邮箱实际注册和登录成功的结果；当前运行时三个字段未另行读取核验。前端原有注册入口无需修改；仓库自部署模板仍为初始关闭注册配置，不能据此推翻本次 Linux 操作记录。下一步由用户刷新 `/register`，使用外部邮箱验证注册及登录；本次不代表互联网访问范围已扩大。
 - **最近已在线确认（2026-10-20，用户完整 Linux 发布日志）**：代码 `27a8056`、镜像 `release_202610201021209` 完成统一发布；数据库已是最新，三个 Functions 无变化；4 个旧 Worker 全部排空后重建，每副本并发 2 并恢复领取任务，Web、MCP 健康检查通过，成功写入 `last-release.env`。这是启动／健康证据，不等于 Linky 或完整评审的业务验收。

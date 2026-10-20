@@ -19,6 +19,36 @@ export const SUPPORTED_COMMIT_WINDOWS = [7, 14, 21, 28]
 export const DEFAULT_BRANCH = 'release'
 export const DEFAULT_COMMIT_WINDOW_DAYS = 14
 
+/**
+ * 一次提交最多多少条需求（V1.66）。
+ *
+ * 平台侧的硬上限是 500（`request_linky_batch_import` 的 `story_codes` 约束），这里之所以
+ * 只取 20，限制来自**提交前核对的耗时**而不是数据库：按编号取详情实测命中 5.84 秒、
+ * 未命中 31.80 秒（要遍历完所有工作区才能确认找不到）。并发 4 时 20 条命中约 30 秒，
+ * 还在调用方客户端通常的 60 秒上限之内；再多就会表现为一句 "tool call failed"。
+ *
+ * 真要一次提几十上百条，正确的入口是平台页面的「原始需求导入」—— 那里是勾选式的，
+ * 不需要在一次工具调用里把所有需求都核对完。
+ */
+export const MAX_STORIES_PER_SUBMIT = 20
+
+/**
+ * 按发布窗口提交时的条数上限（V1.68）。
+ *
+ * 比按编号提交的 20 条高，因为两种模式的约束完全不同：按编号要逐条打开需求详情
+ * （命中 5.84 秒、未命中 31.8 秒，耗时随条数线性增长）；按窗口是从整组列表里枚举
+ * （1~5 次请求，与条数无关）。所以这里的限制不再是耗时，而是**人能不能看完那张卡片**
+ * 和**一次花多少额度**。
+ *
+ * 50 条覆盖实测最大组的单个窗口（工具开发组 275 条需求分布在约 8 个窗口上，单窗口 30 条
+ * 上下），卡片约 100 行仍可读。再大就该用平台页面的「原始需求导入」—— 那里是勾选式的，
+ * 逐条可见。
+ */
+export const MAX_STORIES_PER_WINDOW = 50
+
+/** 并发核对的条数。只读 GET，取 4 是为了压住总耗时又不把上游打满。 */
+export const PREFLIGHT_CONCURRENCY = 4
+
 /** 平台使用者所在时区。发布周期编码按它生成，必须与批次列表里的「创建时间」对得上。 */
 export const DEFAULT_TIME_ZONE = 'Asia/Shanghai'
 /** 公司 Linky 取数接口。与 Worker 的 LINKY_API_BASE_URL 配置模板保持一致。 */
@@ -265,6 +295,21 @@ export function loadConfig(env = process.env) {
       healthTimeoutMs: integer(env, 'CRP_LINKY_HEALTH_TIMEOUT_MS', 8_000),
       /** 健康探针用的项目组，必须真实存在（探不存在的组检测不出凭据失效）。 */
       healthWorkspace: optional(env, 'CRP_LINKY_HEALTH_WORKSPACE', DEFAULT_LINKY_HEALTH_WORKSPACE),
+      /**
+       * 一次提交里**全部需求**核对的总预算（V1.66）。
+       *
+       * 单条的超时管不住多条：20 条里只要有几条是错编号，每条就要吃掉 31.8 秒，串起来
+       * 远超调用方客户端通常的 60 秒上限 —— 使用者看到的是 "tool call failed"，连哪几条
+       * 有问题都不知道。预算用完时未核对的部分**如实标成未核对**交给使用者判断，
+       * 而不是让整次调用挂死。
+       */
+      preflightBudgetMs: (() => {
+        const value = integer(env, 'CRP_PREFLIGHT_BUDGET_MS', 45_000)
+        if (value < 5_000) {
+          throw new ConfigError(`CRP_PREFLIGHT_BUDGET_MS 至少 5000（5 秒），当前是 ${value}`)
+        }
+        return value
+      })(),
     },
     confirm: {
       ttlMs: confirmTtlMs,

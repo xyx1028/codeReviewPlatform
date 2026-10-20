@@ -253,12 +253,17 @@ test('权限不足时给出可照着做的提示', () => {
   )
 })
 
-test('工具定义：只有需求编号必填 + 枚举约束 + 不开放模型参数', () => {
+test('工具定义：编号二选一 + 枚举约束 + 不开放模型参数', () => {
   assert.equal(TOOL_NAME, 'start_requirement_review')
   // V1.56：workspace_name 改可选（可按编号反查）。
   // V1.63：branch 与 commit_window_days 也改可选（默认 release + 14 天）——
   // 默认值不沉默，确认卡片会写明用了默认并列出替代项，所以"可选"不等于"替你偷偷决定"。
-  assert.deepEqual(TOOL_DEFINITION.inputSchema.required, ['story_code'])
+  // V1.66：story_code 与 story_codes 二选一，schema 的 required 因此为空。
+  assert.deepEqual(TOOL_DEFINITION.inputSchema.required, [])
+  assert.ok('story_code' in TOOL_DEFINITION.inputSchema.properties)
+  assert.equal(TOOL_DEFINITION.inputSchema.properties.story_codes.type, 'array')
+  assert.equal(TOOL_DEFINITION.inputSchema.properties.story_codes.minItems, 1)
+  assert.equal(TOOL_DEFINITION.inputSchema.properties.story_codes.maxItems, 20)
   assert.ok('workspace_name' in TOOL_DEFINITION.inputSchema.properties)
   assert.ok('confirmation_token' in TOOL_DEFINITION.inputSchema.properties)
   assert.deepEqual(TOOL_DEFINITION.inputSchema.properties.branch.enum, [

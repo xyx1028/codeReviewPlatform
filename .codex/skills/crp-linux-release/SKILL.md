@@ -26,6 +26,8 @@ description: 代码评审／代码审核平台 codeReviewPlatform 的线上设�
 
 ## 日常入口
 
+工程根目录的 [Linux发布说明.md](../../../Linux发布说明.md) 保存可直接复制的日常发布命令；用户明确要求直接正式发布，默认不指定镜像，无需先预览。
+
 前提：用户已提交/推送 GitLab `release`，对应的 CI 应用镜像已构建成功。流水线只构建镜像；K8s 部署节点不负责这台 Linux 的 Docker Compose。
 
 让用户在 `kduser@v-agentcon-env` 的宿主机终端执行（跳板机 SSH 和虚拟机控制台都可操作同一机器；不是在某个业务容器内部执行）：
@@ -34,12 +36,6 @@ description: 代码评审／代码审核平台 codeReviewPlatform 的线上设�
 cd /home/kduser/crp/app
 
 git pull --ff-only origin release && \
-bash deploy/supabase-selfhost/scripts/release.sh --dry-run
-```
-
-预览成功后执行：
-
-```bash
 bash deploy/supabase-selfhost/scripts/release.sh --apply
 ```
 

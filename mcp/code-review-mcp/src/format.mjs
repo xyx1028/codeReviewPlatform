@@ -37,21 +37,86 @@ function peopleOrDash(names) {
 }
 
 /**
+ * 一条需求的信息块。确认卡片和多条列表共用，保证两种形态下字段与顺序完全一致。
+ *
+ * `listedOnly` 是按发布窗口枚举出来的形态（V1.68）：字段只有需求列表给的那些，
+ * **不能**打印正文字数、附件数与三类负责人 —— 没有逐条打开需求详情，印一个
+ * "正文：空；附件：0 个"出来就是假的。
+ */
+function storyLines(story, { indent = '  ', listedOnly = false } = {}) {
+  if (listedOnly) {
+    return [
+      `${indent}需求编号：${labelOrDash(story.story_code)}`,
+      `${indent}需求名称：${labelOrDash(story.title)}`,
+      `${indent}当前状态：${labelOrDash(story.status_label)}` +
+        `　负责人：${labelOrDash(story.assignee_name)}` +
+        `　迭代：${labelOrDash(story.iteration)}`,
+    ]
+  }
+  const lines = [
+    `${indent}需求编号：${labelOrDash(story.story_code)}`,
+    `${indent}需求名称：${labelOrDash(story.title)}`,
+    `${indent}所属项目组：${labelOrDash(story.workspace_name)}`,
+    `${indent}当前状态：${labelOrDash(story.status_label)}`,
+    `${indent}迭代：${labelOrDash(story.iteration)}`,
+    `${indent}发布窗口：${labelOrDash(story.release_window)}`,
+    `${indent}关联特性：${labelOrDash(story.subject_name)}`,
+    `${indent}需求负责人：${peopleOrDash(story.req_owners)}`,
+    `${indent}开发负责人：${peopleOrDash(story.dev_owners)}`,
+    `${indent}测试负责人：${peopleOrDash(story.test_owners)}`,
+    `${indent}需求正文：${story.body_chars > 0 ? `${story.body_chars} 字` : '空'}` +
+      `；附件：${story.attachment_count} 个`,
+  ]
+  if (story.team_resolve_error !== null && story.team_resolve_error !== undefined) {
+    lines.push(`${indent}⚠️ 负责人解析降级：${story.team_resolve_error}（上面的人名可能不全）`)
+  }
+  return lines
+}
+
+/**
  * 提交前的确认卡片。
  *
- * 三条硬规矩：
+ * 四条硬规矩：
  *
  * 1. **开头必须说清"还没提交"。** 这是整段文本里最容易被误读的一点 —— 使用者看到一大片
  *    需求信息，很容易以为已经在跑了。
  * 2. **纠正过的字段必须逐条写出"你给的"和"实际是"。** 不沉默纠正：他可能本来就想评审
  *    另一个组的需求，沉默改掉等于替他做了决定。
  * 3. **没核对成就不许写得像核对过。** `UNVERIFIED` 的卡片要明说哪一项没核对、为什么。
+ * 4. **多条时第一行必须写清条数。**（V1.66）条数直接等于额度消耗的倍数，使用者不该
+ *    从一长串编号里自己去数。没核对成的那几条也要单独列出来，不能混在"将要评审的需求"
+ *    里让人以为都查过了。
  */
-export function formatConfirmationCard({ status, story, corrections, reason, request, token }) {
+export function formatConfirmationCard({
+  status,
+  story,
+  stories = null,
+  corrections,
+  reason,
+  request,
+  token,
+  /** 按发布窗口枚举出来的（V1.68）：字段来自需求列表，没有逐条打开详情。 */
+  listedOnly = false,
+}) {
   const lines = []
+  /** 多条形态由 `stories` 决定；单条沿用 `story`，文案与改造前一致。 */
+  const entries = Array.isArray(stories) ? stories : null
+  const count = entries === null ? 1 : entries.length
+  const releaseWindow = labelOrDash(request.release_window)
 
-  if (status === 'VERIFIED') {
-    lines.push('🔎 **还没有提交。** 以下是平台从 Linky 查到的需求，请让用户确认后再提交。')
+  if (listedOnly) {
+    lines.push(
+      `🔎 **还没有提交。** 「${labelOrDash(request.workspace_name)}」发布窗口 ` +
+        `${releaseWindow} 下共 **${count} 条**需求，全部列在下面。请让用户确认后再提交` +
+        '（它们会进入**同一个**批次）。',
+    )
+  } else if (status === 'VERIFIED') {
+    lines.push(
+      count > 1
+        ? `🔎 **还没有提交。** 以下是平台从 Linky 查到的 ${count} 条需求，请让用户确认后再提交` +
+          '（它们会进入**同一个**批次）。'
+        : '🔎 **还没有提交。** 以下是平台从 Linky 查到的需求，请让用户确认后再提交。',
+    )
   } else {
     lines.push('⚠️ **还没有提交，而且这次没能核对成功。** 请把下面的情况告诉用户，由他决定是否继续。')
   }
@@ -62,25 +127,51 @@ export function formatConfirmationCard({ status, story, corrections, reason, req
     lines.push('')
   }
 
-  if (story !== null && story !== undefined) {
-    lines.push('将要评审的需求：')
-    lines.push(`  需求编号：${labelOrDash(story.story_code)}`)
-    lines.push(`  需求名称：${labelOrDash(story.title)}`)
-    lines.push(`  所属项目组：${labelOrDash(story.workspace_name)}`)
-    lines.push(`  当前状态：${labelOrDash(story.status_label)}`)
-    lines.push(`  迭代：${labelOrDash(story.iteration)}`)
-    lines.push(`  发布窗口：${labelOrDash(story.release_window)}`)
-    lines.push(`  关联特性：${labelOrDash(story.subject_name)}`)
-    lines.push(`  需求负责人：${peopleOrDash(story.req_owners)}`)
-    lines.push(`  开发负责人：${peopleOrDash(story.dev_owners)}`)
-    lines.push(`  测试负责人：${peopleOrDash(story.test_owners)}`)
-    lines.push(
-      `  需求正文：${story.body_chars > 0 ? `${story.body_chars} 字` : '空'}` +
-        `；附件：${story.attachment_count} 个`,
-    )
-    if (story.team_resolve_error !== null && story.team_resolve_error !== undefined) {
-      lines.push(`  ⚠️ 负责人解析降级：${story.team_resolve_error}（上面的人名可能不全）`)
+  if (entries !== null) {
+    const checked = entries.filter((entry) => entry.story !== null && entry.story !== undefined)
+    const unchecked = entries.filter((entry) => entry.story === null || entry.story === undefined)
+    if (checked.length > 0) {
+      lines.push(
+        listedOnly
+          ? `将要评审的需求（${entries.length} 条，发布窗口 ${releaseWindow}，同一个批次）：`
+          : `将要评审的需求（${entries.length} 条，同一个批次）：`,
+      )
+      for (const [index, entry] of checked.entries()) {
+        lines.push(`${index + 1}. ${entry.story.story_code}  ${labelOrDash(entry.story.title)}`)
+        lines.push(...storyLines(entry.story, { indent: '     ', listedOnly }).slice(2))
+      }
+      lines.push('')
+      if (listedOnly) {
+        /*
+         * 这段不能省。
+         *
+         * 上面那些字段来自该项目组的需求列表 —— 和平台导入页用的是同一个来源，所以
+         * "这些需求存在、且属于这个组"是确定的。但**没有**逐条打开需求详情，所以
+         * 这里不知道每条有没有正文、几个附件；不说明的话，这张卡片看起来和逐条核对过
+         * 的那种一模一样。
+         */
+        lines.push(
+          '以上字段来自该项目组的需求列表（与平台「原始需求导入」同一个来源），' +
+            '所以这些需求确实存在、且属于这个项目组。但平台没有逐条打开需求详情，' +
+            '因此这里不显示每条的正文字数与附件数 —— 个别需求可能正文为空、' +
+            '验收口径全在附件里，那种需求的一致性结论会更弱。',
+        )
+        lines.push('')
+      }
     }
+    if (unchecked.length > 0) {
+      lines.push(`没能核对的需求（${unchecked.length} 条，仍会一起提交）：`)
+      for (const entry of unchecked) {
+        lines.push(
+          `  · ${entry.story_code}：${entry.reason?.message ?? '未知原因'}` +
+            `（${entry.reason?.code ?? '未知'}）`,
+        )
+      }
+      lines.push('')
+    }
+  } else if (story !== null && story !== undefined) {
+    lines.push('将要评审的需求：')
+    lines.push(...storyLines(story))
     lines.push('')
   }
 
@@ -95,6 +186,10 @@ export function formatConfirmationCard({ status, story, corrections, reason, req
       `${request.window_is_default === true ? '  ← 默认值' : ''}`,
   )
   lines.push(`  项目组（提交时实际使用）：${labelOrDash(request.workspace_name)}`)
+  if (listedOnly) {
+    // 两个"窗口"刻意写全称：发布窗口是需求的属性，提交时间窗口是代码的追溯天数。
+    lines.push(`  发布窗口（筛选条件）：${releaseWindow} —— 该窗口下全部 ${count} 条需求`)
+  }
   lines.push('')
 
   /**
@@ -126,16 +221,19 @@ export function formatConfirmationCard({ status, story, corrections, reason, req
   if (Array.isArray(corrections) && corrections.length > 0) {
     lines.push('⚠️ 平台更正/提醒了以下内容，请一并告诉用户：')
     for (const item of corrections) {
-      if (item.field === 'requirement_content') {
-        lines.push(`  · ${item.resolved}。${item.note}`)
+      // 多条提交时必须指明是哪一条 —— 不然"正文为空"这种提醒落在 5 条需求上，
+      // 使用者无从知道该去补哪一条。
+      const where = item.story_code ? `${item.story_code}：` : ''
+      if (item.field === 'requirement_content' || item.field === 'story_in_workspace') {
+        lines.push(`  · ${where}${item.resolved}。${item.note}`)
         continue
       }
       // 「没填」和「填错了」要分开说：前者是正常用法，用"你给的是（未填）"描述它
       // 会让使用者以为自己做错了什么。
       lines.push(
         item.given === null || item.given === undefined || item.given === ''
-          ? `  · ${item.field}：已自动填为「${item.resolved}」。${item.note}`
-          : `  · ${item.field}：你给的是「${item.given}」，实际是「${item.resolved}」。${item.note}`,
+          ? `  · ${where}${item.field}：已自动填为「${item.resolved}」。${item.note}`
+          : `  · ${where}${item.field}：你给的是「${item.given}」，实际是「${item.resolved}」。${item.note}`,
       )
     }
     lines.push('')
@@ -146,35 +244,99 @@ export function formatConfirmationCard({ status, story, corrections, reason, req
   lines.push('')
   lines.push(`confirmation_token: ${token.value}`)
   lines.push('')
-  lines.push('提交会真实消耗模型额度。用户没有明确同意之前，不要自行带上令牌提交。')
+  lines.push(
+    count > 1
+      ? `提交会真实消耗模型额度，这次是 ${count} 条需求的量。用户没有明确同意之前，不要自行带上令牌提交。`
+      : '提交会真实消耗模型额度。用户没有明确同意之前，不要自行带上令牌提交。',
+  )
   lines.push(
     '用户要改代码基线或时间窗口的话，带上他指定的值重新调用一次（不带令牌）—— ' +
       '参数变了旧令牌就失效，需要重新确认一遍。',
   )
+  if (count > 1) {
+    lines.push(
+      '令牌绑定的是这一整组编号（顺序无关）。增加或去掉任何一条都必须重新核对，' +
+        '不能拿这张令牌去提交别的组合。',
+    )
+  }
+  if (listedOnly) {
+    /*
+     * 必须说清"绑定的是编号而不是窗口"。
+     *
+     * Linky 是实时的：这两步之间窗口里可能多出一条需求，而那一条没人确认过。所以提交的
+     * 永远是上面列出的这一组；要带上新增的那条，只能重新查一次、重新确认。
+     */
+    lines.push(
+      '第二次调用**只需要带 confirmation_token**（不必回传上面那些编号）。' +
+        '令牌锁定的是刚才列出的这一组需求，而不是"这个窗口"这个条件 —— 如果这期间窗口里' +
+        '新增了需求，它不会被这次提交带上；要包含它就重新调用一次（不带令牌）再确认。',
+    )
+  }
 
   return lines.join('\n')
 }
 
 /** 校验明确判定参数是错的 —— 拒绝提交，平台上不会留下任何批次。 */
-export function formatPreflightRejection({ reason, request }) {
-  return [
+export function formatPreflightRejection({ reason, request, facet = null }) {
+  const codes = Array.isArray(request.story_codes)
+    ? request.story_codes
+    : [request.story_code].filter((code) => code !== null && code !== undefined && code !== '')
+  const window =
+    request.release_window === null || request.release_window === undefined
+      ? ''
+      : String(request.release_window).trim()
+  const lines = [
     '❌ 没有提交，平台上没有创建任何评审。',
     '',
     `原因（${reason.code}）：${reason.message}`,
     '',
-    `你给的参数：需求编号 ${labelOrDash(request.story_code)}` +
+  ]
+  /*
+   * 窗口拒绝时把真实窗口列出来。
+   *
+   * "这个窗口没有需求"和"窗口写错了"在返回里长得一样，而调用方的模型看不到平台页面上
+   * 那个下拉框。不给它真实取值，它只会再猜一次。
+   */
+  if (facet !== null && Array.isArray(facet.windows) && facet.windows.length > 0) {
+    lines.push('这个项目组实际有这些发布窗口（新的在前）：')
+    for (const entry of facet.windows.slice(0, 12)) {
+      lines.push(`  · ${entry.window}（${entry.count} 条）`)
+    }
+    if (facet.windows.length > 12) {
+      lines.push(`  …另有 ${facet.windows.length - 12} 个更早的窗口未列出`)
+    }
+    if (facet.missing > 0) {
+      lines.push(`  （另有 ${facet.missing} 条需求没有填发布窗口，按窗口筛不会出现）`)
+    }
+    lines.push('')
+  }
+  lines.push(
+    `你给的参数：${
+      window === ''
+        ? `需求编号 ${codes.length > 0 ? codes.join('、') : '（空）'}${
+            codes.length > 1 ? `（共 ${codes.length} 条）` : ''
+          }`
+        : `发布窗口 ${window}`
+    }` +
       `，项目组 ${labelOrDash(request.workspace_name)}` +
       `，分支 ${labelOrDash(request.branch)}` +
       `，窗口 ${labelOrDash(request.commit_window_days)} 天`,
-    '',
-    '请和用户核对需求编号后重试。只给需求编号也可以 —— 项目组可以由平台反查，不必自己填。',
-  ].join('\n')
+  )
+  lines.push('')
+  lines.push(
+    window === ''
+      ? '请和用户核对需求编号后重试。只给需求编号也可以 —— 项目组可以由平台反查，不必自己填。'
+      : '请和用户核对项目组与发布窗口后重试；也可以用 search_requirements 先看一眼这个组有哪些窗口。',
+  )
+  return lines.join('\n')
 }
 
 /** 错误码 → 处置建议。缺席的码原样透出，绝不吞掉。 */
 const ERROR_HINTS = {
-  STORY_CODE_REQUIRED: '需要需求编号（story_code）。',
+  STORY_CODE_REQUIRED:
+    '需要需求编号：story_code（一条）或 story_codes（多条，例如 ["US-2026-000001","US-2026-000002"]）给一个即可。',
   STORY_CODE_INVALID: '需求编号不合法。',
+  STORY_CODES_INVALID: 'story_codes 必须是字符串数组。',
   WORKSPACE_NAME_REQUIRED: '需要需求所在的项目组（workspace_name）。',
   WORKSPACE_ID_INVALID: 'workspace_id 不是合法 UUID；不确定时不要填。',
   BRANCH_INVALID: '目标分支只能是 feature_dev / feature_sit / release。',
@@ -212,6 +374,9 @@ export function describePlatformError(error) {
 
 /** 受理成功的回执。字段顺序固定，便于使用者和平台页面逐项对照。 */
 export function formatSubmissionReceipt(receipt) {
+  const codes = Array.isArray(receipt.story_codes)
+    ? receipt.story_codes
+    : [receipt.story_code].filter((code) => code !== null && code !== undefined)
   return [
     '✅ 评审任务已成功受理并落库。',
     receipt.recovered
@@ -221,13 +386,22 @@ export function formatSubmissionReceipt(receipt) {
       ? '⚠️ 注意：这次**没有**在提交前核对需求（原因见上一步的提示）。如果需求编号或项目组不对，' +
         '平台侧取需求会失败，批次会停在"需求准备失败"。'
       : null,
+    receipt.verification === 'LISTED'
+      ? '核对方式：这些需求来自该项目组的需求列表（按发布窗口筛选），所以它们确实存在、' +
+        '且属于这个项目组；平台没有逐条打开需求详情，因此提交前不知道每条的正文与附件情况。'
+      : null,
     '',
     `批次编号（review_batch.id）：${receipt.batch_id}`,
     `批次名称：${receipt.batch_name}`,
     `发布周期编码：${receipt.week_code}`,
     `任务受理编号（需求导入单 linky_batch_import_request.id）：${receipt.import_request_id}`,
     '',
-    `需求编号：${receipt.story_code}`,
+    receipt.release_window
+      ? `发布窗口：${receipt.release_window}（提交的是确认时该窗口下的全部 ${codes.length} 条需求）`
+      : null,
+    codes.length > 1
+      ? `需求（${codes.length} 条，同一个批次）：\n${codes.map((code) => `  · ${code}`).join('\n')}`
+      : `需求编号：${codes[0] ?? '（空）'}`,
     receipt.story_title ? `需求名称：${receipt.story_title}` : null,
     `项目组：${receipt.workspace_name}`,
     `目标分支：${receipt.branch}`,
@@ -260,10 +434,13 @@ export function formatSubmissionFailure(error) {
  * 立即重提，否则同一条需求会被评审两次、花两份额度。
  */
 export function formatSubmissionUnknown(error) {
+  const codes = Array.isArray(error.storyCodes) ? error.storyCodes : []
   return [
     '⚠️ 无法确认这次提交的结果，请不要立即重复提交。',
     '',
-    `需求编号：${error.storyCode}`,
+    codes.length > 1
+      ? `需求编号（${codes.length} 条）：${codes.join('、')}`
+      : `需求编号：${codes[0] ?? '（空）'}`,
     `批次编号（review_batch.id）：${error.batchId}`,
     `平台详情链接：${error.batchUrl}`,
     '',

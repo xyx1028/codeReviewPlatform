@@ -161,7 +161,7 @@ test('连核对都做不到：保留批次，抛出"结果不明"', async () => 
     () => submitRequirementReview(client, CONFIG, VALID_ARGS, { settle: fastSettle() }),
     (error) => {
       assert.ok(error instanceof SubmissionStateUnknownError)
-      assert.equal(error.storyCode, 'F-123456')
+      assert.deepEqual(error.storyCodes, ['F-123456'])
       return true
     },
   )

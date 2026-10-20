@@ -19,9 +19,12 @@ import {
   BRANCH_LABELS,
   DESCRIBE_OPTIONS_TOOL,
   LIST_WORKSPACES_TOOL,
+  SEARCH_MAX_PAGES,
   SEARCH_REQUIREMENTS_TOOL,
+  filterByReleaseWindow,
   filterRequirements,
   formatSubmitOptions,
+  releaseWindowFacet,
   toRequirementRow,
 } from '../src/query-tools.mjs'
 import { LINKY_WORKSPACE_PRESETS, filterWorkspaces } from '../src/workspaces.mjs'
@@ -228,6 +231,135 @@ test('limit 超出 schema 范围时被门禁拦住（不是悄悄截断）', asy
   })
   assert.equal(result.isError, true)
   assert.match(result.content[0].text, /limit/)
+})
+
+// ------------------------------------------------------- 发布窗口（V1.67）
+
+test('发布窗口精确匹配，忽略首尾空白与大小写；不做子串匹配', () => {
+  const rows = LIST_ITEMS.map(toRequirementRow)
+  assert.equal(filterByReleaseWindow(rows, 'R20261030').length, 1)
+  assert.equal(filterByReleaseWindow(rows, ' r20261030 ').length, 1, '空白与大小写不该影响')
+  assert.equal(filterByReleaseWindow(rows, '').length, 2, '空值等于不筛')
+  // 子串会让 R2026 命中整年的窗口，而多出来的需求会被原样提交去评审。
+  assert.equal(filterByReleaseWindow(rows, 'R2026').length, 0)
+  assert.equal(filterByReleaseWindow(rows, 'R20260101').length, 0)
+})
+
+test('窗口分布：倒序、带条数，没填窗口的单独计数不并进任何窗口', () => {
+  const rows = [
+    ...LIST_ITEMS.map(toRequirementRow),
+    toRequirementRow({ code: 'US-3', title: '三', release_window: 'R20261030' }),
+    toRequirementRow({ code: 'US-4', title: '四', release_window: null }),
+  ]
+  const facet = releaseWindowFacet(rows)
+  assert.deepEqual(facet.windows, [
+    { window: 'R20261030', count: 2 },
+    { window: 'R20261018', count: 1 },
+  ])
+  assert.equal(facet.missing, 1)
+})
+
+test('按发布窗口查：只回该窗口的需求，表头写明筛选条件', async () => {
+  const { reg } = registry()
+  const result = await reg.call(SEARCH_REQUIREMENTS_TOOL, {
+    workspace_name: '工具开发组',
+    release_window: 'R20261030',
+  })
+  const text = result.content[0].text
+  assert.equal(result.isError, false)
+  assert.match(text, /发布窗口「R20261030」/)
+  assert.match(text, /共 1 条需求/)
+  assert.match(text, /US-2026-017341/)
+  assert.ok(!text.includes('US-2026-042424'), '别的窗口的需求不该出现')
+  // 命中时不再重复列窗口分布（噪音）。
+  assert.ok(!text.includes('实际有这些发布窗口'))
+  assert.match(text, /story_codes/, '要告诉模型可以把多条一次提交')
+})
+
+test('按窗口查时翻页上限提到 5 页：本地筛必须覆盖整组', async () => {
+  const { reg, linky } = registry()
+  await reg.call(SEARCH_REQUIREMENTS_TOOL, {
+    workspace_name: '工具开发组',
+    release_window: 'R20261030',
+  })
+  assert.equal(linky.calls[0].maxPages, SEARCH_MAX_PAGES)
+  assert.equal(SEARCH_MAX_PAGES, 5)
+})
+
+test('窗口写错时不说"没有需求"，而是列出这个组真实有哪些窗口', async () => {
+  const { reg } = registry()
+  const result = await reg.call(SEARCH_REQUIREMENTS_TOOL, {
+    workspace_name: '工具开发组',
+    release_window: 'R20261106',
+  })
+  const text = result.content[0].text
+  assert.match(text, /没有发布窗口为「R20261106」的需求/)
+  assert.match(text, /实际有这些发布窗口/)
+  assert.match(text, /R20261030（1 条）/)
+  assert.match(text, /R20261018（1 条）/)
+  assert.match(text, /原样取值重查/)
+})
+
+test('不指定窗口时顺手给出窗口分布，并说明可以带参数再查', async () => {
+  const { reg } = registry()
+  const result = await reg.call(SEARCH_REQUIREMENTS_TOOL, { workspace_name: '工具开发组' })
+  const text = result.content[0].text
+  assert.match(text, /实际有这些发布窗口/)
+  assert.match(text, /可以带 release_window 再查一次/)
+})
+
+test('窗口可以和负责人、关键字叠加（且的关系）', async () => {
+  const { reg } = registry()
+  const hit = await reg.call(SEARCH_REQUIREMENTS_TOOL, {
+    workspace_name: '工具开发组',
+    release_window: 'R20261030',
+    keyword: '技能',
+  })
+  assert.match(hit.content[0].text, /共 1 条需求/)
+  const miss = await reg.call(SEARCH_REQUIREMENTS_TOOL, {
+    workspace_name: '工具开发组',
+    release_window: 'R20261030',
+    keyword: 'nacos',
+  })
+  assert.match(miss.content[0].text, /共 0 条需求/)
+  assert.match(miss.content[0].text, /没有符合条件的需求/)
+})
+
+test('按窗口查时 limit 默认 100：不给一份被截断的窗口清单', async () => {
+  const many = Array.from({ length: 60 }, (_item, index) => ({
+    code: `US-2026-00${String(index).padStart(4, '0')}`,
+    title: `需求 ${index}`,
+    status: '计划',
+    release_window: 'R20261106',
+  }))
+  const { reg } = registry({ linky: linkyStub({ items: many, total: 60 }) })
+  const windowed = await reg.call(SEARCH_REQUIREMENTS_TOOL, {
+    workspace_name: '工具开发组',
+    release_window: 'R20261106',
+  })
+  assert.ok(!windowed.content[0].text.includes('未显示'), '60 条应全部列出')
+
+  // 不按窗口查时默认仍是 20 —— 老行为不变。
+  const plain = await reg.call(SEARCH_REQUIREMENTS_TOOL, { workspace_name: '工具开发组' })
+  assert.match(plain.content[0].text, /下面列出前 20 条/)
+  assert.match(plain.content[0].text, /还有 40 条未显示/)
+
+  // 显式给了 limit 就以调用方为准。
+  const explicit = await reg.call(SEARCH_REQUIREMENTS_TOOL, {
+    workspace_name: '工具开发组',
+    release_window: 'R20261106',
+    limit: 5,
+  })
+  assert.match(explicit.content[0].text, /下面列出前 5 条/)
+})
+
+test('工具描述必须写明可以按发布窗口筛，否则调用方的模型不会用', () => {
+  const { reg } = registry()
+  const search = reg.definitions.find((tool) => tool.name === SEARCH_REQUIREMENTS_TOOL)
+  assert.match(search.description, /发布窗口/)
+  assert.match(search.description, /release_window/)
+  assert.equal(search.inputSchema.properties.release_window.type, 'string')
+  assert.equal(search.annotations.readOnlyHint, true, '按窗口查仍然是只读')
 })
 
 // ---------------------------------------------------------------- 参数说明

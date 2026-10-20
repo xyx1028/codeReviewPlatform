@@ -26,6 +26,9 @@ const SUPPORTED_KEYWORDS = new Set([
   'title',
   'minimum',
   'maximum',
+  'items',
+  'minItems',
+  'maxItems',
 ])
 
 export class SchemaViolation {
@@ -140,6 +143,52 @@ function validateValue(schema, value, path, violations) {
       )
       return
     }
+  } else if (schema.type === 'array') {
+    /*
+     * 刻意不接受"单个值当成一元数组"。
+     *
+     * 模型把 `story_codes` 填成一个字符串，往往说明它其实只打算提一条 —— 那它该用
+     * `story_code`。悄悄包成数组会让"它没分清这两个参数"这件事消失，而这两个参数
+     * 的区别（一条 / 多条）正好决定这次要花几份模型额度。
+     */
+    if (!Array.isArray(value)) {
+      violations.push(
+        new SchemaViolation({
+          path,
+          message: '必须是数组（例如 ["US-2026-000001","US-2026-000002"]）',
+          expected: 'array',
+          received: `${jsonType(value)} ${describeValue(value)}`,
+        }),
+      )
+      return
+    }
+    if (typeof schema.minItems === 'number' && value.length < schema.minItems) {
+      violations.push(
+        new SchemaViolation({
+          path,
+          message: schema.minItems === 1 ? '至少要有 1 项' : `至少 ${schema.minItems} 项`,
+          received: `${value.length} 项`,
+        }),
+      )
+      return
+    }
+    if (typeof schema.maxItems === 'number' && value.length > schema.maxItems) {
+      violations.push(
+        new SchemaViolation({
+          path,
+          message: `最多 ${schema.maxItems} 项（当前 ${value.length} 项）`,
+          received: `${value.length} 项`,
+        }),
+      )
+      return
+    }
+    if (typeof schema.items === 'object' && schema.items !== null) {
+      // 逐项报下标：只说"数组里有东西不对"的话，模型只能整个重填。
+      for (const [index, item] of value.entries()) {
+        validateValue(schema.items, item, `${path}[${index}]`, violations)
+      }
+    }
+    return
   } else if (schema.type === 'object') {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
       violations.push(

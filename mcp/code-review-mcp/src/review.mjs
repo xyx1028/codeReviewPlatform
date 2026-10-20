@@ -11,15 +11,24 @@
  *
  * 两个刻意的选择：
  *
- * 1. **一次提交一个独立批次。** 批次是平台里唯一能同时框住"需求集合 + 代码快照 + 模型"
- *    的东西；把多次提交塞进同一批次会让"这次评审的结论"没有边界。
+ * 1. **一次调用 = 一个独立批次 = 一张导入单。** 可以带多条需求（V1.66），但它们共享
+ *    同一个批次：批次是平台里唯一能同时框住"需求集合 + 代码快照 + 模型"的东西，一次
+ *    提交里的几条需求本来就应该在同一个边界里比对。反过来，把**多次**提交塞进同一个
+ *    批次仍然不做 —— 那会让"这次评审的结论"没有边界。
+ *    多条需求必须属于同一个项目组：导入单只有一个 `workspace_name`，Worker 也只在那个
+ *    组的列表里找需求。跨组的拒绝发生在提交之前（见 preflight.mjs）。
  * 2. **受理编号用导入单 id，不伪造分析任务 id。** 分析 Job 是需求冻结完成后由数据库
  *    自动创建的，提交那一刻它还不存在。回一个"看起来像 job id"的东西只会让使用者
  *    拿着查不到的编号去平台里找。
  */
 
 import { PlatformError } from './platform.mjs'
-import { DEFAULT_TIME_ZONE, SUPPORTED_BRANCHES, SUPPORTED_COMMIT_WINDOWS } from './config.mjs'
+import {
+  DEFAULT_TIME_ZONE,
+  MAX_STORIES_PER_SUBMIT,
+  SUPPORTED_BRANCHES,
+  SUPPORTED_COMMIT_WINDOWS,
+} from './config.mjs'
 
 /** 核对之间的等待。留出注入点，免得单测真的睡几秒。 */
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -126,6 +135,78 @@ export function normalizeStoryCode(input) {
     })
   }
   return code
+}
+
+/**
+ * 归一化这次要评审的编号集合（V1.66）。
+ *
+ * 两个入口的并集：`story_codes`（多条）与 `story_code`（单条简写）。同时给出不算错 ——
+ * 客户端把第一次的入参原样回传、再补一个数组，是很常见的行为；判它参数冲突只会让一次
+ * 本来说得通的调用失败。
+ *
+ * 去重保留**首次出现的顺序**：卡片、日志和回执按使用者给的顺序读起来才对得上。
+ * 落库时顺序无关紧要 —— `request_linky_batch_import` 自己会 `distinct … order by code`。
+ */
+export function normalizeStoryCodes(input, { max = MAX_STORIES_PER_SUBMIT } = {}) {
+  const raw = []
+  if (Array.isArray(input?.story_codes)) raw.push(...input.story_codes)
+  else if (input?.story_codes !== undefined && input?.story_codes !== null) {
+    throw new PlatformError('story_codes 必须是数组，例如 ["US-2026-000001","US-2026-000002"]。', {
+      code: 'STORY_CODES_INVALID',
+    })
+  }
+  if (input?.story_code !== undefined && input?.story_code !== null) raw.push(input.story_code)
+
+  const codes = []
+  const seen = new Set()
+  for (const entry of raw) {
+    const code = String(entry ?? '').trim()
+    if (code === '') continue
+    const normalized = normalizeStoryCode(code)
+    if (seen.has(normalized)) continue
+    seen.add(normalized)
+    codes.push(normalized)
+  }
+
+  if (codes.length === 0) {
+    throw new PlatformError(
+      '缺少需求编号。给 story_code（一条）或 story_codes（多条，例如 ' +
+        '["US-2026-000001","US-2026-000002"]）其中之一即可。',
+      { code: 'STORY_CODE_REQUIRED' },
+    )
+  }
+  if (codes.length > max) {
+    throw new PlatformError(
+      `一次最多提交 ${max} 条需求，这次给了 ${codes.length} 条。` +
+        '限制来自提交前逐条核对的耗时（再多会超过调用方客户端的超时）。' +
+        '更大批量请用平台页面的「原始需求导入」勾选导入。',
+      { code: 'STORY_CODES_TOO_MANY' },
+    )
+  }
+  return codes
+}
+
+/**
+ * 批次名。
+ *
+ * 尽量把全部编号写进去 —— 评审列表里那一列是使用者唯一能分辨"这个批次装了什么"的地方。
+ * `review_batch.name` 的上限是 120 字符，装不下时退化成「首条 等 N 条」而不是硬截断：
+ * 截断会在列表里留下一个残缺编号，看起来像数据坏了。
+ *
+ * 按发布窗口提交时（V1.68）直接写窗口 + 条数：那才是使用者心里这个批次的名字，
+ * 而 30 多个编号在列表那一列里无论如何也放不下。
+ */
+export function buildBatchName(prefix, codes, { maxLength = 120, releaseWindow = null } = {}) {
+  const base = `${prefix}：`
+  const window = String(releaseWindow ?? '').trim()
+  if (window !== '') {
+    const named = `${base}${window} 共 ${codes.length} 条需求`
+    return named.length <= maxLength ? named : named.slice(0, maxLength)
+  }
+  const full = `${base}${codes.join('、')}`
+  if (full.length <= maxLength) return full
+  const summary = `${base}${codes[0]} 等 ${codes.length} 条`
+  return summary.length <= maxLength ? summary : summary.slice(0, maxLength)
 }
 
 export function normalizeWorkspaceName(input) {
@@ -237,12 +318,12 @@ export function buildBatchUrl(webUrl, batchId) {
  * 而不是让他在"已提交"和"没提交"之间猜。
  */
 export class SubmissionStateUnknownError extends Error {
-  constructor({ batchId, batchUrl, storyCode, cause }) {
+  constructor({ batchId, batchUrl, storyCodes, cause }) {
     super(`提交结果无法确认（批次 ${batchId}）`)
     this.name = 'SubmissionStateUnknownError'
     this.batchId = batchId
     this.batchUrl = batchUrl
-    this.storyCode = storyCode
+    this.storyCodes = Array.isArray(storyCodes) ? storyCodes : [storyCodes].filter(Boolean)
     this.cause = cause
   }
 }
@@ -312,8 +393,13 @@ export async function resolveSubmissionOutcome(
  * @param {object} [options.settle] 透传给 `resolveSubmissionOutcome`，测试用来跳过真实等待。
  */
 export async function submitRequirementReview(client, config, input, { settle } = {}) {
-  const storyCode = normalizeStoryCode(input.story_code)
+  const storyCodes = normalizeStoryCodes(input)
   const workspaceName = normalizeWorkspaceName(input.workspace_name)
+  /** 按发布窗口提交时带上它；按编号提交时为 null。只做记录，不参与筛选。 */
+  const releaseWindow = (() => {
+    const raw = String(input.release_window ?? '').trim()
+    return raw === '' ? null : raw
+  })()
   const branch = assertBranch(input.branch)
   const commitWindowDays = assertCommitWindow(input.commit_window_days)
   const workspaceId = (() => {
@@ -351,7 +437,7 @@ export async function submitRequirementReview(client, config, input, { settle } 
   const weekCode = requestedCycle ?? buildWeekCode(now, { timeZone })
 
   const batch = await client.insert('review_batch', {
-    name: `${config.defaults.batchNamePrefix}：${storyCode}`.slice(0, 120),
+    name: buildBatchName(config.defaults.batchNamePrefix, storyCodes, { releaseWindow }),
     week_code: weekCode,
     default_branch: branch,
     ai_model_config_id: model.id,
@@ -366,9 +452,15 @@ export async function submitRequirementReview(client, config, input, { settle } 
     const result = await client.rpc('request_linky_batch_import_for_analysis', {
       p_batch_id: batch.id,
       p_workspace_name: workspaceName,
-      p_story_codes: [storyCode],
+      p_story_codes: storyCodes,
       p_workspace_id: workspaceId,
-      p_release_window: null,
+      /*
+       * 按发布窗口提交时如实记下那个窗口（与平台页面上的那次选择落同一列）。
+       *
+       * Worker 不用它过滤 —— 它逐条在该项目组的列表里找 `story_codes`；这一列只在
+       * 某条需求自身窗口为空时作为兜底（见 complete_linky_batch_import）。
+       */
+      p_release_window: releaseWindow,
       p_commit_window_days: commitWindowDays,
     })
     importRequestId = typeof result === 'string' && result !== '' ? result : null
@@ -392,7 +484,7 @@ export async function submitRequirementReview(client, config, input, { settle } 
       throw new SubmissionStateUnknownError({
         batchId: batch.id,
         batchUrl,
-        storyCode,
+        storyCodes,
         cause: error,
       })
     }
@@ -403,9 +495,12 @@ export async function submitRequirementReview(client, config, input, { settle } 
     batch_name: batch.name,
     week_code: batch.week_code,
     import_request_id: importRequestId,
-    story_code: storyCode,
+    story_codes: storyCodes,
+    /** 单条提交时沿用这个字段，回执与日志的既有形态不变。 */
+    story_code: storyCodes.length === 1 ? storyCodes[0] : null,
     story_title: input.story_title ?? null,
     workspace_name: workspaceName,
+    release_window: releaseWindow,
     branch,
     commit_window_days: commitWindowDays,
     model: model.display_name,

@@ -9,6 +9,7 @@ import {
   BookOutlined,
   CloudServerOutlined,
   ClusterOutlined,
+  DownloadOutlined,
   FileSearchOutlined,
   HistoryOutlined,
   MenuOutlined,
@@ -24,10 +25,12 @@ import {
   App as AntApp,
   Button,
   Card,
+  Checkbox,
   Col,
   Descriptions,
   Divider,
   Drawer,
+  Dropdown,
   Empty,
   Form,
   Input,
@@ -57,6 +60,15 @@ import type { ColumnsType } from 'antd/es/table'
 import { Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { LinkyStoryPicker } from './components/linky/LinkyStoryPicker'
 import { groupImportFailures } from './components/linky/import-failures'
+// V1.69：评审报告下载复用 V1.20 已经写好并测过的「全选当前筛选结果」三态逻辑。
+import { selectAllState, toggleSelectAllFiltered } from './components/linky/story-selection'
+import {
+  buildReportMeta,
+  buildReviewReports,
+  downloadReviewReportsXlsx,
+  downloadReviewReportsZip,
+  reportScopeLabel,
+} from './lib/review-report'
 import { StoryBoardPage } from './pages/StoryBoardPage'
 // V1.23：产品代码问答首页。default export（页面内部自成一体，没有对外的子组件）。
 import CodeQaPage from './pages/CodeQaPage'
@@ -3514,6 +3526,18 @@ function ReviewListPage({ batchId }: { batchId: string }) {
     evidence: null,
     humanStatus: null,
   })
+  /** 勾选的需求 id。跨页保留（`preserveSelectedRowKeys`），用于下载报告。 */
+  const [selectedStoryIds, setSelectedStoryIds] = useState<string[]>([])
+  /**
+   * 分页受控。
+   *
+   * 筛选由本组件自己做（见 `filteredRows`），所以 antd 不会在筛选变化时帮我们重置页码 ——
+   * 不自己管的话，停在第 3 页时筛出 5 条会得到一张空表，表现就是"筛完什么都没有"。
+   */
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(10)
+  const [downloading, setDownloading] = useState(false)
+  const { message } = AntApp.useApp()
   const location = useLocation()
   const navigate = useNavigate()
   const workspaceQuery = useBatchWorkspace(batchId)
@@ -3572,6 +3596,97 @@ function ReviewListPage({ batchId }: { batchId: string }) {
 
   const toColumnFilters = (values: string[]) =>
     [...new Set(values)].sort((a, b) => a.localeCompare(b, 'zh-CN')).map((value) => ({ text: value, value }))
+
+  /**
+   * 筛选在这里一次算完，不交给 antd。
+   *
+   * 两个理由，第二个是硬的：
+   *   1. 下载范围必须和用户眼前看到的完全一致，而组件无法从 antd 内部拿到"筛完剩哪些"；
+   *      `onChange` 的 `currentDataSource` 只在用户动过表格之后才有 —— 从看板下钻过来
+   *      （URL 带 `?verdict=PARTIAL`）时一次都没动过，那时候范围数就会是错的。
+   *   2. 列头的 `filters` / `filteredValue` 照旧提供下拉与选中态，去掉 `onFilter` 即表示
+   *      "筛选由外部完成"，这是 antd 受控筛选的标准用法。
+   */
+  const filterActive = Boolean(verdict || owner || requirementHandler || testHandler || status)
+    || Object.values(localColumnFilters).some((values) => values !== null && values.length > 0)
+  const filteredRows = useMemo(() => {
+    const matches = (row: (typeof rows)[number]) => {
+      if (owner && !splitPeople(row.story.owners_text).includes(owner)) return false
+      if (requirementHandler && !splitPeople(row.story.requirement_handlers).includes(requirementHandler)) return false
+      if (testHandler && !splitPeople(row.story.test_handlers).includes(testHandler)) return false
+      if (status && storyStatusName(row.story) !== status) return false
+      if (verdict && (row.result?.verdict ?? 'UNANALYZED') !== verdict) return false
+      const { storyCode, storyName, evidence, humanStatus } = localColumnFilters
+      if (storyCode?.length && !storyCode.includes(row.story.story_code)) return false
+      if (storyName?.length && !storyName.includes(row.story.story_name)) return false
+      if (evidence?.length && !evidence.includes(String(row.evidenceCount))) return false
+      if (humanStatus?.length) {
+        const reviewed = Boolean(row.review)
+        if (humanStatus[0] === 'reviewed' ? !reviewed : reviewed) return false
+      }
+      return true
+    }
+    return rows.filter(matches)
+  }, [localColumnFilters, owner, requirementHandler, rows, status, testHandler, verdict])
+
+  /**
+   * 页码在渲染期夹取，而不是用 effect 去"重置"。
+   *
+   * 筛选可能来自三处：表格列头（会走 onChange，那里显式回到第 1 页）、URL 参数（从看板
+   * 下钻进来）、以及数据刷新后条数变少。后两种没有事件可挂，夹取是唯一不靠副作用的办法 ——
+   * 不夹的话，停在第 3 页时筛出 5 条会得到一张空表，表现就是"筛完什么都没有"。
+   */
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize))
+  const currentPage = Math.min(page, totalPages)
+
+  /** 勾选只在当前筛选结果内有效：筛掉的行不该被一个看不见的勾选带进报告。 */
+  const selectableIds = useMemo(() => filteredRows.map((row) => row.story.id), [filteredRows])
+  const effectiveSelectedIds = useMemo(() => {
+    const selectable = new Set(selectableIds)
+    return selectedStoryIds.filter((id) => selectable.has(id))
+  }, [selectableIds, selectedStoryIds])
+  const selectAll = selectAllState({ filteredCodes: selectableIds, selectedCodes: effectiveSelectedIds })
+  const downloadScope = reportScopeLabel({
+    selectedCount: effectiveSelectedIds.length,
+    filteredCount: filteredRows.length,
+    filterActive,
+  })
+
+  const runDownload = async (format: 'xlsx' | 'zip') => {
+    const workspace = workspaceQuery.data
+    if (!workspace) return
+    const targetIds = downloadScope.scope === 'SELECTED' ? effectiveSelectedIds : selectableIds
+    if (targetIds.length === 0) return
+    setDownloading(true)
+    try {
+      const reports = buildReviewReports({
+        stories: workspace.stories,
+        results: workspace.results,
+        evidence: workspace.evidence,
+        humanReviews: workspace.humanReviews,
+        storyIds: targetIds,
+      })
+      const meta = buildReportMeta(
+        workspace.batch,
+        workspace.activeImport,
+        downloadScope.scope === 'SELECTED' ? `已勾选 ${reports.length} 条` : `${filterActive ? '当前筛选结果' : '全部'} ${reports.length} 条`,
+      )
+      if (format === 'xlsx') await downloadReviewReportsXlsx(reports, meta)
+      else downloadReviewReportsZip(reports, meta)
+      const unanalyzed = reports.filter((report) => !report.result?.verdict).length
+      // 未分析的需求照样进报告（标成"未分析"），但要说一声 —— 否则会被当成"结论是空的"。
+      message.success(
+        unanalyzed > 0
+          ? `已下载 ${reports.length} 条评审报告，其中 ${unanalyzed} 条还没有 AI 结果，报告里标为未分析`
+          : `已下载 ${reports.length} 条评审报告`,
+      )
+    } catch (error) {
+      message.error(`报告生成失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setDownloading(false)
+    }
+  }
+
   const aiTagColors = { IMPLEMENTED: 'green', PARTIAL: 'orange', NOT_IMPLEMENTED: 'red', UNCERTAIN: 'default' }
   const humanTagColors = { CORRECT: 'green', PARTIALLY_CORRECT: 'orange', INCORRECT: 'red', NEED_DISCUSSION: 'purple' }
   const columns: ColumnsType<(typeof rows)[number]> = [
@@ -3583,7 +3698,6 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       filters: toColumnFilters(rows.map((row) => row.story.story_code)),
       filteredValue: localColumnFilters.storyCode,
       filterSearch: true,
-      onFilter: (value, row) => row.story.story_code === String(value),
       render: (_value, row) => <Link className="review-story-code" to={`/batches/${batchId}/reviews/${row.story.id}`}>{row.story.story_code}</Link>,
     },
     {
@@ -3594,7 +3708,6 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       filters: toColumnFilters(rows.map((row) => row.story.story_name)),
       filteredValue: localColumnFilters.storyName,
       filterSearch: true,
-      onFilter: (value, row) => row.story.story_name === String(value),
     },
     {
       title: '开发人员',
@@ -3605,7 +3718,6 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       filteredValue: owner ? [owner] : null,
       filterSearch: true,
       filterMultiple: false,
-      onFilter: (value, row) => splitPeople(row.story.owners_text).includes(String(value)),
       render: (value) => <PeopleTags value={value as string | null} />,
     },
     {
@@ -3617,7 +3729,6 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       filteredValue: requirementHandler ? [requirementHandler] : null,
       filterSearch: true,
       filterMultiple: false,
-      onFilter: (value, row) => splitPeople(row.story.requirement_handlers).includes(String(value)),
       render: (value) => <PeopleTags value={value as string | null} />,
     },
     {
@@ -3629,7 +3740,6 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       filteredValue: testHandler ? [testHandler] : null,
       filterSearch: true,
       filterMultiple: false,
-      onFilter: (value, row) => splitPeople(row.story.test_handlers).includes(String(value)),
       render: (value) => <PeopleTags value={value as string | null} />,
     },
     {
@@ -3641,7 +3751,6 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       filteredValue: status ? [status] : null,
       filterSearch: true,
       filterMultiple: false,
-      onFilter: (value, row) => storyStatusName(row.story) === String(value),
       render: (_value, row) => <Tag>{storyStatusName(row.story)}</Tag>,
     },
     {
@@ -3654,7 +3763,6 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       ],
       filteredValue: verdict ? [verdict] : null,
       filterMultiple: false,
-      onFilter: (value, row) => (row.result?.verdict ?? 'UNANALYZED') === String(value),
       render: (_value, row) => row.result?.verdict
         ? <Tag color={aiTagColors[row.result.verdict]}>{aiVerdictLabels[row.result.verdict]}</Tag>
         : <Tag>未分析</Tag>,
@@ -3667,7 +3775,6 @@ function ReviewListPage({ batchId }: { batchId: string }) {
         .sort((a, b) => a - b)
         .map((count) => ({ text: `${count} 条`, value: String(count) })),
       filteredValue: localColumnFilters.evidence,
-      onFilter: (value, row) => row.evidenceCount === Number(value),
       render: (_value, row) => <Tag color={row.evidenceCount ? 'geekblue' : 'default'}>{row.evidenceCount} 条</Tag>,
     },
     {
@@ -3677,7 +3784,6 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       filters: [{ text: '待确认', value: 'pending' }, { text: '已确认', value: 'reviewed' }],
       filteredValue: localColumnFilters.humanStatus,
       filterMultiple: false,
-      onFilter: (value, row) => value === 'reviewed' ? Boolean(row.review) : !row.review,
       render: (_value, row) => row.review
         ? <Tag color={humanTagColors[row.review.result]}>{humanReviewLabels[row.review.result]}</Tag>
         : <Tag color="gold">待确认</Tag>,
@@ -3686,22 +3792,88 @@ function ReviewListPage({ batchId }: { batchId: string }) {
 
   return (
     <Space direction="vertical" size="large" className="page-stack review-list-page">
+      {/*
+        * 下载工具条。
+        *
+        * 范围写在按钮上而不是写在说明里：使用者判断"我下载的是哪些"的唯一依据就是这句话。
+        * 写成"下载全部"而实际导出筛选结果（或反过来），人就会拿着一份不完整的报告去开会。
+        */}
+      <div className="review-list-toolbar">
+        <span className="review-list-toolbar__hint">
+          {effectiveSelectedIds.length > 0
+            ? `已勾选 ${effectiveSelectedIds.length} 条`
+            : filterActive
+              ? `当前筛选结果 ${filteredRows.length} 条（不勾选即按此范围下载）`
+              : `共 ${filteredRows.length} 条（不勾选即全部下载）`}
+        </span>
+        {effectiveSelectedIds.length > 0 ? (
+          <Button type="link" size="small" onClick={() => setSelectedStoryIds([])}>清空勾选</Button>
+        ) : null}
+        <Dropdown
+          disabled={downloadScope.disabled || downloading}
+          menu={{
+            items: [
+              { key: 'xlsx', label: 'Excel 汇总（一份，含验收点/风险/证据明细）' },
+              { key: 'zip', label: 'Markdown 逐条（ZIP，一条需求一个文件）' },
+            ],
+            onClick: ({ key }) => void runDownload(key === 'zip' ? 'zip' : 'xlsx'),
+          }}
+        >
+          <Button type="primary" icon={<DownloadOutlined />} loading={downloading}>
+            {downloadScope.label}
+          </Button>
+        </Dropdown>
+      </div>
+
       <Table
         className="review-list-table"
         rowKey={(row) => row.story.id}
         loading={workspaceQuery.isLoading}
         columns={columns}
-        dataSource={rows}
+        dataSource={filteredRows}
         size="middle"
         scroll={{ x: 1520 }}
+        rowSelection={{
+          selectedRowKeys: effectiveSelectedIds,
+          preserveSelectedRowKeys: true,
+          /*
+           * 自己画全选框，不用 antd 默认的那个：默认实现只管当前页，筛出 26 条、每页 10 条时
+           * 要翻页点三次。这里复用 V1.20 已经写好并测过的三态逻辑，口径是"当前筛选结果"。
+           */
+          columnTitle: (
+            <Tooltip title={selectAll.checked ? `取消这 ${selectableIds.length} 条` : `全选当前筛选结果的 ${selectableIds.length} 条（不只是本页）`}>
+              <Checkbox
+                checked={selectAll.checked}
+                indeterminate={selectAll.indeterminate}
+                disabled={selectableIds.length === 0}
+                aria-label="全选当前筛选结果"
+                onChange={(event) => setSelectedStoryIds(
+                  toggleSelectAllFiltered({
+                    selectedCodes: effectiveSelectedIds,
+                    filteredCodes: selectableIds,
+                    select: event.target.checked,
+                  }),
+                )}
+              />
+            </Tooltip>
+          ),
+          onChange: (keys) => setSelectedStoryIds(keys.map((key) => String(key))),
+        }}
         pagination={{
-          defaultPageSize: 10,
+          current: currentPage,
+          pageSize,
           showSizeChanger: true,
           pageSizeOptions: [10, 20, 50, 100],
           showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 条`,
+          onChange: (nextPage, nextSize) => {
+            setPage(nextSize !== pageSize ? 1 : nextPage)
+            if (nextSize !== pageSize) setPageSize(nextSize)
+          },
         }}
         onChange={(_pagination, filters, _sorter, extra) => {
           if (extra.action !== 'filter') return
+          // 筛选是"从头看一遍新结果"，所以在这个事件里显式回到第 1 页（不靠 effect）。
+          setPage(1)
           const normalize = (values: unknown) => Array.isArray(values) ? values.map(String) : null
           const storyCode = normalize(filters.storyCode)
           const storyName = normalize(filters.storyName)

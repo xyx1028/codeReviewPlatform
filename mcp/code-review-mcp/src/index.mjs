@@ -10,7 +10,7 @@
  */
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { ConfigError, loadConfig } from './config.mjs'
+import { ConfigError, MAX_STORIES_PER_SUBMIT, loadConfig } from './config.mjs'
 import { EnvFileError, loadEnvFileIfPresent } from './env.mjs'
 import { ConfirmationSigner } from './confirm.mjs'
 import { LinkyReadOnlyClient } from './linky.mjs'
@@ -134,6 +134,8 @@ async function main() {
     max_sessions: config.http.maxSessions,
     allowed_origins: config.http.allowedOrigins,
     preflight: config.linky.baseUrl === null ? 'DISABLED' : config.linky.baseUrl,
+    preflight_budget_ms: config.linky.preflightBudgetMs,
+    max_stories_per_submit: MAX_STORIES_PER_SUBMIT,
     confirm_ttl_ms: config.confirm.ttlMs,
   })
   if (config.http.allowAnonymous) {

@@ -18,7 +18,7 @@ import {
   SubmissionStateUnknownError,
   assertBranch,
   assertCommitWindow,
-  normalizeStoryCode,
+  normalizeStoryCodes,
   submitRequirementReview,
 } from './review.mjs'
 import {
@@ -31,7 +31,9 @@ import {
 import {
   PREFLIGHT_REJECTED,
   PREFLIGHT_VERIFIED,
+  preflightReleaseWindow,
   preflightRequirement,
+  preflightRequirements,
 } from './preflight.mjs'
 import { ConfirmationError } from './confirm.mjs'
 import { formatSchemaViolations, validateAgainstSchema } from './schema.mjs'
@@ -40,18 +42,24 @@ import {
   DESCRIBE_OPTIONS_TOOL,
   LIST_WORKSPACES_DEFINITION,
   LIST_WORKSPACES_TOOL,
+  SEARCH_MAX_PAGES,
   SEARCH_REQUIREMENTS_DEFINITION,
   SEARCH_REQUIREMENTS_TOOL,
+  filterByReleaseWindow,
   filterRequirements,
   formatRequirementList,
   formatSubmitOptions,
   formatWorkspaceList,
+  releaseWindowFacet,
   toRequirementRow,
 } from './query-tools.mjs'
 import { filterWorkspaces } from './workspaces.mjs'
 import {
   DEFAULT_BRANCH,
   DEFAULT_COMMIT_WINDOW_DAYS,
+  MAX_STORIES_PER_SUBMIT,
+  MAX_STORIES_PER_WINDOW,
+  PREFLIGHT_CONCURRENCY,
   SUPPORTED_BRANCHES,
   SUPPORTED_COMMIT_WINDOWS,
 } from './config.mjs'
@@ -60,8 +68,16 @@ export const TOOL_NAME = 'start_requirement_review'
 export const LOOKUP_TOOL_NAME = 'lookup_requirement'
 
 const STORY_CODE_DESCRIPTION =
-  '需求编号，例如 US-2026-017341 或 F-123456。必填，一次一条。平台会按它反查需求所属项目组。' +
+  '需求编号，例如 US-2026-017341 或 F-123456。平台会按它反查需求所属项目组。' +
   '也接受 issue UUID 与 PREFIX-NUMBER 形式。不要填需求标题或中文名。'
+
+const STORY_CODES_DESCRIPTION =
+  `一次要评审的需求编号列表（1~${MAX_STORIES_PER_SUBMIT} 条），例如 ` +
+  '["US-2026-042423","US-2026-042424"]。**要同时评审多条需求就用这个参数**，' +
+  '它们会进入同一个批次、共享同一份代码快照，只需要确认一次。\n\n' +
+  '只有一条时用 story_code 更简单（两个参数给任意一个即可，都给就取并集）。\n\n' +
+  '这些需求必须属于**同一个项目组**：一张需求导入单只有一个项目组，平台页面上的导入' +
+  '也是这个规则。编号分属不同组时平台会拒绝提交，并告诉你每一条实际属于哪个组。'
 
 /**
  * 需求编号的形状约束。
@@ -91,7 +107,7 @@ export const LOOKUP_TOOL_DEFINITION = {
         minLength: 1,
         maxLength: 64,
         pattern: STORY_CODE_PATTERN,
-        description: STORY_CODE_DESCRIPTION,
+        description: `${STORY_CODE_DESCRIPTION}必填，一次一条 —— 这个工具只查一条需求；要一次提交多条评审用 start_requirement_review 的 story_codes。`,
       },
       workspace_name: {
         type: 'string',
@@ -134,10 +150,20 @@ export const TOOL_DEFINITION = {
     '它返回平台从 Linky 查到的真实需求信息、本次将要使用的参数，以及一个 confirmation_token。' +
     '你必须把那些内容告诉用户、等他确认，再带上 confirmation_token 调用第二次才真正提交。' +
     '用户没有明确同意之前不要自行带令牌提交。\n\n' +
+    `**可以一次提交多条需求**：用 story_codes 给编号列表（最多 ${MAX_STORIES_PER_SUBMIT} 条），` +
+    '它们会进入**同一个批次**、共享同一份代码快照，只需要确认一次，回执也只有一张。' +
+    '不要为了评审多条需求反复调用本工具 —— 那会在平台上建出多个各含一条需求的批次。' +
+    '多条需求必须属于同一个项目组，否则平台会拒绝提交并告诉你每条实际属于哪个组。\n\n' +
+    '**要评审"某个项目组某个发布窗口的全部需求"**：给 workspace_name + release_window 即可，' +
+    `不用自己把编号一个个抄出来（最多 ${MAX_STORIES_PER_WINDOW} 条）。平台会枚举那个窗口下的` +
+    '全部需求，第一次调用把它们逐条列在确认卡片上；用户确认后第二次调用**只带 ' +
+    'confirmation_token** 就行，不必回传那些编号。令牌锁定的是刚才列出的那一组需求，' +
+    '不是"这个窗口"这个条件。\n\n' +
     '**代码基线与提交时间窗口可以不填**：默认 release + 14 天。第一次调用的返回里会写明' +
     '哪些值用了默认、以及还能选什么。用户要改的话，带上他指定的值重新调用第一次' +
     '（旧令牌会失效，需要重新确认）。\n\n' +
-    '**这是异步提交，会真实消耗模型额度。** 受理并落库后立刻返回，不等待导入与评审完成。\n\n' +
+    '**这是异步提交，会真实消耗模型额度**（按需求条数计）。受理并落库后立刻返回，' +
+    '不等待导入与评审完成。\n\n' +
     '成功后请把返回的批次编号、受理编号和平台详情链接完整转述给用户，提示他去平台查看进度与结果，' +
     '然后结束本次提交流程：本服务不提供进度查询、结果查询或轮询，不要再次调用本工具查状态，' +
     '也不要为同一条需求重复提交。失败时返回明确原因，此时平台上没有创建任何评审，不要告诉用户已提交。',
@@ -149,7 +175,30 @@ export const TOOL_DEFINITION = {
         minLength: 1,
         maxLength: 64,
         pattern: STORY_CODE_PATTERN,
-        description: STORY_CODE_DESCRIPTION,
+        description: `${STORY_CODE_DESCRIPTION}只评审一条时用它；要同时评审多条用 story_codes。`,
+      },
+      story_codes: {
+        type: 'array',
+        minItems: 1,
+        maxItems: MAX_STORIES_PER_SUBMIT,
+        items: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 64,
+          pattern: STORY_CODE_PATTERN,
+        },
+        description: STORY_CODES_DESCRIPTION,
+      },
+      release_window: {
+        type: 'string',
+        maxLength: 64,
+        description:
+          '发布窗口，例如 R20261106。**给了它就等于"评审这个项目组这个发布窗口下的全部需求"** ——' +
+          '平台自己把该窗口下的需求枚举出来，第一次调用会把全部编号与标题列在确认卡片上，' +
+          `由用户确认后再提交（最多 ${MAX_STORIES_PER_WINDOW} 条，它们进入同一个批次）。\n\n` +
+          '用它时 workspace_name **必填**（枚举需要范围），而且**不要**同时给 story_code /' +
+          ' story_codes —— 两种意图只能选一个，同时给会被拒绝。\n\n' +
+          '精确匹配，不要填"下周"这类说法。不知道窗口怎么写就先用 search_requirements 看一眼。',
       },
       branch: {
         type: 'string',
@@ -191,7 +240,15 @@ export const TOOL_DEFINITION = {
           '只有用户确认过需求信息之后才带上它 —— 带上它这次就会真的创建评审并消耗模型额度。',
       },
     },
-    required: ['story_code'],
+    /*
+     * `required` 为空不等于"什么都不用给"。
+     *
+     * `story_code` 与 `story_codes` 是二选一（或并用），而 JSON Schema 要表达这件事需要
+     * `anyOf`/`oneOf` —— 本仓库的服务端校验器刻意只实现用得到的关键字，声明一个它不执行
+     * 的约束等于对外撒谎。所以"至少给一个编号"由服务端在 normalizeStoryCodes 里判，
+     * 并回一句能照着改的话（STORY_CODE_REQUIRED）。
+     */
+    required: [],
     additionalProperties: false,
   },
   /**
@@ -231,10 +288,24 @@ export function createToolRegistry({
     return { outcome, workspaceName }
   }
 
+  /** 多条需求的核对。预算与并发见 preflightRequirements 的注释。 */
+  async function runBatchPreflight(storyCodes, workspaceName) {
+    const outcome = await preflightRequirements(
+      linky,
+      { story_codes: storyCodes, workspace_name: workspaceName },
+      {
+        budgetMs: config.linky?.preflightBudgetMs ?? 45_000,
+        concurrency: PREFLIGHT_CONCURRENCY,
+      },
+    )
+    return { outcome, workspaceName: outcome.workspaceName }
+  }
+
   function issueToken({
-    storyCode,
+    storyCodes,
     workspaceName,
     givenWorkspace,
+    releaseWindow = null,
     branch,
     commitWindowDays,
     verification,
@@ -242,9 +313,10 @@ export function createToolRegistry({
     if (confirmations === null) return null
     return {
       value: confirmations.issue({
-        story_code: storyCode,
+        story_codes: storyCodes,
         workspace_name: workspaceName,
         given_workspace: givenWorkspace ?? null,
+        release_window: releaseWindow,
         branch,
         commit_window_days: commitWindowDays,
         verification,
@@ -312,13 +384,27 @@ export function createToolRegistry({
     const workspaceName = String(args.workspace_name ?? '').trim()
     const keyword = String(args.keyword ?? '').trim()
     const assigneeName = String(args.assignee_name ?? '').trim()
-    const limit = Number.isInteger(args.limit) ? args.limit : 20
+    const releaseWindow = String(args.release_window ?? '').trim()
+    /*
+     * 按窗口查时默认把 limit 提到 100。
+     *
+     * "这个窗口有哪些需求"的意图本来就是"全部"，默认 20 条会给出一份被截断的清单，
+     * 而使用者据此以为那就是整个窗口 —— 下一步就是漏提几条需求。
+     */
+    const limit = Number.isInteger(args.limit)
+      ? args.limit
+      : releaseWindow === ''
+        ? 20
+        : 100
 
     let outcome
     try {
       outcome = await linky.listStories({
         workspaceName,
         assigneeName: assigneeName === '' ? null : assigneeName,
+        // 按窗口筛必须覆盖整组才算得准：上游没有窗口过滤参数，筛是在本地做的，
+        // 只翻 2 页（400 条）就意味着第 3 页之后的那些需求永远筛不到。
+        maxPages: SEARCH_MAX_PAGES,
       })
     } catch (error) {
       // 查询失败如实回出，并把上游原话带上 —— 它可能是"凭据失效"这种只有维护者能处理的事。
@@ -342,12 +428,15 @@ export function createToolRegistry({
     }
 
     const rows = outcome.items.map(toRequirementRow).filter((row) => row !== null)
-    const filtered = filterRequirements(rows, keyword)
+    // 分布基于**窗口过滤之前**的集合：它要回答"有哪些窗口"，用筛完的集合算等于自问自答。
+    const facet = releaseWindowFacet(rows)
+    const filtered = filterByReleaseWindow(filterRequirements(rows, keyword), releaseWindow)
     logger('requirements_searched', {
       caller: context.caller ?? null,
       workspace_name: workspaceName,
       keyword: keyword === '' ? null : keyword,
       assignee_name: assigneeName === '' ? null : assigneeName,
+      release_window: releaseWindow === '' ? null : releaseWindow,
       upstream_total: outcome.total,
       matched: filtered.length,
     })
@@ -356,11 +445,13 @@ export function createToolRegistry({
         workspaceName,
         keyword,
         assigneeName,
+        releaseWindow,
         rows: filtered.slice(0, limit),
         matched: filtered.length,
         limit,
         complete: outcome.complete,
         total: outcome.total,
+        facet,
       }),
     )
   }
@@ -400,7 +491,7 @@ export function createToolRegistry({
     // 分支与窗口可以不给：按默认值补齐后总能签出一张可直接用于提交的令牌。
     const params = resolveSubmitParams(args)
     const token = issueToken({
-      storyCode: outcome.story?.story_code ?? storyCode,
+      storyCodes: [outcome.story?.story_code ?? storyCode],
       workspaceName,
       givenWorkspace: args.workspace_name ?? null,
       branch: params.branch,
@@ -430,45 +521,118 @@ export function createToolRegistry({
   async function handleSubmit(args, context) {
     // 形状校验必须在最前面。分支/窗口非法时还去查 Linky、还签一张令牌出来，等于把一个
     // 注定失败的参数组合"确认"给使用者看 —— 门禁要拦在更早的地方。
-    const storyCode = normalizeStoryCode(args.story_code)
+    const hasToken = String(args.confirmation_token ?? '').trim() !== ''
+    const releaseWindow = String(args.release_window ?? '').trim()
+    const windowMode = releaseWindow !== ''
+    /*
+     * 编号可以不给，但只在两种情形下：
+     *   · 按发布窗口提交 —— 编号是平台枚举出来的；
+     *   · 带着令牌复用已确认的那一组 —— 要求客户端回传 30 多个编号只是给它一次抄错的机会。
+     * 其余情形仍然必须给，报的还是原来那句话。
+     */
+    let givenCodes = null
+    try {
+      givenCodes = normalizeStoryCodes(args)
+    } catch (error) {
+      if (!((windowMode || hasToken) && error?.code === 'STORY_CODE_REQUIRED')) throw error
+    }
     // 先套默认值再校验：两者都是可选参数，缺失不是错误。
     const params = resolveSubmitParams(args)
     const branch = assertBranch(params.branch)
     const commitWindowDays = assertCommitWindow(params.commitWindowDays)
+    const baseRequest = {
+      workspace_name: args.workspace_name ?? null,
+      release_window: windowMode ? releaseWindow : null,
+      branch,
+      commit_window_days: commitWindowDays,
+    }
+
+    /*
+     * 两种意图同时出现时不猜。
+     *
+     * 交集？并集？都是对使用者意图的猜测，而猜错的代价是花钱评审一组他没要的需求。
+     */
+    if (windowMode && givenCodes !== null && !hasToken) {
+      return textResult(
+        formatPreflightRejection({
+          reason: {
+            code: 'STORY_CODES_AND_WINDOW_CONFLICT',
+            message:
+              '同时给了发布窗口和需求编号，这两种意图只能选一个：要么"评审这个窗口的全部需求"' +
+              '（只给 release_window），要么"评审我列出的这几条"（只给 story_code/story_codes）。' +
+              '平台不替你猜是取交集还是并集。',
+          },
+          request: { ...baseRequest, story_codes: givenCodes },
+        }),
+        { isError: true },
+      )
+    }
 
     // 第一步：没有令牌 —— 核对、回卡片、签令牌，**不建批次**。
-    if (String(args.confirmation_token ?? '').trim() === '') {
-      const { outcome, workspaceName } = await runPreflight({
-        story_code: storyCode,
-        workspace_name: args.workspace_name ?? null,
-      })
+    if (!hasToken) {
+      const outcome = windowMode
+        ? await preflightReleaseWindow(
+            linky,
+            { workspace_name: args.workspace_name ?? null, release_window: releaseWindow },
+            { maxPages: SEARCH_MAX_PAGES },
+          )
+        : (await runBatchPreflight(givenCodes, args.workspace_name ?? null)).outcome
+      const workspaceName = outcome.workspaceName ?? args.workspace_name ?? null
+      const storyCodes = windowMode
+        ? outcome.entries.map((entry) => entry.story_code)
+        : givenCodes
       logger('review_submit_preflight', {
         caller: context.caller ?? null,
-        story_code: storyCode,
+        mode: windowMode ? 'RELEASE_WINDOW' : 'STORY_CODES',
+        release_window: windowMode ? releaseWindow : null,
+        story_codes: storyCodes,
+        stories: storyCodes.length,
         status: outcome.status,
         resolved_workspace: workspaceName,
-        corrections: outcome.corrections.length,
+        corrections: outcome.corrections?.length ?? 0,
       })
 
       if (outcome.status === PREFLIGHT_REJECTED) {
         return textResult(
           formatPreflightRejection({
             reason: outcome.reason,
-            request: {
-              story_code: storyCode,
-              workspace_name: args.workspace_name ?? null,
-              branch,
-              commit_window_days: commitWindowDays,
+            request: { ...baseRequest, story_codes: storyCodes },
+            facet: outcome.facet ?? null,
+          }),
+          { isError: true },
+        )
+      }
+
+      /*
+       * 窗口里的需求太多。
+       *
+       * 不截断成前 50 条照常提交 —— 使用者要的是"这个窗口的全部需求"，给他一个被悄悄
+       * 截断的子集，比直接拒绝糟得多。平台页面的「原始需求导入」是勾选式的，逐条可见。
+       */
+      if (windowMode && storyCodes.length > MAX_STORIES_PER_WINDOW) {
+        return textResult(
+          formatPreflightRejection({
+            reason: {
+              code: 'RELEASE_WINDOW_TOO_MANY_STORIES',
+              message:
+                `项目组「${workspaceName}」发布窗口「${releaseWindow}」下有 ${storyCodes.length} 条需求，` +
+                `超过一次提交的上限 ${MAX_STORIES_PER_WINDOW} 条。平台不会只提交前 ` +
+                `${MAX_STORIES_PER_WINDOW} 条 —— 那样你会以为整个窗口都在评审。` +
+                '请用平台页面的「原始需求导入」勾选导入，或用 search_requirements 加负责人/' +
+                '关键字缩小范围后按 story_codes 分批提交。',
             },
+            request: { ...baseRequest, story_codes: storyCodes },
+            facet: outcome.facet ?? null,
           }),
           { isError: true },
         )
       }
 
       const token = issueToken({
-        storyCode: outcome.story?.story_code ?? storyCode,
+        storyCodes,
         workspaceName,
         givenWorkspace: args.workspace_name ?? null,
+        releaseWindow: windowMode ? releaseWindow : null,
         branch,
         commitWindowDays,
         verification: outcome.status,
@@ -483,14 +647,16 @@ export function createToolRegistry({
       return textResult(
         formatConfirmationCard({
           status: outcome.status,
-          story: outcome.story,
-          corrections: outcome.corrections,
+          // 单条且非窗口模式时走单条形态，文案与改造前逐字一致。
+          story: !windowMode && storyCodes.length === 1 ? (outcome.entries[0]?.story ?? null) : null,
+          stories: !windowMode && storyCodes.length === 1 ? null : outcome.entries,
+          listedOnly: windowMode,
+          corrections: outcome.corrections ?? [],
           reason: outcome.reason,
           request: {
-            branch,
-            commit_window_days: commitWindowDays,
+            ...baseRequest,
             workspace_name: workspaceName,
-            story_code: storyCode,
+            story_codes: storyCodes,
             branch_is_default: params.branchIsDefault,
             window_is_default: params.windowIsDefault,
           },
@@ -503,8 +669,10 @@ export function createToolRegistry({
     let claim
     try {
       claim = confirmations.verify(args.confirmation_token, {
-        story_code: storyCode,
+        // 没回传编号/窗口时不比对（提交用的是令牌里的那份，见 confirm.mjs）。
+        story_codes: givenCodes ?? undefined,
         workspace_name: args.workspace_name ?? null,
+        release_window: windowMode ? releaseWindow : undefined,
         branch,
         commit_window_days: commitWindowDays,
       })
@@ -512,7 +680,8 @@ export function createToolRegistry({
       if (error instanceof ConfirmationError) {
         logger('review_submit_confirmation_rejected', {
           caller: context.caller ?? null,
-          story_code: storyCode,
+          story_codes: givenCodes,
+          release_window: windowMode ? releaseWindow : null,
           code: error.code,
         })
         return textResult(
@@ -534,10 +703,20 @@ export function createToolRegistry({
       client,
       config,
       {
-        story_code: storyCode,
+        /*
+         * 用令牌里的编号，而不是这次实参里的。
+         *
+         * `verify` 已经证明两者是同一个**集合**（调用方没回传时就只有令牌这一个来源），
+         * 但顺序可能不同。取令牌里的那份，批次名与回执的顺序就和使用者刚看过的卡片一致 ——
+         * 落库的编号顺序无关紧要（导入单自己会 distinct … order by code），
+         * 但"确认的是什么，提交的就是什么"这件事应该在代码里只有一个来源。
+         */
+        story_codes: claim.story_codes,
         // 用令牌里签过的项目组名：它是核对/纠正之后的值，而不是调用方原样给的。
         workspace_name: claim.workspace_name,
+        release_window: claim.release_window ?? null,
         workspace_id: args.workspace_id ?? null,
+        release_cycle: args.release_cycle ?? null,
         branch,
         commit_window_days: commitWindowDays,
         caller: context.caller ?? null,
@@ -548,7 +727,9 @@ export function createToolRegistry({
       caller: context.caller ?? null,
       batch_id: receipt.batch_id,
       import_request_id: receipt.import_request_id,
-      story_code: receipt.story_code,
+      story_codes: receipt.story_codes,
+      stories: receipt.story_codes.length,
+      release_window: receipt.release_window,
       branch: receipt.branch,
       commit_window_days: receipt.commit_window_days,
       verification: claim.verification,

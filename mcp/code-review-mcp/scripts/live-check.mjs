@@ -13,18 +13,23 @@
  *   node scripts/live-check.mjs --url ... --token ... --submit \
  *     --story US-2026-017341 --branch feature_dev --window 7
  *
+ *   # 多条需求一次提交（逗号分隔，或重复 --story）：它们会进同一个批次
+ *   node scripts/live-check.mjs --url ... --token ... --submit \
+ *     --story US-2026-042423,US-2026-042424
+ *
  *   # 看过卡片、确认无误之后，再加 --confirm 才真的提交
  *   node scripts/live-check.mjs --url ... --token ... --submit --confirm \
  *     --story US-2026-017341 --branch feature_dev --window 7
  *
  * --workspace 是可选的：项目组由平台按需求编号反查。
+ * --branch / --window 也可以不给：服务端有默认值（release + 14 天）。
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 
 function parseArgs(argv) {
-  const args = { submit: false, confirm: false }
+  const args = { submit: false, confirm: false, stories: [] }
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index]
     const next = () => argv[(index += 1)]
@@ -33,8 +38,15 @@ function parseArgs(argv) {
     else if (key === '--submit') args.submit = true
     else if (key === '--confirm') args.confirm = true
     else if (key === '--workspace') args.workspace = next()
-    else if (key === '--story') args.story = next()
-    else if (key === '--branch') args.branch = next()
+    else if (key === '--story') {
+      // 逗号分隔或重复给都行 —— 两种写法在命令行里都很自然。
+      args.stories.push(
+        ...String(next() ?? '')
+          .split(',')
+          .map((item) => item.trim())
+          .filter((item) => item !== ''),
+      )
+    } else if (key === '--branch') args.branch = next()
     else if (key === '--window') args.window = Number(next())
   }
   return args
@@ -75,21 +87,26 @@ async function finish() {
 }
 
 if (args.submit) {
-  if (!args.story || !args.branch || !args.window) {
-    console.error('--submit 需要同时给出 --story --branch --window（--workspace 可选）')
+  if (args.stories.length === 0) {
+    console.error('--submit 需要至少一个 --story（可逗号分隔或重复给；--workspace/--branch/--window 可选）')
     process.exit(2)
   }
 
+  /** 单条用 story_code、多条用 story_codes —— 和真实调用方的用法保持一致。 */
+  const storyArgs =
+    args.stories.length === 1 ? { story_code: args.stories[0] } : { story_codes: args.stories }
+  const submitArgs = {
+    ...storyArgs,
+    ...(args.branch ? { branch: args.branch } : {}),
+    ...(args.window ? { commit_window_days: args.window } : {}),
+    ...(args.workspace ? { workspace_name: args.workspace } : {}),
+  }
+
   // 第一步：核对。不带 confirmation_token，所以**不会**创建任何评审。
-  console.log(`\n→ 第一步（只核对，不提交）：${args.story}`)
+  console.log(`\n→ 第一步（只核对，不提交）：${args.stories.join('、')}`)
   const preflight = await client.callTool({
     name: 'start_requirement_review',
-    arguments: {
-      story_code: args.story,
-      branch: args.branch,
-      commit_window_days: args.window,
-      ...(args.workspace ? { workspace_name: args.workspace } : {}),
-    },
+    arguments: submitArgs,
   })
   const preflightText = (preflight.content ?? [])
     .filter((item) => item.type === 'text')
@@ -123,13 +140,7 @@ if (args.submit) {
   console.log('\n→ 第二步（已确认，真实提交并消耗模型额度）')
   const result = await client.callTool({
     name: 'start_requirement_review',
-    arguments: {
-      story_code: args.story,
-      branch: args.branch,
-      commit_window_days: args.window,
-      ...(args.workspace ? { workspace_name: args.workspace } : {}),
-      confirmation_token: token,
-    },
+    arguments: { ...submitArgs, confirmation_token: token },
   })
   console.log(result.isError ? '✘ 提交失败：' : '✔ 提交成功：')
   for (const item of result.content ?? []) {
