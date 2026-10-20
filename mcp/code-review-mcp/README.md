@@ -73,7 +73,7 @@ npm start                # 或在仓库根目录 npm run mcp:start
 | `CRP_SETTLE_PROBES` / `CRP_SETTLE_PROBE_TIMEOUT_MS` / `CRP_SETTLE_DELAY_MS` | ❌ | 「结果不明」后的核对预算，默认 `3` / `8000` / `2000` |
 | `CRP_BATCH_NAME_PREFIX` | ❌ | 批次名前缀，默认 `MCP 评审` |
 | `CRP_TIMEZONE` | ❌ | 发布周期编码所用时区，默认 `Asia/Shanghai`。容器通常是 UTC，用本地时间会让编码比创建时间差 8 小时、早上 8 点前还错一天 |
-| `CRP_LINKY_API_BASE_URL` | ❌ | 提交前核对需求用的 Linky 取数地址。**默认已指向公司地址**；显式设成空字符串才关闭核对 |
+| `CRP_LINKY_API_BASE_URL` | ❌ | 提交前核对需求用的 Linky 取数地址。默认 `https://linky.kingdee.com/quality-platform/api/linky`；显式设成空字符串才关闭核对 |
 | `CRP_LINKY_TIMEOUT_MS` | ❌ | 单次核对请求超时，默认 `8000` |
 | `CRP_CONFIRM_TTL_MS` | ❌ | 确认令牌有效期，默认 `900000`（15 分钟），最小 60000 |
 | `CRP_CONFIRM_SECRET` | 多实例部署时必填 | 令牌签名密钥。留空则每次启动随机生成（重启后旧令牌失效）；多实例必须配同一个值 |

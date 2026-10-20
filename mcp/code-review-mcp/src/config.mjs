@@ -9,9 +9,9 @@ export const SUPPORTED_BRANCHES = ['feature_dev', 'feature_sit', 'release']
 export const SUPPORTED_COMMIT_WINDOWS = [7, 14, 21, 28]
 /** 平台使用者所在时区。发布周期编码按它生成，必须与批次列表里的「创建时间」对得上。 */
 export const DEFAULT_TIME_ZONE = 'Asia/Shanghai'
-/** 公司 Linky 取数接口。与 Worker 的 LINKY_API_BASE_URL 默认值保持一致。 */
+/** 公司 Linky 取数接口。与 Worker 的 LINKY_API_BASE_URL 配置模板保持一致。 */
 export const DEFAULT_LINKY_BASE_URL =
-  'https://feature.kingdee.com:2055/quality-platform/api/linky'
+  'https://linky.kingdee.com/quality-platform/api/linky'
 
 export class ConfigError extends Error {
   constructor(message) {

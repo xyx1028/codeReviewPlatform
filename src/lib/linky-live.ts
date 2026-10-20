@@ -15,7 +15,7 @@
 
 import { runtimeConfig } from './runtime-config'
 
-const DEFAULT_BASE = 'https://feature.kingdee.com:2055/quality-platform/api/linky'
+const DEFAULT_BASE = 'https://linky.kingdee.com/quality-platform/api/linky'
 
 export function linkyApiBase(): string {
   const configured = runtimeConfig.linkyApiBaseUrl

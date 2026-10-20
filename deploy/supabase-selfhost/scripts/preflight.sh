@@ -14,7 +14,7 @@
 
 set -uo pipefail
 
-LINKY_URL="${LINKY_API_BASE_URL:-https://feature.kingdee.com:2055/quality-platform/api/linky}"
+LINKY_URL="${LINKY_API_BASE_URL:-https://linky.kingdee.com/quality-platform/api/linky}"
 GITLAB_URL="${GITLAB_BASE_URL:-}"
 MODEL_URL="${MODEL_BASE_URL:-}"
 

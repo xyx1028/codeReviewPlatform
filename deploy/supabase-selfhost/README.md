@@ -56,6 +56,62 @@ deploy/supabase-selfhost/
 9. backup.sh → restore-verify.sh → 服务器重启验收
 ```
 
+## Linky 旧域名修正（2026-10-20）
+
+当前取数接口基础地址为 `https://linky.kingdee.com/quality-platform/api/linky`。
+浏览器实时列表、Worker 冻结正文/附件以及 MCP 提交前校验使用同一地址；调用方不需要
+Linky token。不要把 `/stories` 或 `/stories/help` 填进基础地址。
+
+代码默认值和配置模板已更新。已有 Linux 文件不会因 `git pull` 或拉镜像自动改变；
+若写死了旧地址，在 CI 构建成功、正式发布前执行下面的一次性修正。
+它只替换完整旧基础地址，不修改凭据、自定义域名或其他配置；原文件备份到权限 0700
+的目录中（env 备份也包含秘密，不要上传或贴到聊天）。未写死旧地址时无需修改。
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+from datetime import datetime
+import os
+import shutil
+
+old = 'https://feature.kingdee.com:2055/quality-platform/api/linky'
+new = 'https://linky.kingdee.com/quality-platform/api/linky'
+backup = Path('/home/kduser/crp/config-backups') / datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+paths = [
+    Path('/home/kduser/crp/web/runtime-config.js'),
+    Path('/home/kduser/crp/app/.docker/worker.selfhost.env'),
+    Path('/home/kduser/crp/app/.docker/mcp.selfhost.env'),
+]
+for index, path in enumerate(paths):
+    if not path.exists():
+        print('跳过不存在的文件：', path)
+        continue
+    text = path.read_text(encoding='utf-8')
+    if old not in text:
+        print('无需替换旧地址：', path)
+        continue
+    backup.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(backup, 0o700)
+    shutil.copy2(path, backup / (str(index) + '-' + path.name))
+    # 原地写入，保留权限与绑定挂载指向的文件，不输出文件内容。
+    path.write_text(text.replace(old, new), encoding='utf-8')
+    print('已替换旧 Linky 地址：', path)
+PY
+```
+
+随后按下方日常发布步骤执行 `release.sh --dry-run` 与 `--apply`。统一发布会等待四个
+Worker 在途任务结束后重建，再更新 Web 和 MCP；不要为改地址直接中断在途任务。
+完成后刷新浏览器，确认项目组列表可加载，并验证一次真实需求导入。
+
+本次地址修正的本地验证（2026-10-20）：Web/Worker 类型检查与构建通过；MCP 93 项、
+前端 Linky 错误处理 11 项、Worker 1104 项测试通过（Worker 另跳过 35 项）。
+新入口的真实列表、详情与附件列表已读通；Mac 容器内实际 Worker 客户端沿用本地
+HOST_PROXY 也可读取，新入口不要求调用方 token。本地 Worker 用启动前预置 DRAIN 的
+隔离目录连接本地 Supabase，确认启动及排空完成后已停止、删除，没有领取业务任务。
+Mac 容器 DIRECT 及本机 MCP Node fetch 探针仍遇到连接失败，不能由宿主机请求成功推断
+所有运行环境可直连；没有因此改变生产代理或证书设置。Linux 配置修正、镜像发布与真实
+需求导入尚需手动执行和验证。
+
 ## 日常发布
 
 CI 成功后会给出一个统一应用镜像。日常发布只需要在公司 Linux 的

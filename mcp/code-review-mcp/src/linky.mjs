@@ -20,7 +20,7 @@
  */
 
 export const DEFAULT_LINKY_BASE_URL =
-  'https://feature.kingdee.com:2055/quality-platform/api/linky'
+  'https://linky.kingdee.com/quality-platform/api/linky'
 
 /** 单次响应体上限。校验只读几个标量字段，不需要为大正文留空间。 */
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024

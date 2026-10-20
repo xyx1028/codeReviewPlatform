@@ -1958,7 +1958,7 @@ npm run proxy:model-vpn:install
 docker run --rm curlimages/curl:latest -sS -m 20 \
   -x "http://<user>:<pass>@host.docker.internal:17890" \
   -o /dev/null -w 'http=%{http_code}\n' \
-  "https://feature.kingdee.com:2055/quality-platform/api/linky/stories?page_size=1"
+  "https://linky.kingdee.com/quality-platform/api/linky/stories?page_size=1"
 ```
 
 ## 21.3 上线顺序

@@ -21,7 +21,7 @@ import { Logger } from '../worker/src/logger.js'
 const SUPABASE_URL = process.env.SUPABASE_URL ?? 'http://127.0.0.1:54321'
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? ''
 const LINKY_BASE =
-  process.env.LINKY_API_BASE_URL ?? 'https://feature.kingdee.com:2055/quality-platform/api/linky'
+  process.env.LINKY_API_BASE_URL ?? 'https://linky.kingdee.com/quality-platform/api/linky'
 const WORKSPACE_NAME = process.env.E2E_WORKSPACE ?? '工具开发组'
 const WORKER_ID = 'v120-e2e-local'
 const KEEP = process.env.E2E_KEEP === '1'
