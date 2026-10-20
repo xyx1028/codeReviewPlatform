@@ -4,8 +4,8 @@
  * 数据每次都从 Linky 现取，没有镜像、没有同步按钮 —— 「刷新」就是重新请求。
  * 看板页与批次导入页共用它：两边要看的字段、要过滤的维度完全一样，区别只在选完之后做什么。
  *
- * 筛选全部在**本地**做（一次拉回来的就是全量），所以切筛选条件不产生网络请求，
- * 分面计数也永远和列表一致 —— 不会出现"下拉里写 24 条、表里只有 3 条"。
+ * 看板按上游 page/page_size 分页；导入页保留按组加载，维持已有跨页勾选逻辑。
+ * 看板的项目组／负责人由接口筛选；其余本地条件明确只作用于当前页。
  */
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -33,11 +33,13 @@ import { useQuery } from '@tanstack/react-query'
 import {
   fetchLinkyAttachments,
   fetchLinkyStories,
+  fetchLinkyStoryPage,
   fetchLinkyStoryDetail,
   linkyApiBase,
   type LinkyLiveStory,
 } from '../../lib/linky-live'
 import { pruneSelectionToScope, selectAllState, shouldResetSelection, toggleSelectAllFiltered } from './story-selection'
+import { workspaceOptions } from './workspace-options'
 
 const { Text, Paragraph } = Typography
 
@@ -84,6 +86,38 @@ function facet(values: Array<string | null>): string[] {
   return [...seen].sort((a, b) => b.localeCompare(a))
 }
 
+function WorkspaceSelect(props: {
+  workspaces: string[]
+  value: string | null
+  onChange: (value: string | null) => void
+  loading: boolean
+  allowClear?: boolean
+  autoFocus?: boolean
+  className?: string
+  size?: 'large'
+}) {
+  const [search, setSearch] = useState('')
+  return (
+    <Select<string>
+      showSearch
+      allowClear={props.allowClear}
+      autoFocus={props.autoFocus}
+      className={props.className}
+      size={props.size}
+      placeholder="选择或输入完整项目组名称"
+      loading={props.loading}
+      value={props.value ?? undefined}
+      options={workspaceOptions(props.workspaces, search, props.value)}
+      onSearch={setSearch}
+      onChange={(value) => {
+        props.onChange(value ?? null)
+        setSearch('')
+      }}
+      notFoundContent="可输入完整项目组名称直接查询"
+    />
+  )
+}
+
 export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
   const { message } = AntApp.useApp()
   const [workspaceName, setWorkspaceName] = useState<string | null>(props.initialWorkspaceName ?? null)
@@ -99,7 +133,8 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
    * 它就把 current 重置回第 1 页 —— 表现就是"点了第 2 页又跳回来，像翻不动"。
    */
   const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
+  const [pageSize, setPageSize] = useState(20)
+  const serverPaging = props.selectable !== true
 
   /**
    * 勾选模式下先选项目组，再出列表。
@@ -116,13 +151,15 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
   const listVisible = !workspaceRequired || workspaceChosen
 
   /**
-   * 一次把范围内的故事全取回来。
-   *
-   * 选了项目组就带 workspace 参数（接口按组分页，不会被跨组总量的翻页上限截断）。
+   * 看板每次只取当前页；导入页不改变既有选择集合的完整性。
    */
   const storiesQuery = useQuery({
-    queryKey: ['linky-live-stories', workspaceName],
-    queryFn: ({ signal }) => fetchLinkyStories({ workspaceName, signal }),
+    queryKey: serverPaging
+      ? ['linky-live-page', workspaceName, assigneeName, page, pageSize]
+      : ['linky-live-stories', workspaceName],
+    queryFn: ({ signal }) => serverPaging
+      ? fetchLinkyStoryPage({ workspaceName, assigneeName, page, pageSize, signal })
+      : fetchLinkyStories({ workspaceName, signal }),
     enabled: listVisible,
     staleTime: 30_000,
     // 关掉窗口聚焦重取：这个页面有显式「刷新」按钮，而自动重取会在用户切回标签页时
@@ -132,17 +169,13 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
   })
 
   /**
-   * 项目组清单单独一条查询，永远不带 workspace 参数。
-   *
-   * 接口没有"列出工作区"的端点，工作区只能从跨组汇总的结果里抽出来。它必须独立于上面
-   * 那条：一旦选了组，`storiesQuery` 回的就只有这个组的需求，facet 出来的清单会缩成一项，
-   * 表现就是"选了之后换不了组，得先清空再选"。
-   *
-   * 没选组时两条查询的 queryKey 完全相同，react-query 直接复用同一次请求，不会多打一次。
+   * 导入门禁仅取一页候选；看板不为候选额外拉全量数据。候选不是全部项目组，
+   * 因此始终保留按完整名称查询入口。选定组后不等待候选查询。
    */
   const workspaceCatalogQuery = useQuery({
-    queryKey: ['linky-live-stories', null],
-    queryFn: ({ signal }) => fetchLinkyStories({ workspaceName: null, signal }),
+    queryKey: ['linky-workspace-candidates'],
+    queryFn: ({ signal }) => fetchLinkyStoryPage({ page: 1, pageSize: 200, signal }),
+    enabled: !listVisible,
     staleTime: 5 * 60_000,
     refetchOnWindowFocus: false,
     retry: false,
@@ -168,8 +201,8 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
   }, [workspaceName, releaseWindow, props.onScopeChange])
 
   const workspaces = useMemo(
-    () => facet((workspaceCatalogQuery.data?.stories ?? []).map((story) => story.workspaceName)),
-    [workspaceCatalogQuery.data],
+    () => facet([...(workspaceCatalogQuery.data?.stories ?? []), ...all].map((story) => story.workspaceName)),
+    [workspaceCatalogQuery.data, all],
   )
   const scoped = useMemo(
     () => (workspaceName === null ? all : all.filter((story) => story.workspaceName === workspaceName)),
@@ -197,6 +230,8 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
       message.info(`已清空之前勾选的 ${count} 条：一张导入单只能来自一个项目组`)
     }
     setWorkspaceName(value)
+    setPage(1)
+    setAssigneeName(null)
     setReleaseWindow(null)
   }
 
@@ -206,8 +241,8 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
 
   // 筛选条件变了就回第 1 页：否则会停在一个已经没有数据的页码上。
   useEffect(() => {
-    setPage(1)
-  }, [workspaceName, releaseWindow, statusLabel, assigneeName, keyword])
+    if (!serverPaging) setPage(1)
+  }, [workspaceName, releaseWindow, statusLabel, assigneeName, keyword, serverPaging])
 
   const filtered = useMemo(() => {
     const needle = keyword.trim().toLowerCase()
@@ -230,6 +265,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
     releaseWindow !== null || statusLabel !== null || assigneeName !== null || keyword.trim() !== ''
 
   const clearSecondaryFilters = () => {
+    if (serverPaging && assigneeName !== null) setPage(1)
     setReleaseWindow(null)
     setStatusLabel(null)
     setAssigneeName(null)
@@ -291,15 +327,13 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
         onCell: () => ({ style: { minWidth: 180, width: 180 } }),
         filterDropdown: ({ confirm }) => (
           <div className="story-column-filter">
-            <Select
+            <WorkspaceSelect
               allowClear={!workspaceRequired}
               autoFocus
-              showSearch
               className="story-column-filter__select"
-              placeholder="全部项目组"
               loading={workspaceCatalogQuery.isLoading}
-              value={workspaceName ?? undefined}
-              options={options(workspaces)}
+              value={workspaceName}
+              workspaces={workspaces}
               onChange={(value) => {
                 changeWorkspace(value ?? null)
                 confirm({ closeDropdown: true })
@@ -354,6 +388,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
               options={options(assignees)}
               onChange={(value) => {
                 setAssigneeName(value ?? null)
+                if (serverPaging) setPage(1)
                 confirm({ closeDropdown: true })
               }}
             />
@@ -416,6 +451,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
       releaseWindows,
       statusLabel,
       statuses,
+      serverPaging,
       workspaceCatalogQuery.isLoading,
       workspaceName,
       workspaceRequired,
@@ -431,7 +467,8 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
    * 两条查询都要覆盖：门禁状态下只有项目组清单在跑，列表查询是 disabled 的 —— 只看
    * `storiesQuery.error` 会让"不在内网"表现成一个空下拉，而不是一条错误。
    */
-  const loadError = (listVisible ? storiesQuery.error : null) ?? workspaceCatalogQuery.error
+  // 已指定项目组时，全量候选的失败不影响独立的单组结果。
+  const loadError = listVisible ? storiesQuery.error : workspaceCatalogQuery.error
   const refresh = () => {
     void (listVisible ? storiesQuery : workspaceCatalogQuery).refetch()
     message.info('正在从 Linky 重新取数')
@@ -479,21 +516,13 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
                 一张导入单只能来自一个项目组。选定之后这里会列出该组的全部需求，再勾选要冻结进本批次的条目。
               </span>
             </div>
-            <Select
-              showSearch
+            <WorkspaceSelect
               className="story-gate__select"
               size="large"
-              placeholder="选择项目组"
+              value={workspaceName}
               loading={workspaceCatalogQuery.isLoading}
-              options={options(workspaces)}
+              workspaces={workspaces}
               onChange={(value) => changeWorkspace(value ?? null)}
-              notFoundContent={
-                workspaceCatalogQuery.isLoading
-                  ? '正在从 Linky 取数…'
-                  : loadError
-                    ? '取数失败，见上方提示'
-                    : '没有可用的项目组'
-              }
             />
           </div>
         ) : (
@@ -512,6 +541,14 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
               * 栅格得跟着重算 span，flex 自己换行就行；末尾还能塞一个「清空筛选」而不占一格。
               */}
             <div className="story-filter-bar">
+              <WorkspaceSelect
+                className="story-filter-bar__workspace"
+                workspaces={workspaces}
+                value={workspaceName}
+                loading={workspaceCatalogQuery.isLoading}
+                allowClear={!workspaceRequired}
+                onChange={changeWorkspace}
+              />
               {secondaryFilterActive ? (
                 <Tooltip title="项目组保持不变，其余条件清空">
                   <Button type="link" size="small" onClick={clearSecondaryFilters}>
@@ -522,11 +559,25 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
               <Input
                 allowClear
                 className="story-filter-bar__search"
-                placeholder="编号或标题"
+                placeholder={serverPaging ? '本页编号或标题' : '编号或标题'}
                 value={keyword}
                 onChange={(event) => setKeyword(event.target.value)}
               />
             </div>
+
+            {serverPaging ? (
+              <Text type="secondary">
+                项目组和负责人查询全部匹配需求；编号、标题、状态及发布窗口仅筛选当前页。
+              </Text>
+            ) : null}
+
+            {!serverPaging && storiesQuery.data && storiesQuery.data.stories.length < storiesQuery.data.total ? (
+              <Alert
+                type="info"
+                showIcon
+                title={`已加载 ${storiesQuery.data.stories.length} 条，上游共 ${storiesQuery.data.total} 条；可按项目组缩小查询范围。`}
+              />
+            ) : null}
 
             {props.selectable ? (
               /*
@@ -565,18 +616,19 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
             <Table<LinkyLiveStory>
               rowKey="storyCode"
               size="small"
-              loading={storiesQuery.isLoading}
+              loading={storiesQuery.isFetching}
               dataSource={filtered}
               columns={columns}
               tableLayout="fixed"
               pagination={{
                 current: page,
                 pageSize,
+                total: serverPaging ? storiesQuery.data?.total ?? 0 : filtered.length,
                 showSizeChanger: true,
                 pageSizeOptions: [10, 20, 50, 100],
                 showTotal: (total) => `共 ${total} 条`,
                 onChange: (nextPage, nextSize) => {
-                  setPage(nextPage)
+                  setPage(nextSize !== pageSize ? 1 : nextPage)
                   if (nextSize !== pageSize) setPageSize(nextSize)
                 },
               }}

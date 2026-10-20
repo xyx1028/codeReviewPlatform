@@ -1,16 +1,26 @@
 ---
 name: crp-linux-release
-description: 指导代码评审平台 codeReviewPlatform 在公司 Linux 上的日常发布、部署配置定位与故障排查。用户问流水线构建后运行什么、忘记统一发布脚本或 Linux 路径、Worker 四副本并发、Functions 或 Storage 部署问题时使用；不用于其他项目或首次云端数据搬迁。
+description: 代码评审／代码审核平台 codeReviewPlatform 的线上设计、部署拓扑、访问链路、配置、发布和故障上下文。用户询问该平台的线上情况时使用；维护可跨对话恢复的线上配置及待办，随已确认的变更同步更新。与其他项目或纯本地业务实现无关。
 ---
 
-# 代码评审平台：公司 Linux 统一发布
+# 代码评审平台：线上配置与公司 Linux 发布
 
 帮助用户继续维护已经部署的 CRP 平台。使用中文、短说明和可直接粘贴的 Linux 命令；用户常通过跳板机手动执行，容易忘记路径和操作顺序。
+
+## 用户约定：每次线上问题都先读，随配置变更维护
+
+- 用户问到本平台线上设计、服务职责、调用链、配置位置、域名、运行状态、发布或排障时，都先使用本 Skill；不要只在用户提到“Linux 发布”时触发。
+- 新对话先读本入口，再从 [environment.md](references/environment.md) 恢复相关配置、最近确认记录和未完成事项。用户只问下一条命令时，给一个步骤，不一次要求整套诊断。
+- 线上配置、部署流程或状态变更后，在同一任务结束前同步更新相关参考；若工作方式或触发范围变化，再更新本入口／UI 元数据。只更新有新证据的条目，保持单一正文，不另复制一份技能。
+- 记录确认日期与来源（当前源码、本机测试、用户 Linux 输出或远程只读检查）。明确区分“配置约定”“已在线验证”“已改代码／待部署”“尚不确定”；构建成功不代表上线，旧部署记录不代表今天仍正常。
+- 若只是提出方案或给出命令、尚未收到执行结果，记录为待执行；收到用户结果后再更新状态。不能承诺后台监控或自动获知用户在别处的更改。
+- 只记录地址、路径、字段名和脱敏检查结论，不保存密码、token、service-role key、用户会话或完整 env。凭据生成／读取与凭据已经轮换是不同事件，不能混记。
+- 项目规则 `AGENTS.md` 指向此技能；用户级 `~/.codex/skills/crp-linux-release` 链接指向当前项目技能，方便新对话发现。换机器或链接失效时以当前检出为准恢复，不假设链接永远有效。
 
 ## 先识别目标和信息来源
 
 - 项目检出：本机 `/Users/kingdee/codeReviewPlatform`；公司 Linux 工作目录 `/home/kduser/crp/app`。从当前检出定位下面文件，不要求每个对话都在固定 Mac 路径。
-- 用户只问“下一步运行什么”时，给下方命令即可。解释设置或排障时，再读 [environment.md](references/environment.md) 或 [troubleshooting.md](references/troubleshooting.md)，不要一次要求几十项检查。
+- 用户只问“下一步运行什么”时，先看是否有待处理配置（例如 Linky 旧地址尚未替换），再给下方合适的一步。解释设置或排障时，再读 [environment.md](references/environment.md) 或 [troubleshooting.md](references/troubleshooting.md)，不要一次要求几十项检查。
 - 先核对当前仓库的 [release.sh](../../../deploy/supabase-selfhost/scripts/release.sh) 和相关覆盖层。参考文件中的历史部署成功是用户日志证据，不等于今天机器仍处于相同状态。没有远程连接时，让用户在 Linux 运行必要命令并提供输出，不能把 Mac Docker 当成远程 Linux。
 - 本 Skill 本身不授权提交、推送或生产发布。遵循用户当前明确授权；已授权的下一步不重复索要许可。通常由用户自行提交/推送并在 Linux 执行，AI 修改代码和解释结果。
 
@@ -63,4 +73,4 @@ bash deploy/supabase-selfhost/scripts/release.sh --apply
 - 路径、端口、网络、域名、密钥文件位置、最近已知部署：读 [environment.md](references/environment.md)。
 - 锁占用、路由冲突、Function 离线依赖、缺文件、上传失败：读 [troubleshooting.md](references/troubleshooting.md)，先给一个有区分力的检查，按第一条真实错误继续。
 - 修改 Worker/Functions 或发布行为时，使用项目现有 `worker-supabase-local-validation`；新增功能同时遵守 `feature-execution-document` 和版本同步要求。单纯回答发布命令不必重复执行本地构建。
-- 首次搬迁云端数据库属于单独任务：先审计目标和导出内容，再制定迁移；不能用日常 `release.sh` 或旧的清表命令直接恢复。
+- 首次搬迁云端数据库时也先用本技能恢复线上背景，但搬迁属于单独任务：先审计目标和导出内容，再制定迁移；不能用日常 `release.sh` 或旧的清表命令直接恢复。

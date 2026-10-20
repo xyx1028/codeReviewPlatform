@@ -3591,6 +3591,11 @@ a.dashboard-distribution-item:focus-visible {
   min-width: 150px;
 }
 
+.story-filter-bar__workspace {
+  width: 290px;
+  max-width: 100%;
+}
+
 .story-filter-bar__field--wide {
   flex: 1.4 1 200px;
   min-width: 200px;

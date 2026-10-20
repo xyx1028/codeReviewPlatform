@@ -55,7 +55,7 @@ export interface LinkyLiveAttachment {
   downloadUrl: string
 }
 
-export type LinkyLiveErrorKind = 'NETWORK' | 'NOT_FOUND' | 'HTTP' | 'PARSE'
+export type LinkyLiveErrorKind = 'NETWORK' | 'NOT_FOUND' | 'HTTP' | 'PARSE' | 'TIMEOUT'
 
 export class LinkyLiveError extends Error {
   readonly kind: LinkyLiveErrorKind
@@ -77,23 +77,46 @@ function text(value: unknown): string | null {
 }
 
 async function getJson(url: string, signal?: AbortSignal): Promise<unknown> {
-  let response: Response
+  const controller = new AbortController()
+  let timedOut = false
+  const cancel = () => controller.abort(signal?.reason)
+  if (signal?.aborted) cancel()
+  else signal?.addEventListener('abort', cancel, { once: true })
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, 15_000)
   try {
-    response = await fetch(url, { signal, headers: { Accept: 'application/json' } })
-  } catch {
-    // fetch 只在网络层失败时 reject；CORS 被拒也走这里。两种情况对用户是同一句话。
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    })
+    if (response.status === 404) {
+      throw new LinkyLiveError('Linky 里找不到这条需求或附件。', 'NOT_FOUND')
+    }
+    if (!response.ok) {
+      throw new LinkyLiveError(`Linky 返回 HTTP ${response.status}`, 'HTTP')
+    }
+    try {
+      return await response.json()
+    } catch (error) {
+      if (controller.signal.aborted) throw error
+      throw new LinkyLiveError('Linky 返回的不是合法 JSON', 'PARSE')
+    }
+  } catch (error) {
+    // React Query 取消旧查询时沿用取消语义，不伪装成网络故障。
+    if (signal?.aborted) throw error
+    if (timedOut) {
+      throw new LinkyLiveError(
+        'Linky 响应超过 15 秒。跨全部项目组查询可能较慢，可输入完整项目组名称后按组查询。',
+        'TIMEOUT',
+      )
+    }
+    if (error instanceof LinkyLiveError) throw error
     throw new LinkyLiveError(UNREACHABLE, 'NETWORK')
-  }
-  if (response.status === 404) {
-    throw new LinkyLiveError('Linky 里找不到这条需求或附件。', 'NOT_FOUND')
-  }
-  if (!response.ok) {
-    throw new LinkyLiveError(`Linky 返回 HTTP ${response.status}`, 'HTTP')
-  }
-  try {
-    return await response.json()
-  } catch {
-    throw new LinkyLiveError('Linky 返回的不是合法 JSON', 'PARSE')
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', cancel)
   }
 }
 
@@ -113,6 +136,40 @@ function toStory(raw: Record<string, unknown>): LinkyLiveStory | null {
     iteration: text(raw.iteration),
     releaseWindow: text(raw.release_window),
     subjectName: text(raw.subject),
+  }
+}
+
+/** 看板远程分页：一次只读一页，total 保留上游真实总数。 */
+export async function fetchLinkyStoryPage(options: {
+  workspaceName?: string | null
+  assigneeName?: string | null
+  page: number
+  pageSize: number
+  signal?: AbortSignal
+}): Promise<{ stories: LinkyLiveStory[]; total: number; scopes: number }> {
+  const url = new URL(`${linkyApiBase()}/stories`)
+  const page = Number.isFinite(options.page) ? Math.max(1, Math.floor(options.page)) : 1
+  const pageSize = Number.isFinite(options.pageSize)
+    ? Math.max(1, Math.min(200, Math.floor(options.pageSize))) : 50
+  url.searchParams.set('page', String(page))
+  url.searchParams.set('page_size', String(pageSize))
+  if (options.workspaceName) url.searchParams.set('workspace_name', options.workspaceName)
+  if (options.assigneeName) url.searchParams.set('assignee_name', options.assigneeName)
+  const payload = await getJson(url.toString(), options.signal)
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    throw new LinkyLiveError('Linky 列表响应不是对象', 'PARSE')
+  }
+  const record = payload as Record<string, unknown>
+  const items = Array.isArray(record.items) ? record.items : []
+  const stories = items.flatMap((item) => {
+    if (typeof item !== 'object' || item === null) return []
+    const story = toStory(item as Record<string, unknown>)
+    return story === null ? [] : [story]
+  })
+  return {
+    stories,
+    total: typeof record.total === 'number' ? record.total : items.length,
+    scopes: typeof record.scopes === 'number' ? record.scopes : 1,
   }
 }
 

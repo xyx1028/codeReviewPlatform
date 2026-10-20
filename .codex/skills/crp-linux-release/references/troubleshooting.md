@@ -74,6 +74,26 @@ docker logs --since 15m --tail 100 supabase-storage
 
 API Key 显示已配置但测试 QUEUED 时，连接测试由 Worker 执行。先查 Worker 是否停止及是否有领取任务/网络错误；不要直接认定 Key 错误。若停机是迁移维护的一部分，先核对历史任务再恢复 Worker，而不是不看任务就启动。
 
+## Linky 列表／导入失败
+
+先读 environment.md 的 Linky 进度与地址。当前正式入口为 `https://linky.kingdee.com/quality-platform/api/linky`，不是旧 `feature.kingdee.com:2055`。
+
+- 页面“用户故事”／“原始需求导入”的实时列表由浏览器直连；先在使用者电脑测试。正式导入失败再检查 Worker 的地址和网络模式；MCP 校验失败检查 MCP 的独立地址配置。
+- 只给出“HTTP 400”不足以判断原因；用不带任何 token 的只读请求取错误正文。旧入口曾返回 `{"detail":"Linky 返回错误（401）：invalid token"}`，新入口已实测 200，不要继续把旧入口的结果当成当前新入口故障，也不要让用户把 MCP token 填给 Linky。
+- 对方说“域名换了”时，逐字比较协议、域名、端口和路径。此前提供的旧 `/help` 页与页面域名完全相同；2026-10-20 新帮助页才变成 `linky.kingdee.com`。帮助页 200 不等于取数成功，应测试 `/stories`，取得真实编号后再查详情。
+- 代码／镜像已更新但页面仍显示旧入口时，检查运行时挂载配置和显式 env 覆盖。先修正机器文件，再由统一发布完成 Worker 排空重建、Web 与 MCP 更新；不直接打断在途任务。
+- 持续转圈也可能是全量聚合慢：2026-10-20 线上资源已确认新域名，而跨组列表第 1、2 页都超过 25 秒、单组约 0.7 秒。旧页面连续请求最多 12 页且无超时，表格是本地分页。V1.57 本地已改真实接口分页和 15 秒超时／手动按组查询，尚待发布；不要把这个问题说成发布失败、数据库异常或 token 失效。接口分页只减少前端预取，若单个上游跨组请求仍慢，需按组缩小范围或由上游优化。
+
+只检查服务连通性、不打印业务数据的命令（确认是用户电脑还是 Linux 后再给）：
+
+```bash
+curl --noproxy '*' -sS --connect-timeout 5 --max-time 30 \
+  -o /dev/null -w 'Linky：HTTP %{http_code}\n' \
+  'https://linky.kingdee.com/quality-platform/api/linky/stories?page=1&page_size=1'
+```
+
+若非 200，再取响应正文区分上游业务错误、代理拒绝、CORS 与真实网络超时。Mac 成功不能替代 Linux 容器成功；不为验证连接而批量下载业务数据或重跑评审。
+
 ## 旧的权限和离线环境问题
 
 - Worker 无法创建 `/workspace/jobs/*.lock` 且 EACCES：核对镜像运行 UID/GID 和实际命名卷所有权。不要默认改成 root 或 chmod 777。

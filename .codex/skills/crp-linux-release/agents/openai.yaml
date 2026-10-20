@@ -1,4 +1,6 @@
 interface:
-  display_name: "代码评审平台 Linux 发布"
-  short_description: "查找公司 Linux 部署配置，指导统一发布、四副本更新和故障排查"
-  default_prompt: "使用 $crp-linux-release，先核对项目部署配置，再告诉我 Linux 上预览和正式发布的步骤。"
+  display_name: "代码评审平台线上配置与发布"
+  short_description: "恢复并维护平台线上配置、访问链路和发布状态，指导公司 Linux 发布与排障"
+  default_prompt: "使用 $crp-linux-release，先读取线上配置和未完成事项，核对证据后回答我的线上问题，并同步记录已确认的配置变更。"
+policy:
+  allow_implicit_invocation: true
