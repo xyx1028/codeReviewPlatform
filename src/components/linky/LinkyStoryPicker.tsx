@@ -4,8 +4,12 @@
  * 数据每次都从 Linky 现取，没有镜像、没有同步按钮 —— 「刷新」就是重新请求。
  * 看板页与批次导入页共用它：两边要看的字段、要过滤的维度完全一样，区别只在选完之后做什么。
  *
- * 看板按上游 page/page_size 分页；导入页保留按组加载，维持已有跨页勾选逻辑。
- * 看板的项目组／负责人由接口筛选；其余本地条件明确只作用于当前页。
+ * **选定项目组后一次把该组需求全部取回，筛选与分页都在本地做。** 上游 `/stories` 只认
+ * `workspace_name` 与 `assignee_name` 两个过滤参数，没有发布窗口／状态；之前看板按上游
+ * page/page_size 取一页，就只能拿这一页的值去填下拉、也只能筛这一页 —— 选 `R20261106`
+ * 得到的是"第 1 页里属于该窗口的那几条"，而不是该组全部属于该窗口的需求，且下一页存在的
+ * 窗口在下拉里根本看不到。按组整体加载（每页 200，实测 275 条的组 2 个请求）是唯一能让
+ * 发布窗口这类上游不支持的维度拿到真实全组口径的做法，导入页本来就是这么做的。
  */
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -33,7 +37,6 @@ import { useQuery } from '@tanstack/react-query'
 import {
   fetchLinkyAttachments,
   fetchLinkyStories,
-  fetchLinkyStoryPage,
   fetchLinkyStoryDetail,
   linkyApiBase,
   type LinkyLiveStory,
@@ -133,22 +136,22 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
    */
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
-  const serverPaging = props.selectable !== true
+  /** 看板与导入页的差异只剩交互（可否清空项目组、是否勾选），取数口径完全一致。 */
+  const boardMode = props.selectable !== true
 
   // 看板和导入都先选组。目录来自本地预置，不触发上游慢速跨组聚合。
   const workspaceChosen = workspaceName !== null
   const listVisible = workspaceChosen
 
   /**
-   * 看板每次只取当前页；导入页不改变既有选择集合的完整性。
+   * 按项目组整体取数，两页共用同一份缓存。
+   *
+   * 不按上游分页取：发布窗口、状态这些维度上游不支持过滤，只有手上握着全组数据，
+   * 下拉里的候选值和筛选结果才是"这个组的全部需求"而不是"当前这一页"。
    */
   const storiesQuery = useQuery({
-    queryKey: serverPaging
-      ? ['linky-live-page', workspaceName, assigneeName, page, pageSize]
-      : ['linky-live-stories', workspaceName],
-    queryFn: ({ signal }) => serverPaging
-      ? fetchLinkyStoryPage({ workspaceName, assigneeName, page, pageSize, signal })
-      : fetchLinkyStories({ workspaceName, signal }),
+    queryKey: ['linky-live-stories', workspaceName],
+    queryFn: ({ signal }) => fetchLinkyStories({ workspaceName, signal }),
     enabled: listVisible,
     staleTime: 30_000,
     // 关掉窗口聚焦重取：这个页面有显式「刷新」按钮，而自动重取会在用户切回标签页时
@@ -217,8 +220,8 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
 
   // 筛选条件变了就回第 1 页：否则会停在一个已经没有数据的页码上。
   useEffect(() => {
-    if (!serverPaging) setPage(1)
-  }, [workspaceName, releaseWindow, statusLabel, assigneeName, keyword, serverPaging])
+    setPage(1)
+  }, [workspaceName, releaseWindow, statusLabel, assigneeName, keyword])
 
   const filtered = useMemo(() => {
     const needle = keyword.trim().toLowerCase()
@@ -241,7 +244,6 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
     releaseWindow !== null || statusLabel !== null || assigneeName !== null || keyword.trim() !== ''
 
   const clearSecondaryFilters = () => {
-    if (serverPaging && assigneeName !== null) setPage(1)
     setReleaseWindow(null)
     setStatusLabel(null)
     setAssigneeName(null)
@@ -304,7 +306,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
         filterDropdown: ({ confirm }) => (
           <div className="story-column-filter">
             <WorkspaceSelect
-              allowClear={serverPaging}
+              allowClear={boardMode}
               autoFocus
               className="story-column-filter__select"
               value={workspaceName}
@@ -363,7 +365,6 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
               options={options(assignees)}
               onChange={(value) => {
                 setAssigneeName(value ?? null)
-                if (serverPaging) setPage(1)
                 confirm({ closeDropdown: true })
               }}
             />
@@ -420,13 +421,13 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
     [
       assigneeName,
       assignees,
+      boardMode,
       changeWorkspace,
       options,
       releaseWindow,
       releaseWindows,
       statusLabel,
       statuses,
-      serverPaging,
       workspaceName,
       workspaces,
     ],
@@ -483,7 +484,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
               <span className="story-gate__hint">
                 {props.selectable
                   ? '一张导入单只能来自一个项目组。选定之后这里会列出该组的全部需求，再勾选要冻结进本批次的条目。'
-                  : '输入部分名称搜索项目组，选定后按页浏览该组需求。'}
+                  : '输入部分名称搜索项目组。选定后会列出该组的全部需求，发布窗口、状态等筛选都作用于整组。'}
               </span>
             </div>
             <WorkspaceSelect
@@ -514,7 +515,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
                 className="story-filter-bar__workspace"
                 workspaces={workspaces}
                 value={workspaceName}
-                allowClear={serverPaging}
+                allowClear={boardMode}
                 onChange={changeWorkspace}
               />
               {secondaryFilterActive ? (
@@ -527,23 +528,25 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
               <Input
                 allowClear
                 className="story-filter-bar__search"
-                placeholder={serverPaging ? '本页编号或标题' : '编号或标题'}
+                placeholder="编号或标题"
                 value={keyword}
                 onChange={(event) => setKeyword(event.target.value)}
               />
             </div>
 
-            {serverPaging ? (
-              <Text type="secondary">
-                项目组和负责人查询全部匹配需求；编号、标题、状态及发布窗口仅筛选当前页。
-              </Text>
-            ) : null}
-
-            {!serverPaging && storiesQuery.data && storiesQuery.data.stories.length < storiesQuery.data.total ? (
+            {/*
+              * 加载完整性提示。
+              *
+              * 只在**没取全**时才说话：此时下拉里的候选值和筛选结果都只覆盖已加载的部分，
+              * 这一点必须讲明白，否则"筛出 0 条"会被当成"这个窗口没有需求"。取全了就不提 ——
+              * 筛选作用于全组是预期行为，不需要常驻一句解释。
+              */}
+            {storiesQuery.data && storiesQuery.data.stories.length < storiesQuery.data.total ? (
               <Alert
-                type="info"
+                type="warning"
                 showIcon
-                title={`已加载 ${storiesQuery.data.stories.length} 条，上游共 ${storiesQuery.data.total} 条；可按项目组缩小查询范围。`}
+                title={`这个项目组上游共 ${storiesQuery.data.total} 条，已加载 ${storiesQuery.data.stories.length} 条`}
+                description="超出加载上限的部分没有取回，下拉候选值与筛选结果都只覆盖已加载的部分。请用负责人或关键字缩小范围后再筛。"
               />
             ) : null}
 
@@ -591,7 +594,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
               pagination={{
                 current: page,
                 pageSize,
-                total: serverPaging ? storiesQuery.data?.total ?? 0 : filtered.length,
+                total: filtered.length,
                 showSizeChanger: true,
                 pageSizeOptions: [10, 20, 50, 100],
                 showTotal: (total) => `共 ${total} 条`,

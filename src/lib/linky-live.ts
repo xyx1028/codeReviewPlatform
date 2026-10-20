@@ -139,42 +139,12 @@ function toStory(raw: Record<string, unknown>): LinkyLiveStory | null {
   }
 }
 
-/** 看板远程分页：一次只读一页，total 保留上游真实总数。 */
-export async function fetchLinkyStoryPage(options: {
-  workspaceName?: string | null
-  assigneeName?: string | null
-  page: number
-  pageSize: number
-  signal?: AbortSignal
-}): Promise<{ stories: LinkyLiveStory[]; total: number; scopes: number }> {
-  const url = new URL(`${linkyApiBase()}/stories`)
-  const page = Number.isFinite(options.page) ? Math.max(1, Math.floor(options.page)) : 1
-  const pageSize = Number.isFinite(options.pageSize)
-    ? Math.max(1, Math.min(200, Math.floor(options.pageSize))) : 50
-  url.searchParams.set('page', String(page))
-  url.searchParams.set('page_size', String(pageSize))
-  if (options.workspaceName) url.searchParams.set('workspace_name', options.workspaceName)
-  if (options.assigneeName) url.searchParams.set('assignee_name', options.assigneeName)
-  const payload = await getJson(url.toString(), options.signal)
-  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
-    throw new LinkyLiveError('Linky 列表响应不是对象', 'PARSE')
-  }
-  const record = payload as Record<string, unknown>
-  const items = Array.isArray(record.items) ? record.items : []
-  const stories = items.flatMap((item) => {
-    if (typeof item !== 'object' || item === null) return []
-    const story = toStory(item as Record<string, unknown>)
-    return story === null ? [] : [story]
-  })
-  return {
-    stories,
-    total: typeof record.total === 'number' ? record.total : items.length,
-    scopes: typeof record.scopes === 'number' ? record.scopes : 1,
-  }
-}
-
 /**
  * 拉一个范围内的全部故事。
+ *
+ * 为什么不按上游分页只取一页：上游 `/stories` 只认 `workspace_name` 与 `assignee_name`
+ * 两个过滤参数，发布窗口、状态、编号关键字都只能在本地筛。手上只有一页时，这些筛选的
+ * 口径就退化成"当前这一页"，下拉里也看不到其它页存在的取值。
  *
  * 不带工作区就是跨全部启用工作区汇总 —— 项目组下拉只能这么得到，因为接口没有
  * "列出工作区"的端点。`maxPages` 是安全阀：上游 total 与实际条数不一致时得有地方停下。

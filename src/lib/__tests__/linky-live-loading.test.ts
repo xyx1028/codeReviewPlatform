@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fetchLinkyStories, fetchLinkyStoryPage } from '../linky-live'
+import { fetchLinkyStories } from '../linky-live'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -16,31 +16,40 @@ function neverRespond(_url: unknown, init?: RequestInit): Promise<Response> {
 }
 
 describe('Linky loading boundaries', () => {
-  it('看板请求指定的一页后立即返回，不因上游总数大而接着拉其他页', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      items: [{ id: 'issue-3', code: 'US-3', workspace_id: 'group', workspace_name: '工具开发组' }],
-      total: 9402,
-      scopes: 33,
-    })))
+  it('按组取数一次读满 200 条，让发布窗口等本地筛选拿到全组口径', async () => {
+    const story = (code: string) => ({ id: code, code, workspace_id: 'group', workspace_name: '工具开发组' })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        items: Array.from({ length: 200 }, (_, index) => story(`US-${index + 1}`)),
+        total: 275,
+        scopes: 1,
+      })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        items: Array.from({ length: 75 }, (_, index) => story(`US-${index + 201}`)),
+        total: 275,
+        scopes: 1,
+      })))
     vi.stubGlobal('fetch', fetchMock)
-    const result = await fetchLinkyStoryPage({ page: 3, pageSize: 20 })
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-    const url = new URL(String(fetchMock.mock.calls[0]?.[0]))
-    expect(url.searchParams.get('page')).toBe('3')
-    expect(url.searchParams.get('page_size')).toBe('20')
-    expect(result.total).toBe(9402)
-    expect(result.stories.map((story) => story.storyCode)).toEqual(['US-3'])
+    const result = await fetchLinkyStories({ workspaceName: '工具开发组' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams.get('page_size')).toBe('200')
+    expect(result.stories).toHaveLength(275)
+    expect(result.total).toBe(275)
   })
 
-  it('远程分页保持项目组和负责人条件，限制上游每页最多 200 条', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], total: 0, scopes: 1 })))
+  it('上游 total 虚高时按 maxPages 停下，并如实回报未取全', async () => {
+    // 每次调用都要新建 Response：同一个实例的 body 只能读一次。
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      items: [{ id: 'issue-1', code: 'US-1', workspace_id: 'group', workspace_name: '工具开发组' }],
+      total: 9402,
+      scopes: 1,
+    })))
     vi.stubGlobal('fetch', fetchMock)
-    await fetchLinkyStoryPage({ page: -1, pageSize: 999, workspaceName: '工具开发组', assigneeName: '负责人甲' })
-    const url = new URL(String(fetchMock.mock.calls[0]?.[0]))
-    expect(url.searchParams.get('page')).toBe('1')
-    expect(url.searchParams.get('page_size')).toBe('200')
-    expect(url.searchParams.get('workspace_name')).toBe('工具开发组')
-    expect(url.searchParams.get('assignee_name')).toBe('负责人甲')
+    const result = await fetchLinkyStories({ workspaceName: '工具开发组', maxPages: 3 })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(result.stories).toHaveLength(3)
+    // 已加载条数 < total 就是界面上那条「没取全」告警的判据，不能被抹平成相等。
+    expect(result.stories.length).toBeLessThan(result.total)
   })
 
   it('上游一直不返回时 15 秒结束等待，释放计时器并给出按组查询指引', async () => {
