@@ -30,7 +30,6 @@ import {
   Descriptions,
   Divider,
   Drawer,
-  Dropdown,
   Empty,
   Form,
   Input,
@@ -65,7 +64,6 @@ import { selectAllState, toggleSelectAllFiltered } from './components/linky/stor
 import {
   buildReportMeta,
   buildReviewReports,
-  downloadReviewReportsXlsx,
   downloadReviewReportsZip,
   reportScopeLabel,
 } from './lib/review-report'
@@ -3652,7 +3650,7 @@ function ReviewListPage({ batchId }: { batchId: string }) {
     filterActive,
   })
 
-  const runDownload = async (format: 'xlsx' | 'zip') => {
+  const runDownload = async () => {
     const workspace = workspaceQuery.data
     if (!workspace) return
     const targetIds = downloadScope.scope === 'SELECTED' ? effectiveSelectedIds : selectableIds
@@ -3671,8 +3669,7 @@ function ReviewListPage({ batchId }: { batchId: string }) {
         workspace.activeImport,
         downloadScope.scope === 'SELECTED' ? `已勾选 ${reports.length} 条` : `${filterActive ? '当前筛选结果' : '全部'} ${reports.length} 条`,
       )
-      if (format === 'xlsx') await downloadReviewReportsXlsx(reports, meta)
-      else downloadReviewReportsZip(reports, meta)
+      downloadReviewReportsZip(reports, meta)
       const unanalyzed = reports.filter((report) => !report.result?.verdict).length
       // 未分析的需求照样进报告（标成"未分析"），但要说一声 —— 否则会被当成"结论是空的"。
       message.success(
@@ -3809,20 +3806,18 @@ function ReviewListPage({ batchId }: { batchId: string }) {
         {effectiveSelectedIds.length > 0 ? (
           <Button type="link" size="small" onClick={() => setSelectedStoryIds([])}>清空勾选</Button>
         ) : null}
-        <Dropdown
-          disabled={downloadScope.disabled || downloading}
-          menu={{
-            items: [
-              { key: 'xlsx', label: 'Excel 汇总（一份，含验收点/风险/证据明细）' },
-              { key: 'zip', label: 'Markdown 逐条（ZIP，一条需求一个文件）' },
-            ],
-            onClick: ({ key }) => void runDownload(key === 'zip' ? 'zip' : 'xlsx'),
-          }}
-        >
-          <Button type="primary" icon={<DownloadOutlined />} loading={downloading}>
+        <Tooltip title="导出一个 ZIP：每条需求一个 Markdown 报告，另附一份汇总">
+          <Button
+            type="primary"
+            icon={<DownloadOutlined />}
+            className="review-list-toolbar__download"
+            disabled={downloadScope.disabled}
+            loading={downloading}
+            onClick={() => void runDownload()}
+          >
             {downloadScope.label}
           </Button>
-        </Dropdown>
+        </Tooltip>
       </div>
 
       <Table

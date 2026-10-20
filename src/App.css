@@ -475,8 +475,8 @@ a.dashboard-distribution-item:focus-visible {
   font-size: 13px;
 }
 
-.review-list-toolbar > .ant-dropdown-trigger,
-.review-list-toolbar > .ant-btn-primary {
+/* 按钮固定靠右：中间留白把"范围说明"和"下载"分到两端，范围才不会被当成按钮的副标题。 */
+.review-list-toolbar__download {
   margin-left: auto;
 }
 

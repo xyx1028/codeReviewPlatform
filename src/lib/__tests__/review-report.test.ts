@@ -1,8 +1,8 @@
 /**
  * 评审报告下载（V1.69）。
  *
- * 只测纯逻辑：报告组装、范围文案、文件名净化、Markdown 与 Sheet 的内容。
- * 两个下载入口（写文件）不在这里测 —— 它们只是把下面这些产物交给浏览器。
+ * 只测纯逻辑：报告组装、范围文案、文件名净化、Markdown 内容。
+ * 下载入口（写文件）不在这里测 —— 它只是把下面这些产物交给浏览器。
  *
  * 这一组盯住的是"报告会不会骗人"：
  *   · 未分析、未确认必须如实写出来，不能留空（空白会被读成"没问题"）；
@@ -13,15 +13,14 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  archiveFileName,
   buildReportMeta,
-  buildReviewReportSheets,
   buildReviewReports,
   renderReviewReportMarkdown,
   renderReviewSummaryMarkdown,
   reportScopeLabel,
   safeFileSegment,
   storyFileName,
-  workbookFileName,
 } from '../review-report'
 import type { AiCodeEvidence, AiImportRecord, AiReviewResult, HumanReview, ReviewBatch, ReviewStory } from '../../types'
 import type { AcceptanceReviewReport } from '../../../worker/src/ai/review-workflow-types'
@@ -272,8 +271,8 @@ describe('文件名', () => {
     expect(safeFileSegment('x'.repeat(100), 10)).toHaveLength(10)
   })
 
-  it('工作簿与单条文件名都带编码/批次，便于归档', () => {
-    expect(workbookFileName(META, 3)).toBe('20261020-MCP 评审：US-2026-042424-评审报告3条.xlsx')
+  it('ZIP 与单条文件名都带批次/编码，便于归档', () => {
+    expect(archiveFileName(META, 3)).toBe('20261020-MCP 评审：US-2026-042424-评审报告3条.zip')
     const name = storyFileName({ story: story({ story_name: 'a/b' }), result: null, review: null, evidence: [], acceptance: null })
     expect(name).toBe('US-2026-042424-a_b.md')
   })
@@ -359,69 +358,5 @@ describe('Markdown 报告', () => {
     expect(summary).toContain('- 未分析：1 条')
     expect(summary).toContain('- 人工待确认：2 条')
     expect(summary).toContain('a\\|b')
-  })
-})
-
-describe('Excel 报告', () => {
-  const reports = buildReviewReports({
-    stories: [story()],
-    results: [result({ acceptance_review: acceptanceReport() })],
-    evidence: [evidence()],
-    humanReviews: [review],
-  })
-  const sheets = buildReviewReportSheets(reports, META)
-  const byName = new Map(sheets.map((sheet) => [sheet.sheet, sheet.rows]))
-
-  it('五个 Sheet：批次信息 / 需求评审 / 验收点 / 风险 / 代码证据', () => {
-    expect(sheets.map((sheet) => sheet.sheet)).toEqual(['批次信息', '需求评审', '验收点', '风险', '代码证据'])
-  })
-
-  it('批次信息带出处与条数统计', () => {
-    const rows = byName.get('批次信息') ?? []
-    const map = new Map(rows.map((row) => [String(row[0]), row[1]]))
-    expect(map.get('分析模型')).toBe('glm5.3-flash')
-    expect(map.get('导出范围')).toBe('已勾选 1 条')
-    expect(map.get('导出需求数')).toBe(1)
-    expect(map.get('其中有 AI 结果')).toBe(1)
-    expect(map.get('其中已人工确认')).toBe(1)
-  })
-
-  it('需求评审一行一条，含判断、统计与人工结论', () => {
-    const rows = byName.get('需求评审') ?? []
-    expect(rows).toHaveLength(2)
-    const row = rows[1]
-    expect(row[0]).toBe('US-2026-042424')
-    expect(row[8]).toBe('部分实现')
-    expect(row[9]).toBe(80)
-    expect(row[10]).toBe(2) // 验收点数
-    expect(row[11]).toBe(1) // 未确认验收点数（UNCERTAIN）
-    expect(row[12]).toBe(1) // 风险数
-    expect(row[13]).toBe(1) // 证据数
-    expect(row[14]).toBe('存在分歧')
-    expect(row[15]).toBe('AI分析部分正确')
-  })
-
-  it('验收点/风险/证据是一对多，各自一行', () => {
-    expect((byName.get('验收点') ?? []).slice(1)).toHaveLength(2)
-    expect((byName.get('风险') ?? []).slice(1)).toHaveLength(1)
-    expect((byName.get('代码证据') ?? []).slice(1)).toHaveLength(1)
-    const criterion = (byName.get('验收点') ?? [])[2]
-    expect(criterion[1]).toBe('AC-2')
-    expect(criterion[3]).toBe('是') // 需求待澄清
-    expect(criterion[7]).toBe('是') // 复核分歧
-    const evidenceRow = (byName.get('代码证据') ?? [])[1]
-    expect(evidenceRow[3]).toBe('src/main/java/Nacos.java')
-    expect(evidenceRow[5]).toBe(10)
-  })
-
-  it('没有结构化报告时统计列写占位，不写 0（0 会被当成"确实是 0 个验收点"）', () => {
-    const legacy = buildReviewReportSheets(
-      buildReviewReports({ stories: [story()], results: [result()], evidence: [], humanReviews: [] }),
-      META,
-    )
-    const row = (new Map(legacy.map((sheet) => [sheet.sheet, sheet.rows])).get('需求评审') ?? [])[1]
-    expect(row[10]).toBe('—')
-    expect(row[12]).toBe('—')
-    expect(row[14]).toBe('—')
   })
 })

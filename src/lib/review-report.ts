@@ -5,11 +5,11 @@
  * 这里不新增任何接口 —— `getBatchWorkspace` 已经把 stories / results / evidence /
  * humanReviews 全量取回，报告完全从那份数据组装。没有新的读通道，也就没有新的权限面。
  *
- * 两种形态，对应两种真实用途：
- *
- *   · **Excel 汇总**（一份 .xlsx，5 个 Sheet）：按需求 / 验收点 / 风险 / 代码证据四个维度
- *     筛查与留档。多条需求导成**一份**文件 —— 导成 N 份要人自己再合并一次。
- *   · **Markdown 逐条**（一个 .zip）：每条需求一个文件，直接发给负责那条需求的开发。
+ * **只有一种形态：一个 ZIP，每条需求一个 Markdown 报告，另附一份汇总。**
+ * 评审结论的主体是长文本（验收点理由、风险描述、证据说明），Markdown 适合直接发给
+ * 负责那条需求的人看；而把同样的内容塞进 Excel 单元格，读的人要先拉宽列、再展开换行。
+ * 曾经同时提供过 Excel 汇总，按使用者要求去掉了 —— 留一个不用的导出格式，只会让每次
+ * 下载都多一次无意义的选择。
  *
  * 三条贯穿全文件的规矩：
  *
@@ -17,12 +17,10 @@
  *    批次还没导入过结果就把模型/基线写成「未导入」。空白会被读成"没问题"。
  * 2. **报告必须带出处。** 批次、发布周期、代码基线分支与基线 Commit、模型、分析完成时间、
  *    导出时间 —— 一份不知道"是哪次分析、基于哪个 commit"的报告，过两周就没人敢用。
- * 3. **不执行、不渲染模型输出。** Markdown 只是文本拼接，Excel 按字符串写单元格；
- *    自由文本只做换行归一。模型输出是数据，不是代码，也不是可信标记。
+ * 3. **不执行、不渲染模型输出。** Markdown 只是文本拼接；自由文本只做换行归一。
+ *    模型输出是数据，不是代码，也不是可信标记。
  */
 
-import writeXlsxFile from 'write-excel-file/browser'
-import type { Cell, Sheet } from 'write-excel-file/browser'
 import { zipSync, strToU8 } from 'fflate'
 import { aiVerdictLabels, humanReviewLabels } from './labels'
 import type {
@@ -85,7 +83,7 @@ const certaintyLabels: Record<string, string> = { CONFIRMED: '已确认', SUSPEC
 
 function text(value: string | null | undefined, fallback = EMPTY): string {
   if (value === null || value === undefined) return fallback
-  // 自由文本里的 \r\n 与行末空白会让 Excel 单元格和 Markdown 都出现看不见的脏东西。
+  // 自由文本里的 \r\n 与行末空白会在 Markdown 里留下看不见的脏东西。
   const normalized = value.replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trim()
   return normalized === '' ? fallback : normalized
 }
@@ -99,7 +97,7 @@ function localTime(value: string | null | undefined, fallback = EMPTY): string {
   if (!value) return fallback
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  // 用使用者本地时区渲染：报告是给人看的，ISO 字符串在 Excel 里也不好对齐。
+  // 用使用者本地时区渲染：报告是给人看的，裸 ISO 字符串没人愿意换算。
   return date.toLocaleString('zh-CN', { hour12: false })
 }
 
@@ -211,10 +209,6 @@ export function safeFileSegment(value: string, maxLength = 60): string {
     .replace(/^\.+|\.+$/g, '')
   const trimmed = cleaned.slice(0, maxLength).trim()
   return trimmed === '' ? '未命名' : trimmed
-}
-
-export function workbookFileName(meta: ReviewReportMeta, count: number): string {
-  return `${safeFileSegment(meta.weekCode, 20)}-${safeFileSegment(meta.batchName, 40)}-评审报告${count}条.xlsx`
 }
 
 export function archiveFileName(meta: ReviewReportMeta, count: number): string {
@@ -418,224 +412,10 @@ export function renderReviewSummaryMarkdown(reports: ReviewReport[], meta: Revie
 }
 
 // ---------------------------------------------------------------------------
-// Excel
-// ---------------------------------------------------------------------------
-
-type CellValue = string | number | null
-type ExportCell = Exclude<Cell, undefined>
-
-function cell(value: CellValue, bold = false): ExportCell {
-  const resolved = value === null ? '' : value
-  return bold ? { value: resolved, fontWeight: 'bold' } : { value: resolved }
-}
-
-function sheetOf(name: string, rows: CellValue[][]): Sheet<Blob> {
-  return {
-    sheet: name,
-    data: rows.map((row, rowIndex) => row.map((value) => cell(value, rowIndex === 0))),
-  }
-}
-
-export const reviewSheetColumns = [
-  '用户故事编码',
-  '用户故事名称',
-  '所属项目组',
-  '发布窗口',
-  '需求状态',
-  '开发人员',
-  '需求人员',
-  '测试人员',
-  'AI判断',
-  '置信度',
-  '验收点数',
-  '未确认验收点数',
-  '风险数',
-  '证据数',
-  '独立复核',
-  '人工结论',
-  '人工意见',
-  '人工确认时间',
-  '分析摘要',
-  '已实现内容',
-  '缺失内容',
-  '风险',
-  '建议测试点',
-  'AI备注',
-] as const
-
-export const criterionSheetColumns = [
-  '用户故事编码',
-  '验收点ID',
-  '验收点描述',
-  '需求待澄清',
-  '评审结论',
-  '结论理由',
-  '证据条数',
-  '复核分歧',
-] as const
-
-export const riskSheetColumns = [
-  '用户故事编码',
-  '风险ID',
-  '风险标题',
-  '确定性',
-  '归因',
-  '触发条件',
-  '影响',
-  '关联验收点',
-  '证据条数',
-  '复核备注',
-] as const
-
-export const evidenceSheetColumns = [
-  '用户故事编码',
-  '仓库',
-  'Commit',
-  '文件路径',
-  '类/方法',
-  '开始行',
-  '结束行',
-  '证据类型',
-  '证据摘要',
-  '证据说明',
-] as const
-
-/**
- * 5 个 Sheet 的二维数组。
- *
- * 为什么拆成四张明细表而不是把所有东西塞进一行：验收点、风险、证据都是**一对多**，
- * 塞进一个单元格就只能靠肉眼在一团文字里找，而 Excel 的筛选恰好是这份报告最大的用处
- * （"把所有未实现的验收点列出来"、"这个仓库被哪些需求引用了"）。
- */
-export function buildReviewReportSheets(
-  reports: ReviewReport[],
-  meta: ReviewReportMeta,
-): Array<{ sheet: string; rows: CellValue[][] }> {
-  const batchRows: CellValue[][] = [
-    ['字段', '值'],
-    ['批次名称', meta.batchName],
-    ['发布周期', meta.weekCode],
-    ['代码基线分支', meta.baselineBranch],
-    ['基线 Commit', meta.baselineCommit],
-    ['分析模型', meta.model],
-    ['分析完成时间', meta.analyzedAt],
-    ['导出时间', meta.exportedAt],
-    ['导出范围', meta.scopeLabel],
-    ['导出需求数', reports.length],
-    ['其中有 AI 结果', reports.filter((report) => report.result?.verdict).length],
-    ['其中已人工确认', reports.filter((report) => report.review !== null).length],
-  ]
-
-  const reviewRows: CellValue[][] = [[...reviewSheetColumns]]
-  const criterionRows: CellValue[][] = [[...criterionSheetColumns]]
-  const riskRows: CellValue[][] = [[...riskSheetColumns]]
-  const evidenceRows: CellValue[][] = [[...evidenceSheetColumns]]
-
-  for (const report of reports) {
-    const { story, result, review, acceptance } = report
-    const unresolved = acceptance
-      ? acceptance.findings.filter((finding) => finding.verdict === 'UNCERTAIN').length
-      : 0
-    reviewRows.push([
-      story.story_code,
-      story.story_name,
-      text(story.project_name),
-      text(story.release_window),
-      text(story.source_status),
-      text(story.owners_text),
-      text(story.requirement_handlers),
-      text(story.test_handlers),
-      verdictLabel(result?.verdict ?? null),
-      result?.confidence === null || result?.confidence === undefined ? EMPTY : result.confidence,
-      acceptance ? acceptance.criteria.length : EMPTY,
-      acceptance ? unresolved : EMPTY,
-      acceptance ? acceptance.risks.length : EMPTY,
-      report.evidence.length,
-      acceptance
-        ? acceptance.verification.status === 'DISAGREEMENT'
-          ? '存在分歧'
-          : '已确认'
-        : EMPTY,
-      review ? humanReviewLabels[review.result] ?? review.result : NOT_REVIEWED,
-      review ? text(review.comment, '') : '',
-      review ? localTime(review.reviewed_at) : '',
-      result ? text(result.summary, '') : NOT_ANALYZED,
-      result ? text(result.implemented_content, '') : '',
-      result ? text(result.missing_content, '') : '',
-      result ? text(result.risks, '') : '',
-      result ? text(result.test_points, '') : '',
-      result ? text(result.ai_remark, '') : '',
-    ])
-
-    if (acceptance) {
-      const findingByCriterion = new Map(
-        acceptance.findings.map((finding) => [finding.criterionId, finding]),
-      )
-      for (const point of acceptance.criteria) {
-        const finding = findingByCriterion.get(point.id)
-        criterionRows.push([
-          story.story_code,
-          point.id,
-          text(point.description),
-          point.needsClarification ? '是' : '否',
-          verdictLabel(finding?.verdict ?? null),
-          text(finding?.reason, ''),
-          finding?.evidenceIds.length ?? 0,
-          finding?.disagreement ? '是' : '否',
-        ])
-      }
-      for (const risk of acceptance.risks) {
-        riskRows.push([
-          story.story_code,
-          risk.id,
-          text(risk.title),
-          certaintyLabels[risk.certainty] ?? risk.certainty,
-          originLabels[risk.origin] ?? risk.origin,
-          text(risk.trigger, ''),
-          text(risk.impact, ''),
-          risk.criterionIds.join('、'),
-          risk.evidenceIds.length,
-          text(risk.reviewNote, ''),
-        ])
-      }
-    }
-
-    for (const item of report.evidence) {
-      evidenceRows.push([
-        story.story_code,
-        item.repository_name,
-        text(item.commit_sha, ''),
-        item.file_path,
-        text(item.symbol_name, ''),
-        item.start_line,
-        item.end_line,
-        item.evidence_type,
-        text(item.evidence_summary, ''),
-        text(item.description, ''),
-      ])
-    }
-  }
-
-  return [
-    { sheet: '批次信息', rows: batchRows },
-    { sheet: '需求评审', rows: reviewRows },
-    { sheet: '验收点', rows: criterionRows },
-    { sheet: '风险', rows: riskRows },
-    { sheet: '代码证据', rows: evidenceRows },
-  ]
-}
-
-// ---------------------------------------------------------------------------
 // 下载入口（本文件里唯一有副作用的两个函数）
 // ---------------------------------------------------------------------------
 
-export async function downloadReviewReportsXlsx(reports: ReviewReport[], meta: ReviewReportMeta) {
-  const sheets = buildReviewReportSheets(reports, meta).map((item) => sheetOf(item.sheet, item.rows))
-  // 与 AI 模板下载同一条路径（`toFile` 自己处理浏览器下载），不自己拼 anchor。
-  await writeXlsxFile(sheets).toFile(workbookFileName(meta, reports.length))
-}
-
-/** 浏览器下载一个 Blob。单独抽出来是为了让两个入口共用同一套清理逻辑。 */
+/** 浏览器下载一个 Blob。 */
 function saveBlob(blob: Blob, fileName: string) {
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
