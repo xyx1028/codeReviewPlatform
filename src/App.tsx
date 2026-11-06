@@ -67,6 +67,16 @@ import {
   downloadReviewReportsZip,
   reportScopeLabel,
 } from './lib/review-report'
+// V1.71：完成度的唯一口径，列表 / 详情 / 报告三处共用。
+import {
+  acceptanceCompleteness,
+  completenessBand,
+  completenessBandOptions,
+  completenessTagColor,
+  completenessTone,
+  completenessTooltip,
+  type AcceptanceCompleteness,
+} from './lib/acceptance-completeness'
 import { StoryBoardPage } from './pages/StoryBoardPage'
 // V1.23：产品代码问答首页。default export（页面内部自成一体，没有对外的子组件）。
 import CodeQaPage from './pages/CodeQaPage'
@@ -3517,10 +3527,37 @@ function AiResultPage({ batchId, canManage }: { batchId: string; canManage: bool
   )
 }
 
+/**
+ * 评审列表与详情页共用的完成度展示。
+ *
+ * 两段文字都必要：百分比回答"做了多少"，下面那行回答"基于几个验收点、还有几个待确认"。
+ * 只给百分比的话，2 项里 1 项已实现（50%）和 20 项里 10 项已实现（50%）无法区分。
+ */
+function CompletenessCell({ value, analyzed }: { value: AcceptanceCompleteness | null; analyzed: boolean }) {
+  // 没有逐项验收结论的两种情况必须分开说：一种是还没分析，一种是分析过但属于
+  // V1.43 之前的历史格式。都写成「未分析」会让人以为任务没跑。
+  if (!value) return <Tag>{analyzed ? '历史报告' : '未分析'}</Tag>
+
+  return (
+    <Tooltip title={completenessTooltip(value)}>
+      <span className="completeness-metric">
+        <span className="completeness-metric__value" style={{ color: completenessTone(value.percent) }}>{value.percent}%</span>
+        <span className="completeness-metric__track">
+          <span className="completeness-metric__fill" style={{ width: `${value.percent}%`, background: completenessTone(value.percent) }} />
+        </span>
+        <span className="completeness-metric__caption">
+          {value.total} 项{value.counts.UNCERTAIN > 0 ? ` · 待确认 ${value.counts.UNCERTAIN}` : ''}
+        </span>
+      </span>
+    </Tooltip>
+  )
+}
+
 function ReviewListPage({ batchId }: { batchId: string }) {
-  const [localColumnFilters, setLocalColumnFilters] = useState<Record<'storyCode' | 'storyName' | 'evidence' | 'humanStatus', string[] | null>>({
+  const [localColumnFilters, setLocalColumnFilters] = useState<Record<'storyCode' | 'storyName' | 'completeness' | 'evidence' | 'humanStatus', string[] | null>>({
     storyCode: null,
     storyName: null,
+    completeness: null,
     evidence: null,
     humanStatus: null,
   })
@@ -3588,7 +3625,14 @@ function ReviewListPage({ batchId }: { batchId: string }) {
     return workspaceQuery.data.stories.map((story) => {
       const result = resultByStory.get(story.id) ?? null
       const review = latestReviewByStory.get(story.id) ?? null
-      return { story, result, review, evidenceCount: result ? evidenceCountByResult.get(result.id) ?? 0 : 0 }
+      return {
+        story,
+        result,
+        review,
+        evidenceCount: result ? evidenceCountByResult.get(result.id) ?? 0 : 0,
+        /** 完成度在这里一次算完：列的渲染、排序、筛选都读同一个值，不会各算一遍。 */
+        completeness: acceptanceCompleteness(result),
+      }
     })
   }, [workspaceQuery.data])
 
@@ -3614,9 +3658,10 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       if (testHandler && !splitPeople(row.story.test_handlers).includes(testHandler)) return false
       if (status && storyStatusName(row.story) !== status) return false
       if (verdict && (row.result?.verdict ?? 'UNANALYZED') !== verdict) return false
-      const { storyCode, storyName, evidence, humanStatus } = localColumnFilters
+      const { storyCode, storyName, completeness, evidence, humanStatus } = localColumnFilters
       if (storyCode?.length && !storyCode.includes(row.story.story_code)) return false
       if (storyName?.length && !storyName.includes(row.story.story_name)) return false
+      if (completeness?.length && !completeness.includes(completenessBand(row.completeness?.percent ?? null))) return false
       if (evidence?.length && !evidence.includes(String(row.evidenceCount))) return false
       if (humanStatus?.length) {
         const reviewed = Boolean(row.review)
@@ -3751,18 +3796,23 @@ function ReviewListPage({ batchId }: { batchId: string }) {
       render: (_value, row) => <Tag>{storyStatusName(row.story)}</Tag>,
     },
     {
-      title: 'AI判断',
-      key: 'verdict',
-      width: 120,
-      filters: [
-        ...aiVerdictOptions.map((option) => ({ text: option.label, value: option.value })),
-        { text: '未分析', value: 'UNANALYZED' },
-      ],
-      filteredValue: verdict ? [verdict] : null,
-      filterMultiple: false,
-      render: (_value, row) => row.result?.verdict
-        ? <Tag color={aiTagColors[row.result.verdict]}>{aiVerdictLabels[row.result.verdict]}</Tag>
-        : <Tag>未分析</Tag>,
+      /*
+       * 完成度取代原来的「AI判断」列。
+       *
+       * 换掉的理由是信息损失：需求级 verdict 由验收点一票否决派生（任一验收点
+       * UNCERTAIN 即整条「无法判断」），所以"11 项里 7 项已实现"和"11 项全未实现"
+       * 在列表里长得一模一样。完成度把逐点结论重新聚合成可比、可排序的数。
+       *
+       * 列头不再提供 AI 判断下拉，但 `?verdict=` 这个 URL 筛选照旧生效（看板「AI 判断
+       * 分布」是靠它下钻的），工具条会把它显示成一个可关闭的标签。
+       */
+      title: '完成度',
+      key: 'completeness',
+      width: 150,
+      sorter: (a, b) => (a.completeness?.percent ?? -1) - (b.completeness?.percent ?? -1),
+      filters: completenessBandOptions.map((option) => ({ text: option.label, value: option.value })),
+      filteredValue: localColumnFilters.completeness,
+      render: (_value, row) => <CompletenessCell value={row.completeness} analyzed={Boolean(row.result?.verdict)} />,
     },
     {
       title: '证据',
@@ -3805,6 +3855,20 @@ function ReviewListPage({ batchId }: { batchId: string }) {
         </span>
         {effectiveSelectedIds.length > 0 ? (
           <Button type="link" size="small" onClick={() => setSelectedStoryIds([])}>清空勾选</Button>
+        ) : null}
+        {/*
+          * 从统计看板「AI 判断分布」下钻过来时（URL 带 `?verdict=`），列头已经没有这个
+          * 下拉了。不把它显示出来，就会出现"明明只剩 3 条、却看不出按什么筛的"。
+          */}
+        {verdict ? (
+          <Tag
+            className="review-list-toolbar__filter"
+            color={verdict === 'UNANALYZED' ? 'default' : aiTagColors[verdict]}
+            closable
+            onClose={() => updateFilters({ verdict: undefined })}
+          >
+            AI判断：{verdict === 'UNANALYZED' ? '未分析' : aiVerdictLabels[verdict]}
+          </Tag>
         ) : null}
         <Tooltip title="导出一个 ZIP：每条需求一个 Markdown 报告，另附一份汇总">
           <Button
@@ -3872,15 +3936,17 @@ function ReviewListPage({ batchId }: { batchId: string }) {
           const normalize = (values: unknown) => Array.isArray(values) ? values.map(String) : null
           const storyCode = normalize(filters.storyCode)
           const storyName = normalize(filters.storyName)
+          const completeness = normalize(filters.completeness)
           const evidence = normalize(filters.evidence)
           const humanStatus = normalize(filters.humanStatus)
-          setLocalColumnFilters({ storyCode, storyName, evidence, humanStatus })
+          setLocalColumnFilters({ storyCode, storyName, completeness, evidence, humanStatus })
           updateFilters({
             owner: normalize(filters.owner)?.[0],
             requirementHandler: normalize(filters.requirementHandler)?.[0],
             testHandler: normalize(filters.testHandler)?.[0],
             status: normalize(filters.status)?.[0],
-            verdict: normalize(filters.verdict)?.[0],
+            // verdict 不在这里清：列头已经没有这个下拉，normalize 会返回 null，
+            // 跟着写回去等于一动表格就把看板下钻带来的筛选抹掉。
           })
         }}
       />
@@ -3998,6 +4064,17 @@ function HumanReviewPanel({ batchId, detail }: { batchId: string; detail: Review
     saveMutation.mutate({ values, goNext })
   }
 
+  /*
+   * 顶部那一行展示什么，取决于这条结果有没有逐项验收结论。
+   *
+   * 有（V1.43 之后的批次）：展示完成度。原来放在这里的「AI 原判断」是一票否决派生值，
+   * 「置信度」则在工作流模式下被平台显式写成 NULL（worker/src/index.ts 的
+   * `toAgentResultRow`），永远显示「未填写」—— 两个都不如完成度能说明情况。
+   *
+   * 没有（历史批次）：保留原来的 AI 原判断 + 置信度，那是当时唯一的结论形态。
+   */
+  const completeness = acceptanceCompleteness(detail.aiResult)
+
   return (
     <Card className="review-decision-card" title="人工结论">
       <Space direction="vertical" className="page-stack">
@@ -4005,12 +4082,26 @@ function HumanReviewPanel({ batchId, detail }: { batchId: string; detail: Review
         {detail.aiResult ? (
           <>
             <div className="review-decision-context">
-              <Text type="secondary">AI 原判断</Text>
-              <Tag color={aiVerdictColor(detail.aiResult.verdict)}>{detail.aiResult.verdict ? aiVerdictLabels[detail.aiResult.verdict] : '未分析'}</Tag>
-              {detail.humanReview ? <Text type="secondary">上次保存：{new Date(detail.humanReview.reviewed_at).toLocaleString()}</Text> : null}
-              <span className="review-decision-confidence">
-                <BaselineMetaChip label="置信度" value={detail.aiResult.confidence === null ? '未填写' : `${detail.aiResult.confidence}%`} />
-              </span>
+              {completeness ? (
+                <>
+                  <Text type="secondary">完成度</Text>
+                  <Tooltip title={completenessTooltip(completeness)}>
+                    <Tag color={completenessTagColor(completeness.percent)}>{completeness.percent}%</Tag>
+                  </Tooltip>
+                  <Text type="secondary">
+                    {completeness.total} 个验收点{completeness.counts.UNCERTAIN > 0 ? ` · 待确认 ${completeness.counts.UNCERTAIN}` : ''}
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <Text type="secondary">AI 原判断</Text>
+                  <Tag color={aiVerdictColor(detail.aiResult.verdict)}>{detail.aiResult.verdict ? aiVerdictLabels[detail.aiResult.verdict] : '未分析'}</Tag>
+                  <BaselineMetaChip label="置信度" value={detail.aiResult.confidence === null ? '未填写' : `${detail.aiResult.confidence}%`} />
+                </>
+              )}
+              {detail.humanReview ? (
+                <Text type="secondary" className="review-decision-aside">上次保存：{new Date(detail.humanReview.reviewed_at).toLocaleString()}</Text>
+              ) : null}
             </div>
             <Form form={form} layout="vertical" disabled={detail.readOnly}>
               <Form.Item name="result" label="核验结论" rules={[{ required: true, message: '请选择人工结论' }]}>

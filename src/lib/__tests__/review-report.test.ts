@@ -291,7 +291,10 @@ describe('Markdown 报告', () => {
     expect(text).toContain('# US-2026-042424 【内置连接器】给前端增加 nacos 标识')
     expect(text).toContain('- 分析模型：glm5.3-flash')
     expect(text).toContain('- 总体判断：部分实现')
-    expect(text).toContain('- 置信度：80%')
+    // 有逐项验收结论时写完成度而不是置信度：工作流版本的置信度一律是 NULL。
+    // 1 个已实现 + 1 个不确定 = (1 + 0.25) / 2 = 62.5 → 63%
+    expect(text).toContain('- 完成度：63%（已实现 1 / 部分实现 0 / 未实现 0 / 不确定 1）')
+    expect(text).not.toContain('- 置信度：')
     expect(text).toContain('核心链路已实现，缺少异常分支。')
   })
 
@@ -338,6 +341,9 @@ describe('Markdown 报告', () => {
     expect(output).toContain('这是历史格式的报告')
     expect(output).toContain('#### 已实现内容')
     expect(output).toContain('已实现 A')
+    // 历史批次算不出完成度，但当年的置信度是真数据，必须留着。
+    expect(output).toContain('- 置信度：80%')
+    expect(output).not.toContain('- 完成度：')
     // 没有结构化报告就不该出现「独立复核」这一节（说明句里提到它是另一回事）。
     expect(output).not.toContain('### 独立复核')
     expect(output).not.toContain('### 验收点')
@@ -358,5 +364,23 @@ describe('Markdown 报告', () => {
     expect(summary).toContain('- 未分析：1 条')
     expect(summary).toContain('- 人工待确认：2 条')
     expect(summary).toContain('a\\|b')
+  })
+
+  it('汇总表的完成度列与平均完成度只统计有逐项验收结论的需求', () => {
+    const summary = renderReviewSummaryMarkdown(
+      buildReviewReports({
+        stories: [story(), story({ id: 'story-2', story_code: 'US-2' })],
+        // 第一条有验收点结论（50%），第二条完全没有 AI 结果。
+        results: [result({ acceptance_review: acceptanceReport() })],
+        evidence: [],
+        humanReviews: [],
+      }),
+      META,
+    )
+    expect(summary).toContain('| 编码 | 需求名称 | 完成度 | AI 判断 | 证据 | 人工结论 |')
+    expect(summary).toContain('| US-2026-042424 | 【内置连接器】给前端增加 nacos 标识 | 63% |')
+    // 未分析的那条写「—」而不是 0%，也不能把它平均进去把分母做大。
+    expect(summary).toContain('| US-2 | 【内置连接器】给前端增加 nacos 标识 | — |')
+    expect(summary).toContain('- 平均完成度：63%（基于 1 条有逐项验收结论的需求）')
   })
 })

@@ -23,6 +23,8 @@
 
 import { zipSync, strToU8 } from 'fflate'
 import { aiVerdictLabels, humanReviewLabels } from './labels'
+// V1.71：完成度与页面共用同一份口径，报告里的百分比不允许自己再算一遍。
+import { acceptanceCompletenessOf, averageCompleteness, completenessBreakdown } from './acceptance-completeness'
 import type {
   AiCodeEvidence,
   AiImportRecord,
@@ -259,6 +261,7 @@ function evidenceLines(items: AiCodeEvidence[], indent = ''): string[] {
 /** 一条需求的 Markdown 报告。 */
 export function renderReviewReportMarkdown(report: ReviewReport, meta: ReviewReportMeta): string {
   const { story, result, review, acceptance } = report
+  const completeness = acceptanceCompletenessOf(acceptance)
   const evidenceById = new Map(report.evidence.map((item) => [item.evidence_id || item.id, item]))
   const pick = (ids: readonly string[]) =>
     ids.map((id) => evidenceById.get(id)).filter((item): item is AiCodeEvidence => item !== undefined)
@@ -280,7 +283,11 @@ export function renderReviewReportMarkdown(report: ReviewReport, meta: ReviewRep
     '## AI 评审结论',
     '',
     `- 总体判断：${verdictLabel(result?.verdict ?? null)}`,
-    `- 置信度：${result?.confidence === null || result?.confidence === undefined ? EMPTY : `${result.confidence}%`}`,
+    // 完成度与置信度二选一：V1.43 之后的批次置信度一律为 NULL（平台不再要求模型自评），
+    // 写一行恒为空的「置信度：—」只会让人以为数据丢了。
+    ...(completeness
+      ? [`- 完成度：${completeness.percent}%（${completenessBreakdown(completeness)}）`]
+      : [`- 置信度：${result?.confidence === null || result?.confidence === undefined ? EMPTY : `${result.confidence}%`}`]),
     `- 代码证据：${report.evidence.length} 条`,
     '',
     `### 分析摘要\n\n${result ? text(result.summary, '（无摘要）') : `（${NOT_ANALYZED}）`}`,
@@ -380,6 +387,10 @@ export function renderReviewSummaryMarkdown(reports: ReviewReport[], meta: Revie
     const label = verdictLabel(report.result?.verdict ?? null)
     counts.set(label, (counts.get(label) ?? 0) + 1)
   }
+  const completenessByReport = new Map(reports.map((report) => [report, acceptanceCompletenessOf(report.acceptance)]))
+  // 平均值只算有逐项验收结论的需求，并把分母写出来：把"未分析"当 0% 平均进去，
+  // 会得到一个越拖越低、谁也不认的数。
+  const average = averageCompleteness([...completenessByReport.values()])
   const pending = reports.filter((report) => report.review === null).length
   return [
     `# 评审报告汇总（${reports.length} 条需求）`,
@@ -389,23 +400,22 @@ export function renderReviewSummaryMarkdown(reports: ReviewReport[], meta: Revie
     '## 结论分布',
     '',
     ...[...counts.entries()].map(([label, count]) => `- ${label}：${count} 条`),
+    ...(average.counted > 0 ? [`- 平均完成度：${average.percent}%（基于 ${average.counted} 条有逐项验收结论的需求）`] : []),
     `- 人工待确认：${pending} 条`,
     '',
     '## 需求清单',
     '',
-    '| 编码 | 需求名称 | AI 判断 | 置信度 | 证据 | 人工结论 |',
+    '| 编码 | 需求名称 | 完成度 | AI 判断 | 证据 | 人工结论 |',
     '| --- | --- | --- | --- | --- | --- |',
     ...reports.map((report) => {
-      const confidence =
-        report.result?.confidence === null || report.result?.confidence === undefined
-          ? EMPTY
-          : `${report.result.confidence}%`
+      const completeness = completenessByReport.get(report) ?? null
+      const completenessText = completeness === null ? EMPTY : `${completeness.percent}%`
       const human = report.review
         ? humanReviewLabels[report.review.result] ?? report.review.result
         : NOT_REVIEWED
       // 需求名称里的 | 会把 Markdown 表格列切错。
       const name = report.story.story_name.replace(/\|/g, '\\|')
-      return `| ${report.story.story_code} | ${name} | ${verdictLabel(report.result?.verdict ?? null)} | ${confidence} | ${report.evidence.length} 条 | ${human} |`
+      return `| ${report.story.story_code} | ${name} | ${completenessText} | ${verdictLabel(report.result?.verdict ?? null)} | ${report.evidence.length} 条 | ${human} |`
     }),
     '',
   ].join('\n')

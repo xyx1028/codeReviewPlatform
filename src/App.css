@@ -475,6 +475,11 @@ a.dashboard-distribution-item:focus-visible {
   font-size: 13px;
 }
 
+/* 容器已有 gap，Tag 自带的右外边距会让这个标签看起来离下载按钮更近。 */
+.review-list-toolbar__filter {
+  margin-inline-end: 0;
+}
+
 /* 按钮固定靠右：中间留白把"范围说明"和"下载"分到两端，范围才不会被当成按钮的副标题。 */
 .review-list-toolbar__download {
   margin-left: auto;
@@ -782,8 +787,48 @@ a.dashboard-distribution-item:focus-visible {
   background: #f8fafc;
 }
 
-.review-decision-confidence {
+.review-decision-aside {
   margin-inline-start: auto;
+}
+
+/*
+ * 完成度单元格（V1.71）。
+ *
+ * 和看板的 `.group-metric` 同一套视觉语言：数字 + 细进度条。表格行高有限，进度条
+ * 只有 4px，承担的是"一眼扫出高低"，精确值靠数字和 Tooltip。
+ */
+.completeness-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.completeness-metric__value {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.completeness-metric__track {
+  overflow: hidden;
+  height: 4px;
+  border-radius: 999px;
+  background: #eef2f7;
+}
+
+.completeness-metric__fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+}
+
+.completeness-metric__caption {
+  color: #94a3b8;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
 }
 
 .review-decision-options {
