@@ -76,7 +76,12 @@ function text(value: unknown): string | null {
   return trimmed === '' ? null : trimmed
 }
 
-async function getJson(url: string, signal?: AbortSignal): Promise<unknown> {
+async function getJson(
+  url: string,
+  signal?: AbortSignal,
+  request: 'list' | 'detail' | 'attachments' = 'list',
+): Promise<unknown> {
+  const timeoutMs = request === 'list' ? 15_000 : 45_000
   const controller = new AbortController()
   let timedOut = false
   const cancel = () => controller.abort(signal?.reason)
@@ -85,7 +90,7 @@ async function getJson(url: string, signal?: AbortSignal): Promise<unknown> {
   const timer = setTimeout(() => {
     timedOut = true
     controller.abort()
-  }, 15_000)
+  }, timeoutMs)
   try {
     const response = await fetch(url, {
       signal: controller.signal,
@@ -108,7 +113,9 @@ async function getJson(url: string, signal?: AbortSignal): Promise<unknown> {
     if (signal?.aborted) throw error
     if (timedOut) {
       throw new LinkyLiveError(
-        'Linky 响应超过 15 秒。跨全部项目组查询可能较慢，可输入完整项目组名称后按组查询。',
+        request === 'list'
+          ? 'Linky 响应超过 15 秒。跨全部项目组查询可能较慢，可输入完整项目组名称后按组查询。'
+          : `Linky ${request === 'detail' ? '需求详情' : '附件列表'}响应超过 45 秒，请稍后重新打开详情重试。`,
         'TIMEOUT',
       )
     }
@@ -183,10 +190,13 @@ export async function fetchLinkyStories(
 export async function fetchLinkyStoryDetail(
   storyCode: string,
   signal?: AbortSignal,
+  issueId?: string,
 ): Promise<LinkyLiveDetail> {
+  // 列表已提供 issue UUID；直接定位，避免上游按格式化编号逐个工作区查找。
   const payload = await getJson(
-    `${linkyApiBase()}/stories/${encodeURIComponent(storyCode)}`,
+    `${linkyApiBase()}/stories/${encodeURIComponent(issueId ?? storyCode)}`,
     signal,
+    'detail',
   )
   const record = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>
   const fieldValues = (typeof record.field_values === 'object' && record.field_values !== null
@@ -219,10 +229,13 @@ export async function fetchLinkyStoryDetail(
 export async function fetchLinkyAttachments(
   storyCode: string,
   signal?: AbortSignal,
+  issueId?: string,
 ): Promise<LinkyLiveAttachment[]> {
+  const storyId = encodeURIComponent(issueId ?? storyCode)
   const payload = await getJson(
-    `${linkyApiBase()}/stories/${encodeURIComponent(storyCode)}/attachments`,
+    `${linkyApiBase()}/stories/${storyId}/attachments`,
     signal,
+    'attachments',
   )
   const record = (typeof payload === 'object' && payload !== null ? payload : {}) as Record<string, unknown>
   const items = Array.isArray(record.items) ? record.items : []
@@ -241,7 +254,7 @@ export async function fetchLinkyAttachments(
       contentType: text(item.content_type),
       sizeBytes: typeof item.size_bytes === 'number' ? item.size_bytes : null,
       // 刻意用平台的下载端点而不是上游返回的 download_url：后者实测直连返回 401。
-      downloadUrl: `${linkyApiBase()}/stories/${encodeURIComponent(storyCode)}/attachments/${encodeURIComponent(id)}/download`,
+      downloadUrl: `${linkyApiBase()}/stories/${storyId}/attachments/${encodeURIComponent(id)}/download`,
     })
   }
   return result

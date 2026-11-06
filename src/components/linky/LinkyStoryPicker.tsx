@@ -127,7 +127,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
   const [statusLabel, setStatusLabel] = useState<string | null>(null)
   const [assigneeName, setAssigneeName] = useState<string | null>(null)
   const [keyword, setKeyword] = useState('')
-  const [detailCode, setDetailCode] = useState<string | null>(null)
+  const [detailStory, setDetailStory] = useState<LinkyLiveStory | null>(null)
   /**
    * 分页受控。
    *
@@ -161,15 +161,15 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
   })
 
   const detailQuery = useQuery({
-    queryKey: ['linky-live-detail', detailCode],
-    queryFn: ({ signal }) => fetchLinkyStoryDetail(detailCode as string, signal),
-    enabled: detailCode !== null,
+    queryKey: ['linky-live-detail', detailStory?.issueId],
+    queryFn: ({ signal }) => fetchLinkyStoryDetail(detailStory!.storyCode, signal, detailStory!.issueId),
+    enabled: detailStory !== null,
     retry: false,
   })
   const attachmentsQuery = useQuery({
-    queryKey: ['linky-live-attachments', detailCode],
-    queryFn: ({ signal }) => fetchLinkyAttachments(detailCode as string, signal),
-    enabled: detailCode !== null,
+    queryKey: ['linky-live-attachments', detailStory?.issueId],
+    queryFn: ({ signal }) => fetchLinkyAttachments(detailStory!.storyCode, signal, detailStory!.issueId),
+    enabled: detailStory !== null,
     retry: false,
   })
 
@@ -410,7 +410,7 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
             type="link"
             onClick={(event) => {
               event.stopPropagation()
-              setDetailCode(row.storyCode)
+              setDetailStory(row)
             }}
           >
             详情
@@ -665,9 +665,9 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
 
       <Drawer
         width={720}
-        open={detailCode !== null}
-        onClose={() => setDetailCode(null)}
-        title={detailCode ?? '需求详情'}
+        open={detailStory !== null}
+        onClose={() => setDetailStory(null)}
+        title={detailStory?.storyCode ?? '需求详情'}
       >
         {detailQuery.isLoading ? (
           <Spin />
@@ -683,8 +683,8 @@ export function LinkyStoryPicker(props: LinkyStoryPickerProps) {
         ) : (
           <Space direction="vertical" size="middle" className="full-width">
             {(() => {
-              const story = all.find((entry) => entry.storyCode === detailCode)
-              if (story === undefined) return null
+              const story = detailStory
+              if (story === null) return null
               return (
                 <Descriptions column={1} size="small" bordered>
                   <Descriptions.Item label="标题">{story.title}</Descriptions.Item>
